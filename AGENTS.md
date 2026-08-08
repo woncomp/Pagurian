@@ -19,16 +19,18 @@ native Win32 context menu, (2) injects a borderless window into the Windows
 taskbar (child of `Shell_TrayWnd`) that is a **horizontal container of widget
 cells**: the first cell replicates the native Windows 11 datetime widget — two
 centered 12-DIP lines (time over date, current-culture short formats, updated
-every second) — and it is followed by **one cell per tracked GitHub Copilot CLI
-session** (GitHub icon + colored status text), all blending into the taskbar,
-with the native rounded translucent hover/pressed highlight per cell and
-light/dark text adaptation, (3) opens a small popup (icon + "Hello World" +
-button → Win32 MessageBox) when clicking the clock cell, and (4) registers a
-**Copilot CLI hook** while running: hook events flow in over a named pipe, each
-new session gets a taskbar cell showing its status (`Idle`/`Working`/`Blocked`,
-color-coded; `sessionEnd` removes the cell), hovering a session cell shows a
-tooltip with the session name, and clicking it opens a popup with the name,
-status, and the last received event dumped as JSON.
+every second) — followed by fixed **CPU and memory** cells showing percentage +
+thin gauge, and then **one cell per tracked GitHub Copilot CLI session**
+(GitHub icon + colored status text), all blending into the taskbar, with the
+native rounded translucent hover/pressed highlight per cell and light/dark text
+adaptation, (3) opens a small popup (icon + "Hello World" + button → Win32
+MessageBox) when clicking the clock cell, (4) opens detail popups for the CPU
+and memory cells, and (5) registers a **Copilot CLI hook** while running: hook
+events flow in over a named pipe, each new session gets a taskbar cell showing
+its status (`Idle`/`Working`/`Blocked`, color-coded; `sessionEnd` removes the
+cell), hovering a session cell shows a tooltip with the session name, and
+clicking it opens a popup with the name, status, and the last received event
+dumped as JSON.
 
 ## High-level architecture
 
@@ -37,16 +39,18 @@ components: `Component.Render()`, `useState`-style hooks, `static Factories` hel
 
 - `Program.cs` — single entry. First statement is the **bridge-mode intercept**:
   `Pagurian.exe --hook <event>` runs `CopilotHookBridge.Run(event)` and returns
-  before ever touching WinUI (see the Copilot hook bullets below). Otherwise
-  `ReactorApp.Run(startup)` where startup sets `ShutdownPolicy.Explicit`,
-  installs the Copilot hook file and starts the session tracker, opens the tray
-  icon (`ReactorApp.OpenTrayIcon`, all `ReactorApp` methods are **static**),
-  opens the icon window, then hands both to the controller. Nothing else may
-  own app lifecycle; quitting happens only via the tray menu
-  (`TaskbarController.Stop()` → `CopilotSessionTracker.Stop()` →
-  `CopilotHookInstaller.Uninstall()` → `tray.Close()` → `ReactorApp.Exit(0)` →
-  `Environment.Exit(0)` — the last call is required: `ReactorApp.Exit(0)` alone
-  closes the windows but leaves the process running).
+  before ever touching WinUI or the metrics tracker (see the Copilot hook
+  bullets below). Otherwise `ReactorApp.Run(startup)` where startup sets
+  `ShutdownPolicy.Explicit`, installs the Copilot hook file, starts the
+  session tracker and the system-metrics tracker, opens the tray icon
+  (`ReactorApp.OpenTrayIcon`, all `ReactorApp` methods are **static**), opens
+  the icon window, then hands both to the controller. Nothing else may own app
+  lifecycle; quitting happens only via the tray menu
+  (`TaskbarController.Stop()` → `SystemMetricsTracker.Stop()` →
+  `CopilotSessionTracker.Stop()` → `CopilotHookInstaller.Uninstall()` →
+  `tray.Close()` → `ReactorApp.Exit(0)` → `Environment.Exit(0)` — the last call
+  is required: `ReactorApp.Exit(0)` alone closes the windows but leaves the
+  process running).
 - `TaskbarController.cs` — the heart of the app. A `DispatcherQueueTimer` on
   `ReactorApp.UIDispatcher` polls every 50 ms and does these things:
   1. **Inject/anchor**: parents the icon window into `Shell_TrayWnd` (`SetParent`,
@@ -55,17 +59,17 @@ components: `Component.Render()`, `useState`-style hooks, `static Factories` hel
      restarts. Anchor geometry is derived from the **live taskbar rect**, never
      from the window's `DipScale` (which can lag behind display-topology
      changes): taskbars are 48 DIP thick by design, so `taskbar.Height / 48`
-     doubles as the taskbar's DPI scale, and the widget height is the taskbar
+     doubles as the taskbar's own DPI scale, and the widget height is the taskbar
      thickness minus `2 × WindowInsetYDip` (2 DIP clear top and bottom, so it
      sits slightly inside the taskbar — and can never stick out of it), with
      the position clamped inside the taskbar rect on top of that (a stale
      DPI/rect leaving the widget covering the taskbar's top edge was a real
      bug). The window **width** is `TaskbarIconWindow.TotalWidthDip()` — clock
-     cell + one cell per tracked session — read every tick, so session
-     add/remove resizes the window through the normal `SetWindowPos` path.
-     After anchoring, the controller rebuilds the **per-cell hit-test rects**
-     (`_cellRectsPx`: clock first, then sessions in first-seen order) used by
-     hover/click/tooltip.
+     cell + CPU cell + memory cell + one cell per tracked session — read every
+     tick, so session add/remove resizes the window through the normal
+     `SetWindowPos` path. After anchoring, the controller rebuilds the
+     **per-cell hit-test rects** (`_cellRectsPx`: clock, CPU, memory, then
+     sessions in first-seen order) used by hover/click/tooltip.
   2. **Blend**: the taskbar is translucent, so its apparent color *varies along
      its length* (wallpaper showing through — measured deltas over 25 levels
      across the widget's own width; a single sampled color visibly mismatched
@@ -93,20 +97,23 @@ components: `Component.Render()`, `useState`-style hooks, `static Factories` hel
      4 DIP radius, alpha 0 idle, SubtleFillColorSecondary #0F white / #09 black
      on hover, SubtleFillColorTertiary #0A / #06 while pressed; pressed =
      `GetAsyncKeyState(VK_LBUTTON)` polled while hovering). A theme flip also
-     calls `CopilotSessionTracker.NotifyChanged()` so the per-render status
-     colors (which can't be live-mutated from the controller) refresh.
+     calls `CopilotSessionTracker.NotifyChanged()` and refreshes the CPU/memory
+     gauge accent/track brushes so the per-render status colors stay current.
   4. **Popup/tooltip**: polls `GetCursorPos` + `GetAsyncKeyState(VK_LBUTTON)`
      against the cached per-cell pixel rects; a left-button up→down edge
      (50 ms polling reliably catches physical clicks) inside the clock cell
-     toggles the Hello popup, inside a session cell toggles that session's
-     popup, and a click outside all cells and popups dismisses whichever is
-     open (native flyout style; clicks inside a popup don't dismiss; **one
-     popup at a time** — opening one closes the other). Resting the cursor on
-     a session cell for ~400 ms (8 ticks) opens a `TooltipWindow` with the
-     session name above the cell; leaving the cell or clicking hides it.
+     toggles the Hello popup, inside the CPU or memory cells toggles their
+     detail popups, inside a session cell toggles that session's popup, and a
+     click outside all cells and popups dismisses whichever is open (native
+     flyout style; clicks inside a popup don't dismiss; **one popup at a time**
+     — opening one closes the other). Resting the cursor on a session cell for
+     ~400 ms (8 ticks) opens a `TooltipWindow` with the session name above the
+     cell; leaving the cell or clicking hides it.
+
 - `TaskbarIconWindow.cs` / `HoverPopupWindow.cs` / `SessionPopupWindow.cs` /
-  `TooltipWindow.cs` — Reactor `Component`s plus `CreateSpec()` factories
-  returning their `WindowSpec`. Window chrome comes entirely from `WindowSpec`
+  `CpuMetricsPopupWindow.cs` / `MemoryMetricsPopupWindow.cs` / `TooltipWindow.cs`
+  — Reactor `Component`s plus `CreateSpec()` factories returning their `WindowSpec`.
+ Window chrome comes entirely from `WindowSpec`
   (`Style.None`, `Backdrop`, `CornerStyle.Rounded`, `NoActivate`, …), not from
   content. `TaskbarIconWindow` is the **cell container**: an `HStack` of keyed
   cells — the clock replica (`UseState` + a 1 s `DispatcherQueueTimer` in
@@ -155,6 +162,14 @@ components: `Component.Render()`, `useState`-style hooks, `static Factories` hel
   Working, `permissionRequest` → Blocked; all events update the pretty-printed
   `LastEventDump`. Changes bump `Version` and raise
   `UiChanged` (UI thread) — windows subscribe in `UseEffect` and re-render.
+- `SystemMetricsTracker.cs` — background CPU/memory sampler. Uses
+  `NtQuerySystemInformation` for per-logical-processor CPU, `GlobalMemoryStatusEx`
+  for total physical memory, and per-process `TotalProcessorTime`/`WorkingSet64`
+  for Top 3 rankings. Snapshots are immutable, published on the UI thread with a
+  `Version`/`UiChanged` refresh-counter pattern, and sampled at 1-second cadence
+  while the matching popup is visible and 10-second cadence otherwise.
+- `SystemMetricsColors.cs` — small helper for the CPU (green) and memory (blue)
+  gauge accents and the light/dark taskbar track colors.
 - `TaskbarInterop.cs` — all P/Invoke (no extra packages): `SHAppBarMessage` /
   `FindWindow` / `GetCursorPos` / `MessageBoxW` / `ShowTrayMenu` (see below).
 - `AppAssets.cs` — resolves asset paths from `AppContext.BaseDirectory` (both images are

@@ -2,19 +2,20 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.UI;
 using Microsoft.UI.Reactor;
+using Microsoft.UI.Reactor.Core;
 
 namespace Pagurian;
 
 // Owns the ongoing behaviors of the app:
-//  1. Keeps the icon window — a horizontal container of widget cells (the
-//     clock replica plus one cell per tracked Copilot session) — anchored to
+//  1. Keeps the icon window — a horizontal container of widget cells (clock,
+//     CPU, memory, plus one cell per tracked Copilot session) — anchored to
 //     the left-bottom corner of the taskbar, resizing it as cells come and go.
 //  2. Per-cell interaction by polling the cursor position and left mouse
 //     button: native hover/pressed highlights, a tooltip with the session
 //     name after a short hover dwell, and popups — a click on the clock cell
-//     toggles the Hello popup, a click on a session cell toggles that
-//     session's popup (one popup at a time, native flyout style), an outside
-//     click dismisses whichever is open.
+//     toggles the Hello popup, a click on the CPU or memory cell toggles its
+//     detail popup, a click on a session cell toggles that session's popup,
+//     and an outside click dismisses whichever is open.
 // Runs on a DispatcherQueueTimer on the UI thread.
 //
 // The icon window is injected into the taskbar via SetParent (same approach as
@@ -38,13 +39,16 @@ static class TaskbarController
     private static ReactorWindow? _popupWindow;
     private static ReactorWindow? _sessionPopupWindow;
     private static string? _sessionPopupId;
+    private static ReactorWindow? _metricsPopupWindow;
+    private static SystemMetricKind? _metricsPopupKind;
     private static ReactorWindow? _tooltipWindow;
 
     private static TaskbarInterop.RECT _iconRectPx;
     private static TaskbarInterop.RECT _popupRectPx;
     private static TaskbarInterop.RECT _sessionPopupRectPx;
+    private static TaskbarInterop.RECT _metricsPopupRectPx;
 
-    // Per-cell hit-test rects in physical pixels (ClockWidgetId first, then
+    // Per-cell hit-test rects in physical pixels (clock, CPU, memory, then
     // session ids in tracker order), rebuilt on every anchor pass.
     private static readonly List<(string Id, TaskbarInterop.RECT Rect)> _cellRectsPx = new();
 
@@ -111,9 +115,10 @@ static class TaskbarController
         {
             _isDarkTheme = isDark;
             TaskbarIconWindow.TextBrush.Color = TaskbarIconWindow.TextColorFor(isDark);
-            // Session status colors are per-render brushes, so the container
-            // and any open session popup must re-render to pick the new theme.
+            // Session status and metric gauge colors are per-render brushes, so the
+            // container and any open popup must re-render to pick the new theme.
             CopilotSessionTracker.NotifyChanged();
+            SystemMetricsTracker.NotifyChanged();
         }
 
         if (_hoverWidgetId != null)
@@ -414,14 +419,20 @@ static class TaskbarController
             Bottom = (int)(yPx + winH),
         };
 
-        // Per-cell hit-test rects, left to right: the clock cell first, then
-        // one cell per tracked Copilot session in first-seen order (the same
-        // order the window renders them).
+        // Per-cell hit-test rects, left to right: the clock cell, the CPU and
+        // memory cells, then one cell per tracked Copilot session in first-seen
+        // order (the same order the window renders them).
         _cellRectsPx.Clear();
         var cellLeft = xPx;
         _cellRectsPx.Add((TaskbarIconWindow.ClockWidgetId, CellRect(cellLeft, yPx,
             TaskbarIconWindow.ClockCellWidthDip * scale, winH)));
         cellLeft += TaskbarIconWindow.ClockCellWidthDip * scale;
+        _cellRectsPx.Add((TaskbarIconWindow.CpuWidgetId, CellRect(cellLeft, yPx,
+            TaskbarIconWindow.CpuCellWidthDip * scale, winH)));
+        cellLeft += TaskbarIconWindow.CpuCellWidthDip * scale;
+        _cellRectsPx.Add((TaskbarIconWindow.MemoryWidgetId, CellRect(cellLeft, yPx,
+            TaskbarIconWindow.MemoryCellWidthDip * scale, winH)));
+        cellLeft += TaskbarIconWindow.MemoryCellWidthDip * scale;
         foreach (var session in CopilotSessionTracker.Sessions)
         {
             _cellRectsPx.Add((session.SessionId, CellRect(cellLeft, yPx,
@@ -534,7 +545,11 @@ static class TaskbarController
             _tooltipHoverTicks = 0;
             HideTooltip();
         }
-        else if (hoverId != null && hoverId != TaskbarIconWindow.ClockWidgetId && !AnyPopupVisible())
+        else if (hoverId != null
+                 && hoverId != TaskbarIconWindow.ClockWidgetId
+                 && hoverId != TaskbarIconWindow.CpuWidgetId
+                 && hoverId != TaskbarIconWindow.MemoryWidgetId
+                 && !AnyPopupVisible())
         {
             _tooltipHoverTicks++;
             if (_tooltipHoverTicks == TooltipDwellTicks)
@@ -550,6 +565,7 @@ static class TaskbarController
 
         if (hoverId == TaskbarIconWindow.ClockWidgetId)
         {
+            HideMetricsPopup();
             HideSessionPopup();
             var popup = _popupWindow;
             if (popup is { IsVisible: true })
@@ -557,10 +573,25 @@ static class TaskbarController
             else
                 EnsurePopupVisible();
         }
+        else if (hoverId == TaskbarIconWindow.CpuWidgetId)
+        {
+            HideSessionPopup();
+            if (_popupWindow is { IsVisible: true })
+                _popupWindow.Hide();
+            ToggleMetricsPopup(SystemMetricKind.Cpu, hoverId);
+        }
+        else if (hoverId == TaskbarIconWindow.MemoryWidgetId)
+        {
+            HideSessionPopup();
+            if (_popupWindow is { IsVisible: true })
+                _popupWindow.Hide();
+            ToggleMetricsPopup(SystemMetricKind.Memory, hoverId);
+        }
         else if (hoverId != null)
         {
             if (_popupWindow is { IsVisible: true })
                 _popupWindow.Hide();
+            HideMetricsPopup();
             if (_sessionPopupId == hoverId && _sessionPopupWindow is { IsVisible: true })
                 HideSessionPopup(); // clicked its cell again: toggle off
             else
@@ -572,11 +603,15 @@ static class TaskbarController
                 helloPopup.Hide();
             if (_sessionPopupWindow is { IsVisible: true } && !_sessionPopupRectPx.Contains(cursor))
                 HideSessionPopup();
+            if (_metricsPopupWindow is { IsVisible: true } && !_metricsPopupRectPx.Contains(cursor))
+                HideMetricsPopup();
         }
     }
 
     private static bool AnyPopupVisible() =>
-        _popupWindow is { IsVisible: true } || _sessionPopupWindow is { IsVisible: true };
+        _popupWindow is { IsVisible: true }
+        || _sessionPopupWindow is { IsVisible: true }
+        || _metricsPopupWindow is { IsVisible: true };
 
     // Shows the session-name tooltip above the session's cell (below it when
     // the taskbar is at the screen's top edge).
@@ -648,6 +683,59 @@ static class TaskbarController
         try { _sessionPopupWindow?.Close(); } catch { /* window may already be gone */ }
         _sessionPopupWindow = null;
         _sessionPopupId = null;
+    }
+
+    private static void ToggleMetricsPopup(SystemMetricKind kind, string cellId)
+    {
+        if (_metricsPopupWindow is { IsVisible: true } && _metricsPopupKind == kind)
+        {
+            HideMetricsPopup();
+            return;
+        }
+
+        HideMetricsPopup();
+        var cell = CellRectPx(cellId);
+        if (cell == null || _iconWindow == null)
+            return;
+
+        var scale = ScaleOf(_iconWindow);
+        var (popupW, popupH) = kind == SystemMetricKind.Cpu
+            ? (CpuMetricsPopupWindow.WindowWidthDip, CpuMetricsPopupWindow.WindowHeightDip)
+            : (MemoryMetricsPopupWindow.WindowWidthDip, MemoryMetricsPopupWindow.WindowHeightDip);
+
+        var xDip = cell.Value.Left / scale;
+        var yDip = cell.Value.Top / scale - popupH - 6;
+        if (yDip < 0)
+            yDip = cell.Value.Bottom / scale + 6;
+
+        _metricsPopupRectPx = CellRect(xDip * scale, yDip * scale, popupW * scale, popupH * scale);
+
+        var popup = kind == SystemMetricKind.Cpu
+            ? (Component)new CpuMetricsPopupWindow()
+            : new MemoryMetricsPopupWindow();
+        var spec = kind == SystemMetricKind.Cpu
+            ? ((CpuMetricsPopupWindow)popup).CreateSpec((xDip, yDip))
+            : ((MemoryMetricsPopupWindow)popup).CreateSpec((xDip, yDip));
+
+        _metricsPopupWindow = ReactorApp.OpenWindow(spec, () => popup);
+        _metricsPopupWindow.SetSize(popupW, popupH);
+        _metricsPopupWindow.SetPosition(xDip, yDip);
+        if (!_metricsPopupWindow.IsVisible)
+            _metricsPopupWindow.Show();
+        _metricsPopupKind = kind;
+        SystemMetricsTracker.SetPopupVisible(kind, true);
+    }
+
+    private static void HideMetricsPopup()
+    {
+        if (_metricsPopupWindow == null)
+            return;
+
+        try { _metricsPopupWindow.Close(); } catch { /* window may already be gone */ }
+        if (_metricsPopupKind != null)
+            SystemMetricsTracker.SetPopupVisible(_metricsPopupKind.Value, false);
+        _metricsPopupWindow = null;
+        _metricsPopupKind = null;
     }
 
     private static void EnsurePopupVisible()

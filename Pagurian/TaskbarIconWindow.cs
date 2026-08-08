@@ -1,6 +1,11 @@
+using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
+using Microsoft.UI;
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Media;
 using static Microsoft.UI.Reactor.Factories;
 
 namespace Pagurian;
@@ -8,11 +13,12 @@ namespace Pagurian;
 // Borderless window anchored to the left-bottom corner of the taskbar: a
 // horizontal container of widget cells. The first cell replicates the native
 // Windows 11 datetime widget (two centered 12-DIP lines, time over date,
-// current-culture short formats); it is followed by one cell per tracked
-// Copilot session (GitHub icon + colored status text, see
-// CopilotSessionTracker). The window blends into the taskbar via a sampled
-// background gradient, shows the native rounded translucent hover/pressed
-// highlight per cell, and adapts its text color to light/dark taskbars.
+// current-culture short formats); it is followed by the CPU and memory cells
+// (percentage + thin gauge) and then by one cell per tracked Copilot session
+// (GitHub icon + colored status text, see CopilotSessionTracker). The window
+// blends into the taskbar via a sampled background gradient, shows the native
+// rounded translucent hover/pressed highlight per cell, and adapts its text
+// color to light/dark taskbars.
 class TaskbarIconWindow : Component
 {
     // Design sizes in DIPs; the controller scales to physical pixels.
@@ -25,6 +31,12 @@ class TaskbarIconWindow : Component
     public const double WindowHeightDip = 48;
     public const double WindowInsetYDip = 2;
 
+    public const double CpuCellWidthDip = 76;
+    public const double MemoryCellWidthDip = 76;
+
+    public const string CpuWidgetId = "cpu";
+    public const string MemoryWidgetId = "memory";
+
     // Widget id of the clock cell in the controller's hover/click bookkeeping
     // (session cells are identified by their session id).
     public const string ClockWidgetId = "clock";
@@ -33,7 +45,8 @@ class TaskbarIconWindow : Component
     // Read by the controller on every tick, so adding/removing sessions
     // resizes the window through the normal anchor path.
     public static double TotalWidthDip() =>
-        ClockCellWidthDip + CopilotSessionTracker.Sessions.Count * SessionCellWidthDip;
+        ClockCellWidthDip + CpuCellWidthDip + MemoryCellWidthDip
+        + CopilotSessionTracker.Sessions.Count * SessionCellWidthDip;
 
     // Native clock hover visual: a SubtleFill overlay inset from the cell
     // edges with the control corner radius (like every Win11 taskbar button).
@@ -185,17 +198,68 @@ class TaskbarIconWindow : Component
     // Drops cached brushes whose session is gone (sessionEnd removes
     // sessions now, so without this the caches would grow forever). Runs on
     // the UI thread from Render, like every other brush access.
+    private static readonly HashSet<string> BuiltInWidgetIds = new()
+    {
+        ClockWidgetId,
+        CpuWidgetId,
+        MemoryWidgetId,
+    };
+
     private static void PruneBrushCache(
         Dictionary<string, Microsoft.UI.Xaml.Media.SolidColorBrush> brushes)
     {
         foreach (var id in brushes.Keys
-                     .Where(k => k != ClockWidgetId && CopilotSessionTracker.Find(k) == null)
+                     .Where(k => !BuiltInWidgetIds.Contains(k) && CopilotSessionTracker.Find(k) == null)
                      .ToList())
             brushes.Remove(id);
     }
 
     private static string NowTime() => DateTime.Now.ToString("t", CultureInfo.CurrentCulture);
     private static string NowDate() => DateTime.Now.ToString("d", CultureInfo.CurrentCulture);
+
+    private static Element MetricsCell(string widgetId, string label, SystemMetricKind kind, bool isDark)
+    {
+        var snapshot = kind == SystemMetricKind.Cpu
+            ? (object?)SystemMetricsTracker.Cpu
+            : SystemMetricsTracker.Memory;
+
+        int? percent = null;
+        if (snapshot is CpuSnapshot cpu)
+            percent = (int)Math.Round(Math.Clamp(cpu.TotalPercent, 0, 100));
+        else if (snapshot is MemorySnapshot mem)
+            percent = (int)Math.Round(Math.Clamp(mem.UsedPercent, 0, 100));
+
+        var text = percent.HasValue ? $"{label} {percent.Value}%" : $"{label} --%";
+        var accent = kind == SystemMetricKind.Cpu
+            ? SystemMetricsColors.CpuAccent(isDark)
+            : SystemMetricsColors.MemoryAccent(isDark);
+        var track = SystemMetricsColors.GaugeTrack(isDark);
+        var cellWidth = kind == SystemMetricKind.Cpu ? CpuCellWidthDip : MemoryCellWidthDip;
+        var innerWidth = cellWidth - 2 * HoverMarginXDip;
+
+        return (Border(
+                FlexColumn(
+                    TextBlock(text)
+                        .FontSize(ClockFontSizeDip)
+                        .TextAlignment(TextAlignment.Center)
+                        .Width(innerWidth)
+                        .Foreground(TextBrush),
+                    Progress(percent ?? 0)
+                        .Height(3)
+                        .Width(innerWidth - 8)
+                        .Margin(0, 2, 0, 0)
+                        .Set(pb =>
+                        {
+                            pb.Foreground = new SolidColorBrush(accent);
+                            pb.Background = new SolidColorBrush(track);
+                        }))
+                    .VerticalAlignment(VerticalAlignment.Center))
+            with { CornerRadius = HoverCornerRadiusDip })
+            .Background(HoverBrushFor(widgetId))
+            .Width(innerWidth)
+            .Margin(HoverMarginXDip, HoverMarginYDip, HoverMarginXDip, HoverMarginYDip)
+            .WithKey(widgetId);
+    }
 
     public override Element Render()
     {
@@ -234,6 +298,14 @@ class TaskbarIconWindow : Component
             return () => CopilotSessionTracker.UiChanged -= OnChanged;
         }, Array.Empty<object>());
 
+        // Re-render when the CPU/memory snapshots update.
+        UseEffect(() =>
+        {
+            void OnChanged() => setTrackerVersion(SystemMetricsTracker.Version);
+            SystemMetricsTracker.UiChanged += OnChanged;
+            return () => SystemMetricsTracker.UiChanged -= OnChanged;
+        }, Array.Empty<object>());
+
         var isDark = TaskbarController.IsDarkTheme;
 
         // Sessions can vanish (sessionEnd): drop their cached brushes.
@@ -268,6 +340,8 @@ class TaskbarIconWindow : Component
                         .Width(ClockCellWidthDip - 2 * HoverMarginXDip)
                         .Margin(HoverMarginXDip, HoverMarginYDip, HoverMarginXDip, HoverMarginYDip)
                         .WithKey(ClockWidgetId),
+                    MetricsCell(CpuWidgetId, "CPU", SystemMetricKind.Cpu, isDark),
+                    MetricsCell(MemoryWidgetId, "MEM", SystemMetricKind.Memory, isDark),
                     // One cell per tracked Copilot session: GitHub icon +
                     // colored status text, centered as a group.
                     .. CopilotSessionTracker.Sessions.Select(s =>

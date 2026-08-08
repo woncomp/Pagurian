@@ -19,6 +19,7 @@ ReactorApp.Run(_ =>
     // bridge events before any window opens.
     CopilotHookInstaller.Install();
     CopilotSessionTracker.Start();
+    SystemMetricsTracker.Start();
 
     var tray = ReactorApp.OpenTrayIcon(new TrayIconSpec(
         Icon: WindowIcon.FromPath(AppAssets.IconPath),
@@ -41,6 +42,7 @@ ReactorApp.Run(_ =>
         // the windows but leaves this process running, so finish the job once
         // the WinUI unwind has been kicked off.
         TaskbarController.Stop();
+        SystemMetricsTracker.Stop();
         CopilotSessionTracker.Stop();
         CopilotHookInstaller.Uninstall();
         tray.Close();
