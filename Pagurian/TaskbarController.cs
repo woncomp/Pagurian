@@ -388,7 +388,9 @@ static class TaskbarController
         // never stick out of the taskbar, whatever DPI it believes it is on.
         var horizontal = taskbar.Width >= taskbar.Height;
         var scale = (horizontal ? taskbar.Height : taskbar.Width) / TaskbarTrayWindow.WindowHeightDip;
-        var winW = TaskbarTrayWindow.TotalWidthDip() * scale;
+        // ≥1 px even before the first layout pass (cells read 0 wide until
+        // then): never hand SetWindowPos a 0-sized window.
+        var winW = Math.Max(TaskbarTrayLayout.TotalWidthDip * scale, 1);
         var winH = (TaskbarTrayWindow.WindowHeightDip - 2 * TaskbarTrayWindow.WindowInsetYDip) * scale;
 
         double xPx, yPx;
@@ -419,25 +421,15 @@ static class TaskbarController
             Bottom = (int)(yPx + winH),
         };
 
-        // Per-cell hit-test rects, left to right: the clock cell, the CPU and
-        // memory cells, then one cell per tracked Copilot session in first-seen
-        // order (the same order the window renders them).
+        // Per-cell hit-test rects, left to right in the shared layout's order
+        // (clock, CPU, memory, then one cell per tracked Copilot session —
+        // the same order the window renders them).
         _cellRectsPx.Clear();
         var cellLeft = xPx;
-        _cellRectsPx.Add((TaskbarTrayWindow.ClockWidgetId, CellRect(cellLeft, yPx,
-            TaskbarTrayWindow.ClockCellWidthDip * scale, winH)));
-        cellLeft += TaskbarTrayWindow.ClockCellWidthDip * scale;
-        _cellRectsPx.Add((TaskbarTrayWindow.CpuWidgetId, CellRect(cellLeft, yPx,
-            TaskbarTrayWindow.CpuCellWidthDip * scale, winH)));
-        cellLeft += TaskbarTrayWindow.CpuCellWidthDip * scale;
-        _cellRectsPx.Add((TaskbarTrayWindow.MemoryWidgetId, CellRect(cellLeft, yPx,
-            TaskbarTrayWindow.MemoryCellWidthDip * scale, winH)));
-        cellLeft += TaskbarTrayWindow.MemoryCellWidthDip * scale;
-        foreach (var session in CopilotSessionTracker.Sessions)
+        foreach (var cell in TaskbarTrayLayout.Cells)
         {
-            _cellRectsPx.Add((session.SessionId, CellRect(cellLeft, yPx,
-                TaskbarTrayWindow.SessionCellWidthDip * scale, winH)));
-            cellLeft += TaskbarTrayWindow.SessionCellWidthDip * scale;
+            _cellRectsPx.Add((cell.Id, CellRect(cellLeft, yPx, cell.CellWidthDip * scale, winH)));
+            cellLeft += cell.CellWidthDip * scale;
         }
 
         SyncTaskbarColor(in taskbar, scale);

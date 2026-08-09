@@ -13,15 +13,10 @@ class TooltipWindow : Component
 {
     public const double WindowHeightDip = 26;
 
-    // Rough width estimate from the text (no text measurement available):
-    // ~7 DIPs per Latin char, 12 per wide (CJK) char, plus padding.
-    public static double WidthFor(string text)
-    {
-        double units = 0;
-        foreach (var c in text)
-            units += c > 0x2E7F ? 12 : 7;
-        return Math.Clamp(units + 20, 48, 320);
-    }
+    // Width from the measured text at the rendered font size (12 DIP), plus
+    // horizontal padding matching Render's Border padding (8 per side).
+    public static double WidthFor(string text) =>
+        Math.Clamp(TextMeasurement.MeasureWidth(text, 12) + 16, 48, 320);
 
     private static int _instanceCount; // unique WindowKey per shown tooltip
 

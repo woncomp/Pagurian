@@ -25,14 +25,17 @@ class TaskbarTrayWindow : Component
     // WindowHeightDip is the full taskbar thickness (the controller derives
     // the DPI scale from it); the widget itself is inset WindowInsetYDip
     // from the taskbar's top and bottom edges so it sits slightly inside.
-    // The window width is the sum of the cell widths (TotalWidthDip).
-    public const double ClockCellWidthDip = 72;
-    public const double SessionCellWidthDip = 76; // 16 icon + 6 gap + status text
+    // Cell widths are content-driven: cells size to their content plus the
+    // padding below, and the controller reads the rendered widths back
+    // through TaskbarTrayLayout to size the window and its hit-test rects.
     public const double WindowHeightDip = 48;
     public const double WindowInsetYDip = 2;
 
-    public const double CpuCellWidthDip = 76;
-    public const double MemoryCellWidthDip = 76;
+    // Horizontal padding inside each cell's Border: breathing room between
+    // the content and the hover overlay's rounded edges.
+    public const double ClockPaddingXDip = 10;
+    public const double MetricsPaddingXDip = 6;
+    public const double SessionPaddingXDip = 8;
 
     public const string CpuWidgetId = "cpu";
     public const string MemoryWidgetId = "memory";
@@ -40,13 +43,6 @@ class TaskbarTrayWindow : Component
     // Widget id of the clock cell in the controller's hover/click bookkeeping
     // (session cells are identified by their session id).
     public const string ClockWidgetId = "clock";
-
-    // Total window width: the clock cell plus one cell per tracked session.
-    // Read by the controller on every tick, so adding/removing sessions
-    // resizes the window through the normal anchor path.
-    public static double TotalWidthDip() =>
-        ClockCellWidthDip + CpuCellWidthDip + MemoryCellWidthDip
-        + CopilotSessionTracker.Sessions.Count * SessionCellWidthDip;
 
     // Native clock hover visual: a SubtleFill overlay inset from the cell
     // edges with the control corner radius (like every Win11 taskbar button).
@@ -58,7 +54,11 @@ class TaskbarTrayWindow : Component
     public static WindowSpec CreateSpec() => new()
     {
         Title = "Pagurian",
-        Width = TotalWidthDip(),
+        // First frame: the cells haven't laid out yet, so the layout reads
+        // 0 — start at a 1-DIP floor (a literal 0-wide window risks a
+        // skipped layout pass) and let the controller grow the window to the
+        // real content-driven width within a tick or two of the first render.
+        Width = Math.Max(TaskbarTrayLayout.TotalWidthDip, 1),
         Height = WindowHeightDip,
         Style = WindowStyle.None,
         Backdrop = BackdropChoice.Of(BackdropKind.Transparent),
@@ -217,6 +217,10 @@ class TaskbarTrayWindow : Component
     private static string NowTime() => DateTime.Now.ToString("t", CultureInfo.CurrentCulture);
     private static string NowDate() => DateTime.Now.ToString("d", CultureInfo.CurrentCulture);
 
+    // CPU/memory cell: a thin gauge across the top, then two centered lines
+    // (percent over label) — about as tall as the clock's two lines, and
+    // narrower than the old label+percent row. Sizes to its content; the
+    // controller reads the rendered width back through Ref.
     private static Element MetricsCell(string widgetId, string label, SystemMetricKind kind, bool isDark)
     {
         var snapshot = kind == SystemMetricKind.Cpu
@@ -229,35 +233,42 @@ class TaskbarTrayWindow : Component
         else if (snapshot is MemorySnapshot mem)
             percent = (int)Math.Round(Math.Clamp(mem.UsedPercent, 0, 100));
 
-        var text = percent.HasValue ? $"{label} {percent.Value}%" : $"{label} --%";
+        var percentText = percent.HasValue ? $"{percent.Value}%" : "--%";
         var accent = kind == SystemMetricKind.Cpu
             ? SystemMetricsColors.CpuAccent(isDark)
             : SystemMetricsColors.MemoryAccent(isDark);
         var track = SystemMetricsColors.GaugeTrack(isDark);
-        var cellWidth = kind == SystemMetricKind.Cpu ? CpuCellWidthDip : MemoryCellWidthDip;
-        var innerWidth = cellWidth - 2 * HoverMarginXDip;
+        // Anti-jitter floor: the percent line is exactly as wide as its
+        // worst-case string (measured, so it's still font/locale-correct),
+        // so the cell doesn't resize as the live percentage changes.
+        var percentWidth = TextMeasurement.MeasureWidth("100%", ClockFontSizeDip);
 
         return (Border(
                 FlexColumn(
-                    TextBlock(text)
-                        .FontSize(ClockFontSizeDip)
-                        .TextAlignment(TextAlignment.Center)
-                        .Width(innerWidth)
-                        .Foreground(TextBrush),
+                    // No explicit width: Yoga stretch spans the cell.
                     Progress(percent ?? 0)
                         .Height(3)
-                        .Width(innerWidth - 8)
-                        .Margin(0, 2, 0, 0)
+                        .Margin(0, 0, 0, 2)
                         .Set(pb =>
                         {
                             pb.Foreground = new SolidColorBrush(accent);
                             pb.Background = new SolidColorBrush(track);
-                        }))
+                        }),
+                    TextBlock(percentText)
+                        .FontSize(ClockFontSizeDip)
+                        .TextAlignment(TextAlignment.Center)
+                        .Width(percentWidth)
+                        .Foreground(TextBrush),
+                    TextBlock(label)
+                        .FontSize(ClockFontSizeDip)
+                        .TextAlignment(TextAlignment.Center)
+                        .Foreground(TextBrush))
                     .VerticalAlignment(VerticalAlignment.Center))
             with { CornerRadius = HoverCornerRadiusDip })
             .Background(HoverBrushFor(widgetId))
-            .Width(innerWidth)
+            .Padding(MetricsPaddingXDip, 0, MetricsPaddingXDip, 0)
             .Margin(HoverMarginXDip, HoverMarginYDip, HoverMarginXDip, HoverMarginYDip)
+            .Ref(TaskbarTrayLayout.RefFor(widgetId))
             .WithKey(widgetId);
     }
 
@@ -308,37 +319,41 @@ class TaskbarTrayWindow : Component
 
         var isDark = TaskbarController.IsDarkTheme;
 
-        // Sessions can vanish (sessionEnd): drop their cached brushes.
+        // Sessions can vanish (sessionEnd): drop their cached brushes and
+        // layout refs.
         PruneBrushCache(_hoverBrushes);
         PruneBrushCache(_statusBrushes);
+        TaskbarTrayLayout.PruneRefs();
 
         // Root: sampled taskbar color (the blend). Cells: rounded translucent
         // per-cell hover overlay (alpha 0 while idle) around each widget.
-        // Explicit text widths make clock centering independent of panel
-        // behavior; every cell is keyed so reconciliation preserves identity.
+        // Cells size to their content; every cell is keyed so reconciliation
+        // preserves identity and carries a Ref the controller reads the
+        // rendered width back through (TaskbarTrayLayout).
         return Border(
                 HStack(0,
                 [
-                    // Cell 0: the native datetime replica.
+                    // Cell 0: the native datetime replica. No explicit widths:
+                    // the cell sizes to the wider of the two lines (Yoga
+                    // stretch keeps both TextBlocks cell-wide, so
+                    // TextAlignment.Center centers the text), and the
+                    // controller reads the rendered width back through Ref.
                     (Border(
                         FlexColumn(
                             TextBlock(time)
                                 .FontSize(ClockFontSizeDip)
                                 .TextAlignment(Microsoft.UI.Xaml.TextAlignment.Center)
-                                .Width(ClockCellWidthDip - 2 * HoverMarginXDip)
                                 .Foreground(TextBrush),
                             TextBlock(date)
                                 .FontSize(ClockFontSizeDip)
                                 .TextAlignment(Microsoft.UI.Xaml.TextAlignment.Center)
-                                .Width(ClockCellWidthDip - 2 * HoverMarginXDip)
                                 .Foreground(TextBrush))
                             .VerticalAlignment(Microsoft.UI.Xaml.VerticalAlignment.Center))
                         with { CornerRadius = HoverCornerRadiusDip })
                         .Background(HoverBrushFor(ClockWidgetId))
-                        // Fixed cell slot: the controller's hit-test rects assume
-                        // exactly ClockCellWidthDip per cell (Width excludes Margin).
-                        .Width(ClockCellWidthDip - 2 * HoverMarginXDip)
+                        .Padding(ClockPaddingXDip, 0, ClockPaddingXDip, 0)
                         .Margin(HoverMarginXDip, HoverMarginYDip, HoverMarginXDip, HoverMarginYDip)
+                        .Ref(TaskbarTrayLayout.RefFor(ClockWidgetId))
                         .WithKey(ClockWidgetId),
                     MetricsCell(CpuWidgetId, "CPU", SystemMetricKind.Cpu, isDark),
                     MetricsCell(MemoryWidgetId, "MEM", SystemMetricKind.Memory, isDark),
@@ -362,12 +377,12 @@ class TaskbarTrayWindow : Component
                             .VerticalAlignment(Microsoft.UI.Xaml.VerticalAlignment.Center))
                             with { CornerRadius = HoverCornerRadiusDip })
                             .Background(HoverBrushFor(s.SessionId))
-                            // Fixed cell slot, same rationale as the clock cell:
-                            // without an explicit width the Border would size to
-                            // the status text and the controller's fixed-width
-                            // hit-test rect would drift off the visual cell.
-                            .Width(SessionCellWidthDip - 2 * HoverMarginXDip)
+                            // Sizes to the icon + status text (status strings
+                            // are bounded enum names); the controller reads
+                            // the rendered width back through Ref.
+                            .Padding(SessionPaddingXDip, 0, SessionPaddingXDip, 0)
                             .Margin(HoverMarginXDip, HoverMarginYDip, HoverMarginXDip, HoverMarginYDip)
+                            .Ref(TaskbarTrayLayout.RefFor(s.SessionId))
                             .WithKey(s.SessionId)),
                 ]))
             .Background(TaskbarColorBrush);
