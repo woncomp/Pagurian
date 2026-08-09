@@ -30,6 +30,7 @@ class TaskbarTrayWindow : Component
     // through TaskbarTrayLayout to size the window and its hit-test rects.
     public const double WindowHeightDip = 48;
     public const double WindowInsetYDip = 2;
+    public const double ContentHeightDip = WindowHeightDip - 2 * WindowInsetYDip;
 
     // Horizontal padding inside each cell's Border: breathing room between
     // the content and the hover overlay's rounded edges.
@@ -98,6 +99,23 @@ class TaskbarTrayWindow : Component
         CreateTaskbarColorBrush();
     public static readonly Microsoft.UI.Xaml.Media.SolidColorBrush TextBrush =
         new(TextColorFor(isDark: false));
+    public static readonly ScaleTransform ContentScaleTransform = new();
+    public static double ContentScale { get; private set; } = 1;
+
+    // SetParent can make the child window's XAML scale differ from the taskbar
+    // monitor scale. Scale the entire fixed-size content root to bridge that
+    // gap, while the raw child HWND remains positioned in physical pixels.
+    public static bool SetContentScale(double scale)
+    {
+        scale = Math.Max(scale, 0.01);
+        if (Math.Abs(ContentScale - scale) < 0.001)
+            return false;
+
+        ContentScale = scale;
+        ContentScaleTransform.ScaleX = scale;
+        ContentScaleTransform.ScaleY = scale;
+        return true;
+    }
 
     // Per-cell hover overlays: one live brush per widget (ClockWidgetId or a
     // session id), created lazily here and mutated in place by the
@@ -330,6 +348,7 @@ class TaskbarTrayWindow : Component
         // Cells size to their content; every cell is keyed so reconciliation
         // preserves identity and carries a Ref the controller reads the
         // rendered width back through (TaskbarTrayLayout).
+        var contentWidth = Math.Max(TaskbarTrayLayout.TotalWidthDip, 1);
         return Border(
                 HStack(0,
                 [
@@ -385,6 +404,13 @@ class TaskbarTrayWindow : Component
                             .Ref(TaskbarTrayLayout.RefFor(s.SessionId))
                             .WithKey(s.SessionId)),
                 ]))
+            .Width(contentWidth)
+            .Height(ContentHeightDip)
+            .Set(border =>
+            {
+                border.RenderTransform = ContentScaleTransform;
+                border.RenderTransformOrigin = new Windows.Foundation.Point(0, 0);
+            })
             .Background(TaskbarColorBrush);
     }
 }

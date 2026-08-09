@@ -30,6 +30,10 @@ static class TaskbarInterop
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr FindWindowW(string? lpClassName, string? lpWindowName);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr FindWindowExW(IntPtr hWndParent, IntPtr hWndChildAfter,
+        string? lpszClass, string? lpszWindow);
+
     [DllImport("user32.dll")]
     private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
@@ -54,6 +58,18 @@ static class TaskbarInterop
 
     public static IntPtr GetWindowStyle(IntPtr h) => GetWindowLongPtr64(h, GWL_STYLE);
     public static void SetWindowStyle(IntPtr h, IntPtr s) => SetWindowLongPtr64(h, GWL_STYLE, s);
+
+    public static bool TryGetWindowRect(IntPtr hwnd, out RECT rect)
+    {
+        if (hwnd != IntPtr.Zero && GetWindowRect(hwnd, out rect) &&
+            rect.Right > rect.Left && rect.Bottom > rect.Top)
+        {
+            return true;
+        }
+
+        rect = default;
+        return false;
+    }
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetDC(IntPtr hWnd);
@@ -290,6 +306,57 @@ static class TaskbarInterop
 
         rect = default;
         return false;
+    }
+
+    // Windows 11's Shell_TrayWnd can include an empty strip above the actual
+    // taskbar controls. Anchor to a visible control's cross-axis bounds rather
+    // than treating that outer host rectangle as the taskbar surface.
+    public static bool TryGetTaskbarContentRect(out RECT rect)
+    {
+        if (!TryGetTaskbarRect(out var shellRect))
+        {
+            rect = default;
+            return false;
+        }
+
+        var horizontal = shellRect.Width >= shellRect.Height;
+        foreach (var className in new[] { "MSTaskListWClass", "ReBarWindow32", "Start" })
+        {
+            var child = FindWindowExW(FindTaskbar(), IntPtr.Zero, className, null);
+            if (!TryGetWindowRect(child, out var childRect))
+                continue;
+
+            if (horizontal &&
+                childRect.Top >= shellRect.Top && childRect.Bottom <= shellRect.Bottom &&
+                childRect.Height < shellRect.Height)
+            {
+                rect = new RECT
+                {
+                    Left = shellRect.Left,
+                    Top = childRect.Top,
+                    Right = shellRect.Right,
+                    Bottom = childRect.Bottom,
+                };
+                return true;
+            }
+
+            if (!horizontal &&
+                childRect.Left >= shellRect.Left && childRect.Right <= shellRect.Right &&
+                childRect.Width < shellRect.Width)
+            {
+                rect = new RECT
+                {
+                    Left = childRect.Left,
+                    Top = shellRect.Top,
+                    Right = childRect.Right,
+                    Bottom = shellRect.Bottom,
+                };
+                return true;
+            }
+        }
+
+        rect = shellRect;
+        return true;
     }
 
     public static POINT GetCursorPosition() =>

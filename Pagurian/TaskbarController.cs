@@ -86,6 +86,7 @@ static class TaskbarController
     public static void Start(ReactorWindow trayWindow)
     {
         _trayWindow = trayWindow;
+        TaskbarDiagnostics.Log($"start hwnd={TrayWindowHwnd()} dipScale={ScaleOf(trayWindow):F3}");
 
         _timer = ReactorApp.UIDispatcher!.CreateTimer();
         _timer.Interval = PollInterval;
@@ -326,6 +327,7 @@ static class TaskbarController
         {
             _ticksSinceInjectAttempt = 0;
             _injected = TryInject();
+            TaskbarDiagnostics.Log($"inject result={_injected} trayHwnd={TrayWindowHwnd()} taskbarHwnd={TaskbarInterop.FindTaskbar()}");
         }
         else
         {
@@ -351,7 +353,9 @@ static class TaskbarController
 
         // One attempt per tick; the poll loop provides the retries so the UI
         // thread never blocks (AwqatSalaat sleeps between attempts instead).
-        return TaskbarInterop.SetParent(hwnd, taskbar) != IntPtr.Zero;
+        var previousParent = TaskbarInterop.SetParent(hwnd, taskbar);
+        TaskbarDiagnostics.Log($"set-parent trayHwnd={hwnd} taskbarHwnd={taskbar} previousParent={previousParent} style=0x{style:X8}");
+        return previousParent != IntPtr.Zero;
     }
 
     // HWND of the tray window, or IntPtr.Zero when it is gone (e.g. right after
@@ -372,7 +376,9 @@ static class TaskbarController
 
     private static void AnchorTrayWindow()
     {
-        if (!TaskbarInterop.TryGetTaskbarRect(out var taskbar))
+        if (!TaskbarInterop.TryGetTaskbarContentRect(out var taskbar))
+            return;
+        if (!TaskbarInterop.TryGetTaskbarRect(out var taskbarParent))
             return;
 
         // Ignore transient bogus rects (display topology changes, Explorer
@@ -388,6 +394,8 @@ static class TaskbarController
         // never stick out of the taskbar, whatever DPI it believes it is on.
         var horizontal = taskbar.Width >= taskbar.Height;
         var scale = (horizontal ? taskbar.Height : taskbar.Width) / TaskbarTrayWindow.WindowHeightDip;
+        var windowScale = ScaleOf(_trayWindow!);
+        var contentScaleChanged = TaskbarTrayWindow.SetContentScale(scale / windowScale);
         // ≥1 px even before the first layout pass (cells read 0 wide until
         // then): never hand SetWindowPos a 0-sized window.
         var winW = Math.Max(TaskbarTrayLayout.TotalWidthDip * scale, 1);
@@ -441,6 +449,8 @@ static class TaskbarController
 
         _lastTraySize = (winW, winH);
         _lastTrayPos = (xPx, yPx);
+        if (contentScaleChanged || sizeChanged)
+            CopilotSessionTracker.NotifyChanged();
 
         if (_injected)
         {
@@ -449,10 +459,12 @@ static class TaskbarController
                 return;
 
             // Child window: coordinates are relative to the taskbar's client area.
-            TaskbarInterop.SetWindowPos(hwnd, TaskbarInterop.HWND_TOP,
-                (int)(xPx - taskbar.Left), (int)(yPx - taskbar.Top),
+            var positioned = TaskbarInterop.SetWindowPos(hwnd, TaskbarInterop.HWND_TOP,
+                (int)(xPx - taskbarParent.Left), (int)(yPx - taskbarParent.Top),
                 (int)winW, (int)winH,
                 TaskbarInterop.SWP_NOACTIVATE);
+            TaskbarInterop.TryGetWindowRect(hwnd, out var actual);
+            LogAnchor("injected", taskbar, taskbarParent, scale, windowScale, winW, winH, xPx, yPx, hwnd, positioned, actual);
         }
         else
         {
@@ -463,7 +475,34 @@ static class TaskbarController
                 _trayWindow!.SetSize(winW / winScale, winH / winScale);
             if (posChanged)
                 _trayWindow!.SetPosition(xPx / winScale, yPx / winScale);
+            TaskbarInterop.TryGetWindowRect(TrayWindowHwnd(), out var actual);
+            LogAnchor("floating", taskbar, taskbarParent, scale, windowScale, winW, winH, xPx, yPx, TrayWindowHwnd(), true, actual);
         }
+    }
+
+    private static void LogAnchor(
+        string mode,
+        in TaskbarInterop.RECT taskbar,
+        in TaskbarInterop.RECT taskbarParent,
+        double taskbarScale,
+        double windowScale,
+        double widthPx,
+        double heightPx,
+        double xPx,
+        double yPx,
+        IntPtr hwnd,
+        bool positioned,
+        in TaskbarInterop.RECT actual)
+    {
+        var cells = string.Join(", ", TaskbarTrayLayout.Cells.Select(c => $"{c.Id}:{c.CellWidthDip:F1}dip"));
+        TaskbarDiagnostics.Log(
+            $"anchor mode={mode} positioned={positioned} hwnd={hwnd} parent={TaskbarInterop.GetAncestor(hwnd, TaskbarInterop.GA_PARENT)} " +
+            $"taskbar=({taskbar.Left},{taskbar.Top})-({taskbar.Right},{taskbar.Bottom}) {taskbar.Width}x{taskbar.Height}px " +
+            $"shell=({taskbarParent.Left},{taskbarParent.Top})-({taskbarParent.Right},{taskbarParent.Bottom}) {taskbarParent.Width}x{taskbarParent.Height}px " +
+            $"scale={taskbarScale:F3} windowDipScale={windowScale:F3} contentScale={TaskbarTrayWindow.ContentScale:F3} " +
+            $"desired=({xPx:F1},{yPx:F1}) {widthPx:F1}x{heightPx:F1}px " +
+            $"actual=({actual.Left},{actual.Top})-({actual.Right},{actual.Bottom}) {actual.Width}x{actual.Height}px " +
+            $"cells=[{cells}]");
     }
 
     private static TaskbarInterop.RECT CellRect(double xPx, double yPx, double wPx, double hPx) =>
