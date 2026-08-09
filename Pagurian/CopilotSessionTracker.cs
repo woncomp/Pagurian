@@ -1,6 +1,7 @@
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Reactor;
 
 namespace Pagurian;
@@ -30,6 +31,8 @@ sealed class CopilotSession
     public string Name { get; set; } = "";
     public bool NameResolved { get; set; } // false while Name is the fallback session id
     public CopilotSessionStatus Status { get; set; } = CopilotSessionStatus.Idle;
+    public CopilotSessionStatus? PendingStatus { get; set; }
+    public DateTimeOffset PendingStatusSince { get; set; }
     public string LastEventName { get; set; } = "";
     public string LastEventDump { get; set; } = ""; // pretty-printed envelope JSON
 }
@@ -47,6 +50,10 @@ static class CopilotSessionTracker
     private static IReadOnlyList<CopilotSession>? _snapshot;
 
     private static CancellationTokenSource? _cts;
+    private static DispatcherQueueTimer? _statusDebounceTimer;
+
+    private static readonly TimeSpan StatusDebounce = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan StatusDebounceTimerInterval = TimeSpan.FromMilliseconds(100);
 
     private static readonly JsonSerializerOptions IndentedJson = new() { WriteIndented = true };
 
@@ -65,11 +72,22 @@ static class CopilotSessionTracker
     public static void Start()
     {
         _cts = new CancellationTokenSource();
+        _statusDebounceTimer = ReactorApp.UIDispatcher!.CreateTimer();
+        _statusDebounceTimer.Interval = StatusDebounceTimerInterval;
+        _statusDebounceTimer.IsRepeating = true;
+        _statusDebounceTimer.Tick += (_, _) => CommitStableStatuses();
+        _statusDebounceTimer.Start();
+
         var ct = _cts.Token;
         Task.Run(() => PipeServerLoop(ct), ct);
     }
 
-    public static void Stop() => _cts?.Cancel();
+    public static void Stop()
+    {
+        _statusDebounceTimer?.Stop();
+        _statusDebounceTimer = null;
+        _cts?.Cancel();
+    }
 
     // Lets non-tracker code (the theme flip in TaskbarController) force the
     // subscribed windows to re-render.
@@ -147,9 +165,9 @@ static class CopilotSessionTracker
 
         session.LastEventName = eventName;
         session.LastEventDump = PrettyPrint(root);
-        session.Status = eventName switch
+        var mappedStatus = eventName switch
         {
-            "sessionStart" => CopilotSessionStatus.Idle,
+            "sessionStart" => (CopilotSessionStatus?)CopilotSessionStatus.Idle,
             "userPromptSubmitted" => CopilotSessionStatus.Working,
             "preToolUse" or "postToolUse" or "postToolUseFailure" => CopilotSessionStatus.Working,
             "permissionRequest" => CopilotSessionStatus.Blocked,
@@ -157,13 +175,67 @@ static class CopilotSessionTracker
             // sessionEnd is handled above (removal). userPromptTransformed,
             // subagentStart/Stop, errorOccurred, preCompact, notification:
             // recorded for the dump only.
-            _ => session.Status,
+            _ => null,
         };
 
-        if (!session.NameResolved)
+        if (mappedStatus.HasValue)
+            UpdateStatusCandidate(session, mappedStatus.Value, DateTimeOffset.UtcNow);
+
+        if (!session.NameResolved || eventName is "sessionStart" or "userPromptTransformed")
             TryResolveName(session);
 
         NotifyChanged();
+    }
+
+    // Hook events arrive on the UI thread, so candidate transitions can be
+    // tracked without locks. Repeated events for the same candidate leave its
+    // original timestamp intact; only a different candidate restarts the
+    // debounce window.
+    private static void UpdateStatusCandidate(
+        CopilotSession session,
+        CopilotSessionStatus candidate,
+        DateTimeOffset now)
+    {
+        if (candidate == session.Status)
+        {
+            session.PendingStatus = null;
+            return;
+        }
+
+        if (session.PendingStatus != candidate)
+        {
+            session.PendingStatus = candidate;
+            session.PendingStatusSince = now;
+        }
+    }
+
+    // Runs on the UI dispatcher and commits only candidates that have stayed
+    // unchanged for the full debounce interval. A single notification covers
+    // all statuses committed by this tick.
+    private static void CommitStableStatuses()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var changed = false;
+
+        foreach (var session in _sessions.Values)
+        {
+            if (!session.PendingStatus.HasValue)
+                continue;
+
+            if (now - session.PendingStatusSince < StatusDebounce)
+                continue;
+
+            var pending = session.PendingStatus.Value;
+            session.PendingStatus = null;
+            if (pending == session.Status)
+                continue;
+
+            session.Status = pending;
+            changed = true;
+        }
+
+        if (changed)
+            NotifyChanged();
     }
 
     private static string PrettyPrint(JsonElement root)
