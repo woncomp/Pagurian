@@ -27,15 +27,15 @@ ReactorApp.Run(_ =>
         Key: WindowKey.Of("pagurian-tray"),
         IsVisible: true));
 
-    var iconWindow = ReactorApp.OpenWindow(
-        TaskbarIconWindow.CreateSpec(),
-        () => new TaskbarIconWindow());
+    var trayWindow = ReactorApp.OpenWindow(
+        TaskbarTrayWindow.CreateSpec(),
+        () => new TaskbarTrayWindow());
 
-    TaskbarController.Start(iconWindow);
+    TaskbarController.Start(trayWindow);
 
     tray.RightClick += (_, _) =>
     {
-        if (TaskbarInterop.ShowTrayMenu(TaskbarController.IconWindowHwnd()) != TaskbarInterop.QuitCommandId)
+        if (TaskbarInterop.ShowTrayMenu(TaskbarController.TrayWindowHwnd()) != TaskbarInterop.QuitCommandId)
             return;
 
         // ReactorApp.Exit(0) only calls WinUI's Application.Exit(), which closes

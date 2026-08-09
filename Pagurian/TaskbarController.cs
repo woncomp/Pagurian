@@ -7,7 +7,7 @@ using Microsoft.UI.Reactor.Core;
 namespace Pagurian;
 
 // Owns the ongoing behaviors of the app:
-//  1. Keeps the icon window — a horizontal container of widget cells (clock,
+//  1. Keeps the tray window — a horizontal container of widget cells (clock,
 //     CPU, memory, plus one cell per tracked Copilot session) — anchored to
 //     the left-bottom corner of the taskbar, resizing it as cells come and go.
 //  2. Per-cell interaction by polling the cursor position and left mouse
@@ -18,7 +18,7 @@ namespace Pagurian;
 //     and an outside click dismisses whichever is open.
 // Runs on a DispatcherQueueTimer on the UI thread.
 //
-// The icon window is injected into the taskbar via SetParent (same approach as
+// The tray window is injected into the taskbar via SetParent (same approach as
 // AwqatSalaat.WinUI's TaskBarWidget): it becomes a child of Shell_TrayWnd and is
 // positioned in taskbar client coordinates with raw SetWindowPos (AppWindow.Move
 // semantics are unreliable for child windows owned by WinUI). If injection fails
@@ -35,7 +35,7 @@ static class TaskbarController
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(50);
     private const int InjectRetryIntervalTicks = 25; // ~5s at 200ms per tick
 
-    private static ReactorWindow? _iconWindow;
+    private static ReactorWindow? _trayWindow;
     private static ReactorWindow? _popupWindow;
     private static ReactorWindow? _sessionPopupWindow;
     private static string? _sessionPopupId;
@@ -43,7 +43,7 @@ static class TaskbarController
     private static SystemMetricKind? _metricsPopupKind;
     private static ReactorWindow? _tooltipWindow;
 
-    private static TaskbarInterop.RECT _iconRectPx;
+    private static TaskbarInterop.RECT _trayRectPx;
     private static TaskbarInterop.RECT _popupRectPx;
     private static TaskbarInterop.RECT _sessionPopupRectPx;
     private static TaskbarInterop.RECT _metricsPopupRectPx;
@@ -52,12 +52,12 @@ static class TaskbarController
     // session ids in tracker order), rebuilt on every anchor pass.
     private static readonly List<(string Id, TaskbarInterop.RECT Rect)> _cellRectsPx = new();
 
-    private static (double X, double Y) _lastIconPos = (double.MinValue, double.MinValue);
-    private static (double W, double H) _lastIconSize = (0, 0);
+    private static (double X, double Y) _lastTrayPos = (double.MinValue, double.MinValue);
+    private static (double W, double H) _lastTraySize = (0, 0);
     private static bool _injected;
     private static int _ticksSinceInjectAttempt = int.MaxValue; // inject on first tick
     private static Microsoft.UI.Dispatching.DispatcherQueueTimer? _timer;
-    private static Windows.UI.Color _taskbarColor = TaskbarIconWindow.DefaultTaskbarColor; // average of the gradient stops, for theme derivation
+    private static Windows.UI.Color _taskbarColor = TaskbarTrayWindow.DefaultTaskbarColor; // average of the gradient stops, for theme derivation
     private static string? _hoverWidgetId; // cell under the cursor (null = outside)
     private static bool _pressed;
     private static bool _wasLeftButtonDown; // previous tick's button state, for click-edge detection
@@ -83,9 +83,9 @@ static class TaskbarController
     private static DateTime _lastSampleUtc = DateTime.MinValue;
     private static int _sampleInFlight; // 0/1, Interlocked guarded
 
-    public static void Start(ReactorWindow iconWindow)
+    public static void Start(ReactorWindow trayWindow)
     {
-        _iconWindow = iconWindow;
+        _trayWindow = trayWindow;
 
         _timer = ReactorApp.UIDispatcher!.CreateTimer();
         _timer.Interval = PollInterval;
@@ -114,7 +114,7 @@ static class TaskbarController
         if (isDark != _isDarkTheme)
         {
             _isDarkTheme = isDark;
-            TaskbarIconWindow.TextBrush.Color = TaskbarIconWindow.TextColorFor(isDark);
+            TaskbarTrayWindow.TextBrush.Color = TaskbarTrayWindow.TextColorFor(isDark);
             // Session status and metric gauge colors are per-render brushes, so the
             // container and any open popup must re-render to pick the new theme.
             CopilotSessionTracker.NotifyChanged();
@@ -123,8 +123,8 @@ static class TaskbarController
 
         if (_hoverWidgetId != null)
         {
-            var overlay = TaskbarIconWindow.HoverOverlayColorFor(isDark, _pressed);
-            var brush = TaskbarIconWindow.HoverBrushFor(_hoverWidgetId);
+            var overlay = TaskbarTrayWindow.HoverOverlayColorFor(isDark, _pressed);
+            var brush = TaskbarTrayWindow.HoverBrushFor(_hoverWidgetId);
             if (brush.Color != overlay)
                 brush.Color = overlay;
         }
@@ -133,7 +133,7 @@ static class TaskbarController
     private static double Luminance(Windows.UI.Color c) =>
         0.299 * c.R + 0.587 * c.G + 0.114 * c.B;
 
-    // Keeps the icon window's background in sync with the taskbar. The taskbar
+    // Keeps the tray window's background in sync with the taskbar. The taskbar
     // is translucent, so its apparent color can vary along its length
     // (wallpaper showing through — measured deltas over 25 levels across the
     // widget's own width): no single color blends the widget in. Instead the
@@ -149,7 +149,7 @@ static class TaskbarController
     private static void SyncTaskbarColor(in TaskbarInterop.RECT taskbar, double scale)
     {
         var horizontal = taskbar.Width >= taskbar.Height;
-        var brush = TaskbarIconWindow.TaskbarColorBrush;
+        var brush = TaskbarTrayWindow.TaskbarColorBrush;
 
         // The gradient follows the taskbar's long axis.
         var start = horizontal ? new Windows.Foundation.Point(0, 0.5) : new Windows.Foundation.Point(0.5, 0);
@@ -168,10 +168,10 @@ static class TaskbarController
             // One strip captures all stops: the native sliver below the widget
             // (uncovered thanks to WindowInsetYDip), spanning the widget's
             // width; each stop is a column slice of it (ApplyHorizontalSample).
-            var sx = _iconRectPx.Left;
-            var sy = _iconRectPx.Bottom;
-            var sw = Math.Max(1, _iconRectPx.Right - _iconRectPx.Left);
-            var sh = Math.Max(1, taskbar.Bottom - sy); // rows [iconBottom, taskbarBottom - 1]
+            var sx = _trayRectPx.Left;
+            var sy = _trayRectPx.Bottom;
+            var sw = Math.Max(1, _trayRectPx.Right - _trayRectPx.Left);
+            var sh = Math.Max(1, taskbar.Bottom - sy); // rows [trayBottom, taskbarBottom - 1]
             Task.Run(() =>
             {
                 byte[]? px;
@@ -194,8 +194,8 @@ static class TaskbarController
             // taskbar's thickness and interpolate between them.
             var x = taskbar.Left + 4;
             var w = Math.Max(1, taskbar.Width - 8);
-            var yTop = Math.Clamp(_iconRectPx.Top - 3, taskbar.Top, taskbar.Bottom - 3);
-            var yBottom = Math.Clamp(_iconRectPx.Bottom + 1, taskbar.Top, taskbar.Bottom - 3);
+            var yTop = Math.Clamp(_trayRectPx.Top - 3, taskbar.Top, taskbar.Bottom - 3);
+            var yBottom = Math.Clamp(_trayRectPx.Bottom + 1, taskbar.Top, taskbar.Bottom - 3);
             Task.Run(() =>
             {
                 byte[]? top, bottom;
@@ -219,7 +219,7 @@ static class TaskbarController
     // widget's width (the same spots the old per-stop captures sampled).
     private static void ApplyHorizontalSample(byte[] rgba, int width, int height)
     {
-        var count = TaskbarIconWindow.GradientStopCount;
+        var count = TaskbarTrayWindow.GradientStopCount;
         var colors = new Windows.UI.Color[count];
         for (var i = 0; i < count; i++)
         {
@@ -241,7 +241,7 @@ static class TaskbarController
         if (t is not { } tc || b is not { } bc)
             return;
 
-        var count = TaskbarIconWindow.GradientStopCount;
+        var count = TaskbarTrayWindow.GradientStopCount;
         var colors = new Windows.UI.Color[count];
         for (var i = 0; i < count; i++)
             colors[i] = LerpColor(tc, bc, StopFraction(i, count));
@@ -252,7 +252,7 @@ static class TaskbarController
     // re-render needed) and re-derives the theme from their average.
     private static void ApplyStopColors(Windows.UI.Color[] colors)
     {
-        var brush = TaskbarIconWindow.TaskbarColorBrush;
+        var brush = TaskbarTrayWindow.TaskbarColorBrush;
         var count = colors.Length;
 
         var changed = false;
@@ -288,11 +288,11 @@ static class TaskbarController
 
     private static void Tick()
     {
-        if (_iconWindow == null)
+        if (_trayWindow == null)
             return;
 
         EnsureInjected();
-        AnchorIconWindow();
+        AnchorTrayWindow();
         UpdateInteractions();
     }
 
@@ -300,7 +300,7 @@ static class TaskbarController
     {
         if (_injected)
         {
-            var hwnd = IconWindowHwnd();
+            var hwnd = TrayWindowHwnd();
             var taskbar = TaskbarInterop.FindTaskbar();
 
             if (hwnd != IntPtr.Zero &&
@@ -312,13 +312,13 @@ static class TaskbarController
             }
 
             // Explorer restart destroys Shell_TrayWnd and every child window with
-            // it. Recreate the icon window and re-inject on this tick.
+            // it. Recreate the tray window and re-inject on this tick.
             _injected = false;
-            try { _iconWindow!.Close(); } catch { /* native window may already be gone */ }
-            _iconWindow = ReactorApp.OpenWindow(
-                TaskbarIconWindow.CreateSpec(), () => new TaskbarIconWindow());
-            _lastIconPos = (double.MinValue, double.MinValue);
-            _lastIconSize = (0, 0);
+            try { _trayWindow!.Close(); } catch { /* native window may already be gone */ }
+            _trayWindow = ReactorApp.OpenWindow(
+                TaskbarTrayWindow.CreateSpec(), () => new TaskbarTrayWindow());
+            _lastTrayPos = (double.MinValue, double.MinValue);
+            _lastTraySize = (0, 0);
             _ticksSinceInjectAttempt = int.MaxValue;
         }
 
@@ -336,7 +336,7 @@ static class TaskbarController
     private static bool TryInject()
     {
         var taskbar = TaskbarInterop.FindTaskbar();
-        var hwnd = IconWindowHwnd();
+        var hwnd = TrayWindowHwnd();
         if (taskbar == IntPtr.Zero || hwnd == IntPtr.Zero)
             return false;
 
@@ -354,15 +354,15 @@ static class TaskbarController
         return TaskbarInterop.SetParent(hwnd, taskbar) != IntPtr.Zero;
     }
 
-    // HWND of the icon window, or IntPtr.Zero when it is gone (e.g. right after
+    // HWND of the tray window, or IntPtr.Zero when it is gone (e.g. right after
     // an Explorer restart destroyed it). Safe to call any time.
-    public static IntPtr IconWindowHwnd()
+    public static IntPtr TrayWindowHwnd()
     {
         try
         {
-            return _iconWindow == null
+            return _trayWindow == null
                 ? IntPtr.Zero
-                : Win32Interop.GetWindowFromWindowId(_iconWindow.AppWindow.Id);
+                : Win32Interop.GetWindowFromWindowId(_trayWindow.AppWindow.Id);
         }
         catch
         {
@@ -370,7 +370,7 @@ static class TaskbarController
         }
     }
 
-    private static void AnchorIconWindow()
+    private static void AnchorTrayWindow()
     {
         if (!TaskbarInterop.TryGetTaskbarRect(out var taskbar))
             return;
@@ -387,9 +387,9 @@ static class TaskbarController
         // vertical inset: winH < taskbar.Height always, so the widget can
         // never stick out of the taskbar, whatever DPI it believes it is on.
         var horizontal = taskbar.Width >= taskbar.Height;
-        var scale = (horizontal ? taskbar.Height : taskbar.Width) / TaskbarIconWindow.WindowHeightDip;
-        var winW = TaskbarIconWindow.TotalWidthDip() * scale;
-        var winH = (TaskbarIconWindow.WindowHeightDip - 2 * TaskbarIconWindow.WindowInsetYDip) * scale;
+        var scale = (horizontal ? taskbar.Height : taskbar.Width) / TaskbarTrayWindow.WindowHeightDip;
+        var winW = TaskbarTrayWindow.TotalWidthDip() * scale;
+        var winH = (TaskbarTrayWindow.WindowHeightDip - 2 * TaskbarTrayWindow.WindowInsetYDip) * scale;
 
         double xPx, yPx;
         if (horizontal)
@@ -411,7 +411,7 @@ static class TaskbarController
         xPx = Math.Clamp(xPx, taskbar.Left, Math.Max(taskbar.Left, taskbar.Right - winW));
         yPx = Math.Clamp(yPx, taskbar.Top, Math.Max(taskbar.Top, taskbar.Bottom - winH));
 
-        _iconRectPx = new TaskbarInterop.RECT
+        _trayRectPx = new TaskbarInterop.RECT
         {
             Left = (int)xPx,
             Top = (int)yPx,
@@ -424,35 +424,35 @@ static class TaskbarController
         // order (the same order the window renders them).
         _cellRectsPx.Clear();
         var cellLeft = xPx;
-        _cellRectsPx.Add((TaskbarIconWindow.ClockWidgetId, CellRect(cellLeft, yPx,
-            TaskbarIconWindow.ClockCellWidthDip * scale, winH)));
-        cellLeft += TaskbarIconWindow.ClockCellWidthDip * scale;
-        _cellRectsPx.Add((TaskbarIconWindow.CpuWidgetId, CellRect(cellLeft, yPx,
-            TaskbarIconWindow.CpuCellWidthDip * scale, winH)));
-        cellLeft += TaskbarIconWindow.CpuCellWidthDip * scale;
-        _cellRectsPx.Add((TaskbarIconWindow.MemoryWidgetId, CellRect(cellLeft, yPx,
-            TaskbarIconWindow.MemoryCellWidthDip * scale, winH)));
-        cellLeft += TaskbarIconWindow.MemoryCellWidthDip * scale;
+        _cellRectsPx.Add((TaskbarTrayWindow.ClockWidgetId, CellRect(cellLeft, yPx,
+            TaskbarTrayWindow.ClockCellWidthDip * scale, winH)));
+        cellLeft += TaskbarTrayWindow.ClockCellWidthDip * scale;
+        _cellRectsPx.Add((TaskbarTrayWindow.CpuWidgetId, CellRect(cellLeft, yPx,
+            TaskbarTrayWindow.CpuCellWidthDip * scale, winH)));
+        cellLeft += TaskbarTrayWindow.CpuCellWidthDip * scale;
+        _cellRectsPx.Add((TaskbarTrayWindow.MemoryWidgetId, CellRect(cellLeft, yPx,
+            TaskbarTrayWindow.MemoryCellWidthDip * scale, winH)));
+        cellLeft += TaskbarTrayWindow.MemoryCellWidthDip * scale;
         foreach (var session in CopilotSessionTracker.Sessions)
         {
             _cellRectsPx.Add((session.SessionId, CellRect(cellLeft, yPx,
-                TaskbarIconWindow.SessionCellWidthDip * scale, winH)));
-            cellLeft += TaskbarIconWindow.SessionCellWidthDip * scale;
+                TaskbarTrayWindow.SessionCellWidthDip * scale, winH)));
+            cellLeft += TaskbarTrayWindow.SessionCellWidthDip * scale;
         }
 
         SyncTaskbarColor(in taskbar, scale);
 
-        var sizeChanged = Math.Abs(winW - _lastIconSize.W) > 0.5 || Math.Abs(winH - _lastIconSize.H) > 0.5;
-        var posChanged = Math.Abs(xPx - _lastIconPos.X) > 0.5 || Math.Abs(yPx - _lastIconPos.Y) > 0.5;
+        var sizeChanged = Math.Abs(winW - _lastTraySize.W) > 0.5 || Math.Abs(winH - _lastTraySize.H) > 0.5;
+        var posChanged = Math.Abs(xPx - _lastTrayPos.X) > 0.5 || Math.Abs(yPx - _lastTrayPos.Y) > 0.5;
         if (!sizeChanged && !posChanged)
             return;
 
-        _lastIconSize = (winW, winH);
-        _lastIconPos = (xPx, yPx);
+        _lastTraySize = (winW, winH);
+        _lastTrayPos = (xPx, yPx);
 
         if (_injected)
         {
-            var hwnd = IconWindowHwnd();
+            var hwnd = TrayWindowHwnd();
             if (hwnd == IntPtr.Zero)
                 return;
 
@@ -466,11 +466,11 @@ static class TaskbarController
         {
             // Floating fallback: Reactor window APIs take DIPs, not pixels;
             // convert with the window's own DPI scale.
-            var winScale = ScaleOf(_iconWindow!);
+            var winScale = ScaleOf(_trayWindow!);
             if (sizeChanged)
-                _iconWindow!.SetSize(winW / winScale, winH / winScale);
+                _trayWindow!.SetSize(winW / winScale, winH / winScale);
             if (posChanged)
-                _iconWindow!.SetPosition(xPx / winScale, yPx / winScale);
+                _trayWindow!.SetPosition(xPx / winScale, yPx / winScale);
         }
     }
 
@@ -525,7 +525,7 @@ static class TaskbarController
         if (hoverId != _hoverWidgetId || leftDown != _pressed)
         {
             if (_hoverWidgetId != null && hoverId != _hoverWidgetId)
-                TaskbarIconWindow.HoverBrushFor(_hoverWidgetId).Color = TaskbarIconWindow.HoverOverlayHidden;
+                TaskbarTrayWindow.HoverBrushFor(_hoverWidgetId).Color = TaskbarTrayWindow.HoverOverlayHidden;
             _hoverWidgetId = hoverId;
             _pressed = leftDown;
             ApplyEffectiveBrushColor();
@@ -546,9 +546,9 @@ static class TaskbarController
             HideTooltip();
         }
         else if (hoverId != null
-                 && hoverId != TaskbarIconWindow.ClockWidgetId
-                 && hoverId != TaskbarIconWindow.CpuWidgetId
-                 && hoverId != TaskbarIconWindow.MemoryWidgetId
+                 && hoverId != TaskbarTrayWindow.ClockWidgetId
+                 && hoverId != TaskbarTrayWindow.CpuWidgetId
+                 && hoverId != TaskbarTrayWindow.MemoryWidgetId
                  && !AnyPopupVisible())
         {
             _tooltipHoverTicks++;
@@ -563,7 +563,7 @@ static class TaskbarController
         if (!clickEdge)
             return;
 
-        if (hoverId == TaskbarIconWindow.ClockWidgetId)
+        if (hoverId == TaskbarTrayWindow.ClockWidgetId)
         {
             HideMetricsPopup();
             HideSessionPopup();
@@ -573,14 +573,14 @@ static class TaskbarController
             else
                 EnsurePopupVisible();
         }
-        else if (hoverId == TaskbarIconWindow.CpuWidgetId)
+        else if (hoverId == TaskbarTrayWindow.CpuWidgetId)
         {
             HideSessionPopup();
             if (_popupWindow is { IsVisible: true })
                 _popupWindow.Hide();
             ToggleMetricsPopup(SystemMetricKind.Cpu, hoverId);
         }
-        else if (hoverId == TaskbarIconWindow.MemoryWidgetId)
+        else if (hoverId == TaskbarTrayWindow.MemoryWidgetId)
         {
             HideSessionPopup();
             if (_popupWindow is { IsVisible: true })
@@ -619,11 +619,11 @@ static class TaskbarController
     {
         var session = CopilotSessionTracker.Find(sessionId);
         var cell = CellRectPx(sessionId);
-        if (session == null || cell == null || _iconWindow == null)
+        if (session == null || cell == null || _trayWindow == null)
             return;
 
         HideTooltip();
-        var scale = ScaleOf(_iconWindow);
+        var scale = ScaleOf(_trayWindow);
         var xDip = cell.Value.Left / scale;
         var yDip = cell.Value.Top / scale - TooltipWindow.WindowHeightDip - 4;
         if (yDip < 0)
@@ -651,10 +651,10 @@ static class TaskbarController
     {
         HideSessionPopup();
         var cell = CellRectPx(sessionId);
-        if (cell == null || _iconWindow == null)
+        if (cell == null || _trayWindow == null)
             return;
 
-        var scale = ScaleOf(_iconWindow);
+        var scale = ScaleOf(_trayWindow);
         var popupW = SessionPopupWindow.WindowWidthDip;  // DIPs
         var popupH = SessionPopupWindow.WindowHeightDip; // DIPs
 
@@ -695,10 +695,10 @@ static class TaskbarController
 
         HideMetricsPopup();
         var cell = CellRectPx(cellId);
-        if (cell == null || _iconWindow == null)
+        if (cell == null || _trayWindow == null)
             return;
 
-        var scale = ScaleOf(_iconWindow);
+        var scale = ScaleOf(_trayWindow);
         var (popupW, popupH) = kind == SystemMetricKind.Cpu
             ? (CpuMetricsPopupWindow.WindowWidthDip, CpuMetricsPopupWindow.WindowHeightDip)
             : (MemoryMetricsPopupWindow.WindowWidthDip, MemoryMetricsPopupWindow.WindowHeightDip);
@@ -740,16 +740,16 @@ static class TaskbarController
 
     private static void EnsurePopupVisible()
     {
-        var scale = ScaleOf(_iconWindow!);
+        var scale = ScaleOf(_trayWindow!);
         var popupW = HoverPopupWindow.WindowWidthDip;  // DIPs
         var popupH = HoverPopupWindow.WindowHeightDip; // DIPs
 
         // Compute in DIPs — Reactor window APIs take DIPs; the physical pixel
         // rect below is only for cursor hit-testing (GetCursorPos is physical).
-        var xDip = _iconRectPx.Left / scale;
-        var yDip = _iconRectPx.Top / scale - popupH - 6;
+        var xDip = _trayRectPx.Left / scale;
+        var yDip = _trayRectPx.Top / scale - popupH - 6;
         if (yDip < 0)
-            yDip = _iconRectPx.Bottom / scale + 6; // taskbar at the top edge: open below
+            yDip = _trayRectPx.Bottom / scale + 6; // taskbar at the top edge: open below
 
         _popupRectPx = new TaskbarInterop.RECT
         {

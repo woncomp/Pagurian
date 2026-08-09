@@ -19,7 +19,7 @@ namespace Pagurian;
 // blends into the taskbar via a sampled background gradient, shows the native
 // rounded translucent hover/pressed highlight per cell, and adapts its text
 // color to light/dark taskbars.
-class TaskbarIconWindow : Component
+class TaskbarTrayWindow : Component
 {
     // Design sizes in DIPs; the controller scales to physical pixels.
     // WindowHeightDip is the full taskbar thickness (the controller derives

@@ -71,7 +71,7 @@ class SessionPopupWindow : Component
 
         // Shared per-session live brush: the popup and the taskbar cell show
         // the same status color, refreshed in place on every render.
-        var statusBrush = TaskbarIconWindow.StatusBrushFor(session, TaskbarController.IsDarkTheme);
+        var statusBrush = TaskbarTrayWindow.StatusBrushFor(session, TaskbarController.IsDarkTheme);
 
         return FlexColumn(
                 FlexRow(
