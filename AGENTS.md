@@ -32,12 +32,15 @@ by the host project instead.)
 ## What this app is
 
 A WinUI 3 Fluent-style utility that (1) runs a system-tray icon with a
-Quit-only native Win32 context menu, (2) injects a borderless **Tray** window
+native Win32 context menu ("Settings…" + Quit; double-click also opens
+Settings), (2) injects a borderless **Tray** window
 into the Windows taskbar (child of `Shell_TrayWnd`) that lays out **Shells**
 horizontally, each shell contributing zero or more **ShellCells**, (3) shows
-**Billboards** (detail panels) above the tray when cells are clicked, and
+**Billboards** (detail panels) above the tray when cells are clicked,
 (4) receives messages for shells via `Pagurian.exe post {shell_id} <cmd>
-[args...]` (the Copilot CLI hooks are the primary caller).
+[args...]` (the Copilot CLI hooks are the primary caller), and (5) has a
+**Settings window** for picking the configuration directory and editing the
+tray contents by drag & drop (see `SettingsView.cs` below).
 
 Concepts:
 
@@ -87,8 +90,10 @@ requirement. Third-party modules only need to reference `Pagurian.Sdk`.
   `ShutdownPolicy.Explicit`, `PagurianLog.Initialize()`, `ModuleLoader
   .LoadAll()`, `TrayShells.LoadFromConfig(TrayConfig.Load())`,
   `ShellMessageServer.Start()`, then tray icon + tray window + controller.
-  Quit happens only via the tray menu: `TaskbarController.Stop()` →
-  `ShellMessageServer.Stop()` → `TrayShells.ShutdownAll()` →
+  The settings window opens on tray-icon double-click or the tray menu's
+  "Settings…" item. Quit happens only via the tray menu:
+  `TaskbarController.Stop()` → `ShellMessageServer.Stop()` →
+  `SettingsWindow.CloseIfOpen()` → `TrayShells.ShutdownAll()` →
   `ModuleLoader.ShutdownAll()` → `tray.Close()` → `ReactorApp.Exit(0)` →
   `Environment.Exit(0)` (the last call is required).
 - `ModuleLoader.cs` — per-dll reflection discovery with strict validation:
@@ -96,18 +101,37 @@ requirement. Third-party modules only need to reference `Pagurian.Sdk`.
   skip, 2+ = reject the dll), `[Shell]` types must derive from `Shell`, kind
   ids (type FullNames) and module ids deduplicated. A failing dll never
   stops the host; details go to the unified log. Successful loads register
-  the kind catalog (shell FullName → `ShellAttribute` instance).
-- `TrayConfig.cs` — `%LOCALAPPDATA%\Pagurian\config.json`:
+  the kind catalog (shell FullName → `ShellAttribute` instance). `Modules`
+  and `Kinds` enumerate the loaded modules and shell kinds in discovery
+  order (the settings UI builds its module pool from these).
+- `HostSettings.cs` — registry-backed host settings:
+  `HKCU\Software\Pagurian\ConfigDir` overrides the configuration directory
+  (default `%LOCALAPPDATA%\Pagurian`; writing the default deletes the
+  value). Read via `HostSettings.ConfigDir`.
+- `TrayConfig.cs` — `<HostSettings.ConfigDir>\config.json`:
   `{ "tray": [ { "shell": "<FullName>", "id": "3842", "settings": {...}? } ] }`.
   Order = tray order. Ids are 4-digit, globally unique; duplicates are logged
   and skipped. The same kind twice = two instances. `settings` passes through
-  to `Shell.Settings` verbatim (reserved). A missing file is seeded with the
-  first-party shells and random ids (dev stand-in); an existing file is never
-  modified, and the host never auto-adds discovered shells.
+  to `Shell.Settings` verbatim (reserved). A missing file is seeded with only
+  the Hello shell and a random id; an existing file is only ever modified
+  through `Save(entries)` (temp file + atomic move, called by the settings
+  UI), and the host never auto-adds discovered shells. `NextId(taken)`
+  allocates a fresh 4-digit id.
 - `TrayShells.cs` — the ordered shell registry + flattened cell list.
   `Shell.AddCell/RemoveCell` call back through an internal channel; every
   change raises `Changed` → the tray window re-renders as a whole (no diff).
   Also routes `post` messages by `Shell.InstanceId`.
+  `ApplyConfig(entries)` reconciles the live set with a config list without
+  restarting unchanged shells (kept by id when the kind still matches),
+  reorders to the list order, and rebuilds cells once at the end.
+- `SettingsWindow.cs` / `SettingsView.cs` — the settings window (singleton,
+  `OpenOrActivate()`): config-directory row (TextBox + folder picker →
+  `HostSettings.SetConfigDir` → config reload → `TrayShells.ApplyConfig`)
+  and the tray editor: a drawn mock strip of the tray plus a wrapping module
+  pool, drag from the pool to add / drag within the strip to reorder / drag
+  back to the pool to remove. All edits are a draft; Save does
+  `TrayConfig.Save` + `TrayShells.ApplyConfig`, Revert/close discards.
+  Icons: `[Shell].PreviewIconPath` with `AppAssets.IconPath` fallback.
 - `PostBridge.cs` / `ShellMessageServer.cs` — the `post` pipeline. The bridge
   packs `{id, command, args, payload, receivedAt}` (stdin piped → payload,
   embedded verbatim as raw JSON) onto the `Pagurian.ShellMessages` pipe with
@@ -148,6 +172,8 @@ requirement. Third-party modules only need to reference `Pagurian.Sdk`.
 public sealed class MyModule : PagurianModule { public override void Startup()/Shutdown() ... }
 
 [Shell(DisplayName = "...")]                    // per Shell subclass; kind id = type FullName
+                                                // optional PreviewIcon = "Assets/foo.png" feeds the
+                                                // settings UI (fallback: the Pagurian app icon)
 public sealed class MyShell : Shell
 {
     public override void Startup() =>
@@ -205,7 +231,8 @@ public sealed class MyShell : Shell
 - **Theme comes from sampled taskbar pixels**, not app theme APIs.
 - **Message boxes**: Win32 `MessageBoxW` (`MessageBoxes.Show` in the Sdk).
 - **Tray menu is a native Win32 popup menu** (`TaskbarInterop.ShowTrayMenu`,
-  blocks the UI thread until selection; Quit runs the quit sequence).
+  blocks the UI thread until selection; returns `SettingsCommandId` or
+  `QuitCommandId`, dispatched by the caller in Program.cs).
 - **Fluent modifiers need `using Microsoft.UI.Reactor;`** — the pooled
   element extensions (`ElementExtensions`, `GridSize`, …) live in that
   namespace inside Reactor.dll; `Microsoft.UI.Reactor.Core` alone gives you

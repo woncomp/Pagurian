@@ -215,8 +215,10 @@ static class TaskbarInterop
     private static extern int MessageBoxW(IntPtr hWnd, string lpText, string lpCaption, uint uType);
 
     public const int QuitCommandId = 1;
+    public const int SettingsCommandId = 2;
 
     private const uint MF_STRING = 0x0000;
+    private const uint MF_SEPARATOR = 0x0800;
     private const uint TPM_RETURNCMD = 0x0100;
     private const uint TPM_NONOTIFY = 0x0080;
     private const uint TPM_RIGHTBUTTON = 0x0002;
@@ -240,9 +242,9 @@ static class TaskbarInterop
     [DllImport("user32.dll")]
     private static extern bool PostMessageW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
-    // Shows a regular Win32 context menu (single "Quit" item) at the cursor and
-    // returns the selected command id, or 0 when the menu was dismissed.
-    // Blocks while the menu is open, like every classic tray app.
+    // Shows a regular Win32 context menu ("Settings…", separator, "Quit") at
+    // the cursor and returns the selected command id, or 0 when the menu was
+    // dismissed. Blocks while the menu is open, like every classic tray app.
     public static int ShowTrayMenu(IntPtr owner)
     {
         var cursor = GetCursorPosition();
@@ -251,6 +253,8 @@ static class TaskbarInterop
             return 0;
         try
         {
+            AppendMenuW(menu, MF_STRING, (IntPtr)SettingsCommandId, "Settings…");
+            AppendMenuW(menu, MF_SEPARATOR, IntPtr.Zero, null!);
             AppendMenuW(menu, MF_STRING, (IntPtr)QuitCommandId, "Quit");
             // Required so the menu dismisses correctly when clicking elsewhere.
             SetForegroundWindow(owner);

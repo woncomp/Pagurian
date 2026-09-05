@@ -13,17 +13,15 @@ namespace Pagurian;
 //   ] }
 //
 // The host never scans modules to auto-add shells: the file is the only
-// source of tray membership. A missing file is seeded with the three
-// first-party modules' shells (the development stand-in until a
-// configuration UI exists); an existing file is never modified.
+// source of tray membership. The file lives in the configured config folder
+// (HostSettings.ConfigDir; default %LOCALAPPDATA%\Pagurian). A missing file
+// is seeded with just the Hello shell; an existing file is only ever
+// modified through Save (the settings UI), never on load.
 static class TrayConfig
 {
     public sealed record Entry(string ShellType, string Id, JsonElement? Settings);
 
-    public static string ConfigPath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "Pagurian",
-        "config.json");
+    public static string ConfigPath => Path.Combine(HostSettings.ConfigDir, "config.json");
 
     public static IReadOnlyList<Entry> Load()
     {
@@ -86,28 +84,57 @@ static class TrayConfig
         }
     }
 
-    // Development stand-in config: the three first-party modules' shells with
-    // fresh random ids. Only written when no config exists at all.
+    // Persists the tray entries (config folder created on demand). Writes to
+    // a temp file first, then atomically replaces the target. Throws on
+    // failure (after logging) so the settings UI can surface the error.
+    public static void Save(IReadOnlyList<Entry> entries)
+    {
+        try
+        {
+            var doc = new
+            {
+                tray = entries.Select(e => new
+                {
+                    shell = e.ShellType,
+                    id = e.Id,
+                    settings = e.Settings,
+                }),
+            };
+            var json = JsonSerializer.Serialize(doc,
+                new JsonSerializerOptions { WriteIndented = true });
+            Directory.CreateDirectory(Path.GetDirectoryName(ConfigPath)!);
+            var tmp = ConfigPath + ".tmp";
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, ConfigPath, overwrite: true);
+            PagurianLog.Host($"config: saved {entries.Count} entr(ies) to {ConfigPath}");
+        }
+        catch (Exception ex)
+        {
+            PagurianLog.HostError($"config: failed to save {ConfigPath}", ex);
+            throw;
+        }
+    }
+
+    // A fresh random 4-digit id not colliding with any of `taken`.
+    public static string NextId(IEnumerable<string> taken)
+    {
+        var ids = new HashSet<string>(taken);
+        string id;
+        do { id = Random.Shared.Next(1000, 10000).ToString(); } while (!ids.Add(id));
+        return id;
+    }
+
+    // Seed config: just the Hello shell with a fresh random id. Only written
+    // when no config exists at all.
     private static void Seed()
     {
         try
         {
-            var ids = new HashSet<string>();
-            string NextId()
-            {
-                string id;
-                do { id = Random.Shared.Next(1000, 10000).ToString(); } while (!ids.Add(id));
-                return id;
-            }
-
             var seed = new
             {
                 tray = new object[]
                 {
-                    new { shell = "Pagurian.Modules.Hello.HelloShell", id = NextId() },
-                    new { shell = "Pagurian.Modules.Metrics.CpuShell", id = NextId() },
-                    new { shell = "Pagurian.Modules.Metrics.MemShell", id = NextId() },
-                    new { shell = "Pagurian.Modules.Copilot.CopilotShell", id = NextId() },
+                    new { shell = "Pagurian.Modules.Hello.HelloShell", id = NextId(Array.Empty<string>()) },
                 },
             };
             Directory.CreateDirectory(Path.GetDirectoryName(ConfigPath)!);

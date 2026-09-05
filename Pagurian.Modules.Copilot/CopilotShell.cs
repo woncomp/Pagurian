@@ -7,7 +7,7 @@ namespace Pagurian.Modules.Copilot;
 // Startup registers the CLI hook file pointing at this shell's persistent id
 // and starts the session tracker; hook events arrive via OnMessage through
 // the host's post pipeline ("Pagurian.exe post {id} hook <event>").
-[Shell(DisplayName = "Copilot Sessions")]
+[Shell(DisplayName = "Copilot Sessions", PreviewIcon = "Assets/icons8-github-64.png")]
 public sealed class CopilotShell : Shell
 {
     private readonly Dictionary<string, ShellCellHandle> _cells = new();

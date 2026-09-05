@@ -32,9 +32,17 @@ ReactorApp.Run(_ =>
 
     TaskbarController.Start(trayWindow);
 
+    tray.DoubleClick += (_, _) => SettingsWindow.OpenOrActivate();
+
     tray.RightClick += (_, _) =>
     {
-        if (TaskbarInterop.ShowTrayMenu(TaskbarController.TrayWindowHwnd()) != TaskbarInterop.QuitCommandId)
+        var cmd = TaskbarInterop.ShowTrayMenu(TaskbarController.TrayWindowHwnd());
+        if (cmd == TaskbarInterop.SettingsCommandId)
+        {
+            SettingsWindow.OpenOrActivate();
+            return;
+        }
+        if (cmd != TaskbarInterop.QuitCommandId)
             return;
 
         // ReactorApp.Exit(0) only calls WinUI's Application.Exit(), which closes
@@ -42,6 +50,7 @@ ReactorApp.Run(_ =>
         // the WinUI unwind has been kicked off.
         TaskbarController.Stop();
         ShellMessageServer.Stop();
+        SettingsWindow.CloseIfOpen();
         TrayShells.ShutdownAll();
         ModuleLoader.ShutdownAll();
         tray.Close();

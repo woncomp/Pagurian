@@ -22,6 +22,12 @@ static class ModuleLoader
 {
     private static readonly List<PagurianModule> _modules = new();
     private static readonly Dictionary<string, ShellAttribute> _catalog = new();
+    private static readonly List<ShellAttribute> _kinds = new();
+
+    // The loaded modules and the shell-kind catalog in discovery order (the
+    // settings UI builds its module pool from these).
+    public static IReadOnlyList<PagurianModule> Modules => _modules;
+    public static IReadOnlyList<ShellAttribute> Kinds => _kinds;
 
     public static void LoadAll()
     {
@@ -181,7 +187,10 @@ static class ModuleLoader
         module.Log = Logger.For(module.Id);
         _modules.Add(module);
         foreach (var kind in kinds)
+        {
             _catalog[kind.ShellType.FullName!] = kind;
+            _kinds.Add(kind);
+        }
         PagurianLog.Host(
             $"modules: loaded {module.Id} with {kinds.Count} shell kind(s) from " +
             Path.GetFileName(path));
