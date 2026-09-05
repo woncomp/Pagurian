@@ -1,0 +1,14 @@
+<Project>
+  <PropertyGroup>
+    <PagurianSdkPackageVersion>0.1.0-preview.1</PagurianSdkPackageVersion>
+    <PagurianReactorPackageVersion>0.1.0-preview.12</PagurianReactorPackageVersion>
+  </PropertyGroup>
+
+  <!-- Package consumers carry their compile-time compatibility contract in
+       their own assembly. The host reads these attributes before reflecting
+       any SDK-derived module types. -->
+  <ItemGroup Condition="'$(MSBuildProjectName)' != 'Pagurian.Sdk'">
+    <AssemblyMetadata Include="PagurianSdkVersion" Value="$(PagurianSdkPackageVersion)" />
+    <AssemblyMetadata Include="PagurianReactorVersion" Value="$(PagurianReactorPackageVersion)" />
+  </ItemGroup>
+</Project>

@@ -11,8 +11,10 @@ dotnet run --project Pagurian -p:Platform=x64
 
 **Requires .NET SDK 10.0.302+** — SDK 10.0.302 is verified with Microsoft.UI.Reactor 0.1.0-preview.12. The library projects suppress their own project PRI files while the WinExe produces the app PRI, which keeps the standard x64 build working on this SDK.
 
-There are no tests and no linter. Verification is done by launching the app
-and observing the tray icon, the taskbar tray, billboards, and message boxes.
+There is no general unit-test suite or linter. Run
+`tests\Verify-ModuleIsolation.ps1` for the module load-context contract, then
+launch the app and observe the tray icon, taskbar tray, settings, billboards,
+and message boxes.
 
 ### Quick compile check on macOS (temporary development)
 
@@ -55,9 +57,10 @@ Concepts:
 - **Billboard** — a Reactor `Component` subclass popped up above the owner
   cell on click; content/size/lifecycle by the module, chrome/placement/
   dismissal by the host. One at a time.
-- **Module** — an independent assembly (own csproj in this sln) discovered
-  and loaded at runtime from `<exe>\modules\*.dll` and
-  `%LOCALAPPDATA%\Pagurian\modules\*.dll`. Modules are strictly decoupled.
+- **Module** — an independent folder bundle (own csproj in this sln), loaded
+  from `<exe>\modules\<name>\<name>.dll` or
+  `%LOCALAPPDATA%\Pagurian\modules\<name>\<name>.dll`. The matching
+  `.deps.json`, private dependencies, and assets live in the same folder.
 
 Current modules: **Hello** (clock cell + Hello billboard), **Metrics** (CPU
 and MEM shells, each standalone, sharing one sampler), **Copilot** (CLI hook
@@ -73,14 +76,15 @@ installer + per-session dynamic cells).
   `ModuleAssets`, `MessageBoxes`. `[InternalsVisibleTo("Pagurian")]` hides
   the host infrastructure members from modules.
 - `Pagurian.Modules.Hello` / `.Metrics` / `.Copilot` — the first-party
-  modules. Each has a `DeployToHostModules` post-build target copying its dll
-  (and assets) into the host output's `modules\` folder.
+  modules. Each has a `DeployToHostModules` post-build target creating its
+  self-contained folder under the host output's `modules\` folder.
 
 All projects target `net10.0-windows10.0.22621.0`, `UseWinUI`, platforms
-x64;ARM64, Microsoft.UI.Reactor 0.1.0-preview.12. Modules and the host must
-share one type universe: the loader uses the Default `AssemblyLoadContext`
-(`Assembly.LoadFrom`), so same TFM + same Reactor version is a hard
-requirement. Third-party modules only need to reference `Pagurian.Sdk`.
+x64;ARM64, Microsoft.UI.Reactor 0.1.0-preview.12. Each module loads in a
+private non-collectible `AssemblyLoadContext` backed by
+`AssemblyDependencyResolver`; Pagurian.Sdk/Reactor/WinUI stay shared from
+Default so the host and modules retain one UI contract type universe. SDK and
+Reactor package versions must match exactly. See `docs/External-Modules.md`.
 
 ## Host architecture (`Pagurian` project)
 
@@ -96,14 +100,13 @@ requirement. Third-party modules only need to reference `Pagurian.Sdk`.
   `SettingsWindow.CloseIfOpen()` → `TrayShells.ShutdownAll()` →
   `ModuleLoader.ShutdownAll()` → `tray.Close()` → `ReactorApp.Exit(0)` →
   `Environment.Exit(0)` (the last call is required).
-- `ModuleLoader.cs` — per-dll reflection discovery with strict validation:
-  exactly one `[PagurianModule]` type deriving from `PagurianModule` (0 =
-  skip, 2+ = reject the dll), `[Shell]` types must derive from `Shell`, kind
-  ids (type FullNames) and module ids deduplicated. A failing dll never
-  stops the host; details go to the unified log. Successful loads register
-  the kind catalog (shell FullName → `ShellAttribute` instance). `Modules`
-  and `Kinds` enumerate the loaded modules and shell kinds in discovery
-  order (the settings UI builds its module pool from these).
+- `ModuleLoader.cs` / `ModuleLoadContext.cs` — folders-only bundle discovery,
+  exact SDK/Reactor compatibility metadata validation, private managed/native
+  dependency resolution, and strict reflection validation: exactly one
+  `[PagurianModule]`, valid `[Shell]`/configuration types, and deduplicated
+  module/kind ids. Host-owned SDK/Reactor/WinUI assemblies are rejected from
+  bundles and shared from Default. One failing bundle never stops the host;
+  details go to the unified log.
 - `HostSettings.cs` — registry-backed host settings:
   `HKCU\Software\Pagurian\ConfigDir` overrides the configuration directory
   (default `%LOCALAPPDATA%\Pagurian`; writing the default deletes the

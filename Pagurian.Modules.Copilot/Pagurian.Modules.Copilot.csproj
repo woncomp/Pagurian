@@ -1,4 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="..\Pagurian.Sdk\buildTransitive\Pagurian.Sdk.props" />
+
   <PropertyGroup>
     <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
     <UseWinUI>true</UseWinUI>
@@ -9,11 +11,14 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Pagurian.Modules.Copilot</RootNamespace>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.UI.Reactor" Version="0.1.0-preview.12" />
-    <ProjectReference Include="..\Pagurian.Sdk\Pagurian.Sdk.csproj" />
+    <PackageReference Include="Microsoft.UI.Reactor" Version="0.1.0-preview.12">
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
+    <ProjectReference Include="..\Pagurian.Sdk\Pagurian.Sdk.csproj" Private="false" />
   </ItemGroup>
 
   <ItemGroup>
@@ -22,14 +27,17 @@
     </Content>
   </ItemGroup>
 
-  <!-- Deploy the module dll and its assets next to the host exe's modules
-       folder so the running app discovers it (see ModuleLoader). -->
+  <!-- Deploy a folder bundle and its assets into the development host output. -->
   <Target Name="DeployToHostModules" AfterTargets="Build">
     <PropertyGroup>
-      <HostModulesDir>$(MSBuildThisFileDirectory)..\Pagurian\bin\$(Platform)\$(Configuration)\$(TargetFramework)\modules\</HostModulesDir>
+      <HostModulesRoot>$(MSBuildThisFileDirectory)..\Pagurian\bin\$(Platform)\$(Configuration)\$(TargetFramework)\modules\</HostModulesRoot>
+      <HostModulesDir>$(HostModulesRoot)$(AssemblyName)\</HostModulesDir>
     </PropertyGroup>
     <MakeDir Directories="$(HostModulesDir);$(HostModulesDir)Assets" />
-    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(HostModulesDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(TargetPath);$(ProjectDepsFilePath)" DestinationFolder="$(HostModulesDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).pdb" DestinationFolder="$(HostModulesDir)" SkipUnchangedFiles="true" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
     <Copy SourceFiles="@(Content)" DestinationFolder="$(HostModulesDir)Assets" SkipUnchangedFiles="true" />
+    <Delete Files="$(HostModulesRoot)$(AssemblyName).dll;$(HostModulesRoot)Assets\icons8-github-64.png" />
+    <RemoveDir Directories="$(HostModulesRoot)Assets" Condition="Exists('$(HostModulesRoot)Assets')" />
   </Target>
 </Project>

@@ -1,5 +1,10 @@
 # Plugin Architecture Refactor — Handoff Document
 
+> Implementation update: modules now use mandatory per-module folders and a
+> private `AssemblyLoadContext` backed by `AssemblyDependencyResolver`.
+> Pagurian.Sdk/Reactor/WinUI contracts are explicitly shared from the host.
+> See `docs/External-Modules.md` for the current deployment contract.
+
 Status: **approved plan, not yet implemented**. This document is the complete,
 self-contained specification for refactoring Pagurian from a monolithic WinUI 3
 app into a host + plugin (module) architecture. It supersedes the relevant

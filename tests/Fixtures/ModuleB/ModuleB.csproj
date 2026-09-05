@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="..\..\..\Pagurian.Sdk\buildTransitive\Pagurian.Sdk.props" />
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <AssemblyName>Pagurian.Fixtures.ModuleB</AssemblyName>
+    <RootNamespace>Pagurian.Fixtures.ModuleB</RootNamespace>
+    <UseWinUI>true</UseWinUI>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <EnableMsixTooling>false</EnableMsixTooling>
+    <AppxGeneratePriEnabled>false</AppxGeneratePriEnabled>
+    <IncludeProjectPriFile>false</IncludeProjectPriFile>
+    <Platforms>x64</Platforms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.UI.Reactor" Version="$(PagurianReactorPackageVersion)">
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
+    <ProjectReference Include="..\..\..\Pagurian.Sdk\Pagurian.Sdk.csproj" Private="false" />
+    <ProjectReference Include="..\PrivateDependencyV2\PrivateDependencyV2.csproj" />
+  </ItemGroup>
+</Project>
