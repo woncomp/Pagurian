@@ -85,9 +85,24 @@ static class ModuleLoader
         _modules.Clear();
     }
 
+    private static string ExeDir()
+    {
+        // Single-file self-extract publish points AppContext.BaseDirectory at
+        // the temp extraction dir; the modules folder lives next to the real
+        // exe. Under `dotnet run` ProcessPath is dotnet.exe, so only trust it
+        // when it is our own apphost.
+        var exe = Environment.ProcessPath;
+        if (exe != null && string.Equals(
+                Path.GetFileNameWithoutExtension(exe),
+                AppDomain.CurrentDomain.FriendlyName,
+                StringComparison.OrdinalIgnoreCase))
+            return Path.GetDirectoryName(exe)!;
+        return AppContext.BaseDirectory;
+    }
+
     private static IEnumerable<string> ModuleDirs()
     {
-        yield return Path.Combine(AppContext.BaseDirectory, "modules");
+        yield return Path.Combine(ExeDir(), "modules");
         yield return Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "Pagurian", "modules");
