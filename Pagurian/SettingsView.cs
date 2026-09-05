@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Microsoft.UI;
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
@@ -24,6 +25,48 @@ namespace Pagurian;
 // when Save is pressed. Closing the window simply discards an unsaved draft.
 class SettingsView : Component
 {
+    private static readonly ConditionalWeakTable<FrameworkElement, InstantTooltipBinding>
+        InstantTooltipBindings = new();
+
+    private sealed class InstantTooltipBinding
+    {
+        public InstantTooltipBinding(string text)
+        {
+            ToolTip = new ToolTip { Content = text };
+            PointerEntered = OnPointerEntered;
+            PointerExited = OnPointerExited;
+            DragStarting = OnDragStarting;
+        }
+
+        public ToolTip ToolTip { get; }
+        public bool IsActive { get; set; }
+        public Microsoft.UI.Xaml.Input.PointerEventHandler PointerEntered { get; }
+        public Microsoft.UI.Xaml.Input.PointerEventHandler PointerExited { get; }
+        public Windows.Foundation.TypedEventHandler<UIElement, DragStartingEventArgs> DragStarting { get; }
+
+        private void OnPointerEntered(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs args) =>
+            SetOpen(sender, true);
+
+        private void OnPointerExited(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs args) =>
+            SetOpen(sender, false);
+
+        private void OnDragStarting(UIElement sender, DragStartingEventArgs args) =>
+            SetOpen(sender, false);
+
+        private void SetOpen(object sender, bool isOpen)
+        {
+            if (!IsActive ||
+                sender is not FrameworkElement element ||
+                !InstantTooltipBindings.TryGetValue(element, out var current) ||
+                !ReferenceEquals(current, this))
+            {
+                return;
+            }
+
+            ToolTip.IsOpen = isOpen;
+        }
+    }
+
     // Strip geometry; the drop handler maps DragTargetArgs.Position.X through
     // these constants back to an insertion index.
     private const double StripPadX = 8;
@@ -479,14 +522,39 @@ class SettingsView : Component
     // the ToolTip manually so the name pops up the instant the pointer
     // lands, and close it the moment a drag starts.
     private static Element WithInstantTooltip(Element element, string text) =>
-        element.OnMount(fe =>
-        {
-            var tip = new ToolTip { Content = text };
-            ToolTipService.SetToolTip(fe, tip);
-            fe.PointerEntered += (_, _) => tip.IsOpen = true;
-            fe.PointerExited += (_, _) => tip.IsOpen = false;
-            fe.DragStarting += (_, _) => tip.IsOpen = false;
-        });
+        element
+            .OnMountAdd(fe => AttachInstantTooltip(fe, text))
+            .OnUnmountAdd(DetachInstantTooltip);
+
+    private static void AttachInstantTooltip(FrameworkElement element, string text)
+    {
+        // A pooled native element should have been detached before reuse, but
+        // clean up defensively so a stale binding can never survive remount.
+        DetachInstantTooltip(element);
+
+        var binding = new InstantTooltipBinding(text);
+        InstantTooltipBindings.Add(element, binding);
+        ToolTipService.SetToolTip(element, binding.ToolTip);
+        binding.IsActive = true;
+        element.PointerEntered += binding.PointerEntered;
+        element.PointerExited += binding.PointerExited;
+        element.DragStarting += binding.DragStarting;
+    }
+
+    private static void DetachInstantTooltip(FrameworkElement element)
+    {
+        if (!InstantTooltipBindings.TryGetValue(element, out var binding))
+            return;
+
+        // Invalidate callbacks first, then detach handlers before clearing the
+        // native tooltip association. Any already-queued callback now no-ops.
+        binding.IsActive = false;
+        element.PointerEntered -= binding.PointerEntered;
+        element.PointerExited -= binding.PointerExited;
+        element.DragStarting -= binding.DragStarting;
+        ToolTipService.SetToolTip(element, null);
+        InstantTooltipBindings.Remove(element);
+    }
 
     private static bool TryGetPayload(DragData data, out ShellDragPayload payload)
     {
