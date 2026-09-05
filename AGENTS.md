@@ -12,6 +12,21 @@ dotnet run --project Pagurian -p:Platform=x64
 There are no tests and no linter. Verification is done by launching the app and observing
 the tray icon, taskbar icon window, popup, and message box.
 
+### Quick compile check on macOS (temporary development)
+
+A full build requires Windows (the WinAppSDK self-contained step runs `mt.exe`,
+a Windows-only binary). For fast feedback while coding on macOS, run:
+
+```bash
+dotnet build Pagurian.sln -p:EnableWindowsTargeting=true
+```
+
+The C# compiler runs to completion on macOS, so any syntax/type errors surface
+normally; the build then fails at the `mt.exe` manifest step, which is expected
+and unrelated to code correctness. Treat "compiles clean up to the mt.exe
+error" as a passing compile check; use a Windows machine/VM/CI for full builds
+and running the app.
+
 ## What this app is
 
 A WinUI 3 Fluent-style utility that (1) runs a system-tray icon with a Quit-only
