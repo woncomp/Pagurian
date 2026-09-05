@@ -4,10 +4,12 @@ using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Reactor.Input;
 using Microsoft.UI.Reactor.Layout;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Pagurian.Sdk;
 using Windows.Storage.Pickers;
 using Windows.UI;
+using Windows.UI.ViewManagement;
 using WinRT.Interop;
 using static Microsoft.UI.Reactor.Factories;
 
@@ -63,10 +65,25 @@ class SettingsView : Component
         var (appliedDir, setAppliedDir) = UseState(initialDir);
         var (stripHot, setStripHot) = UseState(false);
         var (poolHot, setPoolHot) = UseState(false);
+        // Live drop-target preview on the strip: the ghost-slot index plus the
+        // instance being dragged (null InstanceId = a pool kind is being added).
+        var (preview, setPreview) = UseState<(int Index, string? InstanceId)?>(null);
+
+        // Insertion index over the rendered slots. The dragged chip stays in
+        // the layout while dragging (only dimmed) — removing a live XAML drag
+        // source from the visual tree crashes the app when the drop lands.
+        int InsertIndexFor(double x) =>
+            Math.Clamp((int)Math.Floor((x - StripPadX) / ChipPitch), 0, draft.Count);
+
+        void ClearPreview()
+        {
+            if (preview != null)
+                setPreview(null);
+        }
 
         void DropOnStrip(ShellDragPayload payload, double x)
         {
-            var index = Math.Clamp((int)Math.Floor((x - StripPadX) / ChipPitch), 0, draft.Count);
+            var index = InsertIndexFor(x);
             if (payload.InstanceId != null)
             {
                 var from = draft.FindIndex(e => e.Id == payload.InstanceId);
@@ -180,6 +197,9 @@ class SettingsView : Component
             ? Color.FromArgb(0x08, 255, 255, 255)
             : Color.FromArgb(0x08, 0, 0, 0));
         var poolHotBrush = new SolidColorBrush(Color.FromArgb(0x30, 0xE8, 0x3B, 0x3B));
+        var accent = new UISettings().GetColorValue(UIColorType.Accent);
+        var ghostFill = new SolidColorBrush(Color.FromArgb(0x2E, accent.R, accent.G, accent.B));
+        var ghostStroke = new SolidColorBrush(Color.FromArgb(0xB0, accent.R, accent.G, accent.B));
 
         // ── Configuration folder ────────────────────────────────────────
         var trimmedDir = dirText.Trim();
@@ -208,17 +228,29 @@ class SettingsView : Component
             ]);
 
         // ── Tray mock ───────────────────────────────────────────────────
-        var chips = draft
-            .Select(e => TrayChip(e, chipBrush, missingBrush))
-            .ToArray();
-        Element stripContent = chips.Length == 0
+        // While a drag hovers the strip, a ghost slot marks the insertion
+        // point and SpringLayoutAnimation slides the chips aside in real
+        // time as the slot follows the cursor. The dragged chip stays in the
+        // layout (dimmed) for the whole drag: unmounting a live XAML drag
+        // source crashes the app when the drop lands.
+        var chips = new List<Element>();
+        for (var i = 0; i <= draft.Count; i++)
+        {
+            if (preview is { } pv && pv.Index == i)
+                chips.Add(GhostSlot(ghostFill, ghostStroke));
+            if (i < draft.Count)
+                chips.Add(TrayChip(draft[i], chipBrush, missingBrush, ClearPreview,
+                    dimmed: preview?.InstanceId == draft[i].Id));
+        }
+        Element stripContent = chips.Count == 0
             ? TextBlock("Tray is empty — drag shells here from the modules below")
                 .FontSize(12)
                 .Foreground(subtleBrush)
                 .HorizontalAlignment(HorizontalAlignment.Center)
                 .VerticalAlignment(VerticalAlignment.Center)
-            : HStack(ChipGap, chips)
-                .VerticalAlignment(VerticalAlignment.Center);
+            : HStack(ChipGap, chips.ToArray())
+                .VerticalAlignment(VerticalAlignment.Center)
+                .SpringLayoutAnimation();
 
         var strip = (Border(stripContent) with { CornerRadius = 8 })
             .Height(56)
@@ -227,17 +259,27 @@ class SettingsView : Component
             .BorderBrush(outlineBrush)
             .BorderThickness(1)
             .OnDragEnter(_ => setStripHot(true))
-            .OnDragLeave(_ => setStripHot(false))
+            .OnDragLeave(_ =>
+            {
+                setStripHot(false);
+                ClearPreview();
+            })
             .OnDragOver(args =>
             {
                 if (TryGetPayload(args.Data, out var p))
+                {
                     args.AcceptedOperation = p.InstanceId != null
                         ? DragOperations.Move
                         : DragOperations.Copy;
+                    var index = InsertIndexFor(args.Position.X);
+                    if (preview == null || preview.Value.Index != index || preview.Value.InstanceId != p.InstanceId)
+                        setPreview((index, p.InstanceId));
+                }
             })
             .OnDrop(args =>
             {
                 setStripHot(false);
+                ClearPreview();
                 if (TryGetPayload(args.Data, out var p))
                     DropOnStrip(p, args.Position.X);
             })
@@ -251,7 +293,7 @@ class SettingsView : Component
                     .Where(k => k.ShellType.Assembly == m.GetType().Assembly)
                     .ToList()))
             .Where(x => x.Kinds.Count > 0)
-            .Select(x => ModuleCard(x.Module, x.Kinds, textBrush, chipBrush, cardBrush, outlineBrush))
+            .Select(x => ModuleCard(x.Module, x.Kinds, textBrush, chipBrush, cardBrush, outlineBrush, ClearPreview))
             .ToArray();
         Element poolContent = cards.Length == 0
             ? TextBlock("No modules loaded")
@@ -270,6 +312,7 @@ class SettingsView : Component
             {
                 if (TryGetPayload(args.Data, out var p) && p.InstanceId != null)
                     setPoolHot(true);
+                ClearPreview();
             })
             .OnDragLeave(_ => setPoolHot(false))
             .OnDragOver(args =>
@@ -282,6 +325,7 @@ class SettingsView : Component
             .OnDrop(args =>
             {
                 setPoolHot(false);
+                ClearPreview();
                 if (TryGetPayload(args.Data, out var p) && p.InstanceId != null)
                     RemoveInstance(p.InstanceId);
             })
@@ -345,25 +389,31 @@ class SettingsView : Component
 
     // One chip on the tray mock: the kind's preview icon (Pagurian icon as
     // fallback), draggable for reorder/removal. Entries whose module is not
-    // loaded get a warning tint instead of being hidden.
-    private static Element TrayChip(TrayConfig.Entry entry, Brush chipBrush, Brush missingBrush)
+    // loaded get a warning tint instead of being hidden. While the chip is
+    // being dragged it stays mounted but dimmed (see the strip comment).
+    private static Element TrayChip(
+        TrayConfig.Entry entry, Brush chipBrush, Brush missingBrush, Action onDragEnd, bool dimmed = false)
     {
         var known = ModuleLoader.TryGetKind(entry.ShellType, out var kind);
         var name = NameFor(entry.ShellType);
-        return (Border(Image(IconFor(entry.ShellType))
-                    .Width(22)
-                    .Height(22)
-                    .AccessibilityHidden())
-                with { CornerRadius = 6 })
-            .Width(ChipSize)
-            .Height(ChipSize)
-            .Padding(9)
-            .Background(known ? chipBrush : missingBrush)
-            .HelpText(known
-                ? $"{name}  ·  #{entry.Id}"
-                : $"{name}  ·  #{entry.Id} (module not loaded)")
-            .OnDragStart(() => ShellDragPayload.ForInstance(entry.Id), DragOperations.Move)
-            .WithKey(entry.Id);
+        var tip = known
+            ? $"{name}  ·  #{entry.Id}"
+            : $"{name}  ·  #{entry.Id} (module not loaded)";
+        return WithInstantTooltip(
+            (Border(Image(IconFor(entry.ShellType))
+                        .Width(22)
+                        .Height(22)
+                        .AccessibilityHidden())
+                    with { CornerRadius = 6 })
+                .Width(ChipSize)
+                .Height(ChipSize)
+                .Padding(9)
+                .Opacity(dimmed ? 0.3 : 1)
+                .Background(known ? chipBrush : missingBrush)
+                .HelpText(tip)
+                .OnDragStart(() => ShellDragPayload.ForInstance(entry.Id), DragOperations.Move, _ => onDragEnd())
+                .WithKey(entry.Id),
+            tip);
     }
 
     // One pool card: module display name plus one draggable icon per shell
@@ -374,22 +424,28 @@ class SettingsView : Component
         Brush textBrush,
         Brush chipBrush,
         Brush cardBrush,
-        Brush outlineBrush)
+        Brush outlineBrush,
+        Action onDragEnd)
     {
         var icons = kinds
             .Select(k =>
-                (Element)(Border(Image(k.PreviewIconPath ?? AppAssets.IconPath)
-                        .Width(20)
-                        .Height(20)
-                        .AccessibilityHidden())
-                    with { CornerRadius = 6 })
-                .Width(36)
-                .Height(36)
-                .Padding(8)
-                .Background(chipBrush)
-                .HelpText(k.DisplayName.Length > 0 ? k.DisplayName : ShortName(k.ShellType.FullName!))
-                .OnDragStart(() => ShellDragPayload.ForKind(k.ShellType.FullName!), DragOperations.Copy)
-                .WithKey(module.Id + ":" + k.ShellType.FullName))
+            {
+                var tip = k.DisplayName.Length > 0 ? k.DisplayName : ShortName(k.ShellType.FullName!);
+                return (Element)WithInstantTooltip(
+                    (Border(Image(k.PreviewIconPath ?? AppAssets.IconPath)
+                            .Width(20)
+                            .Height(20)
+                            .AccessibilityHidden())
+                        with { CornerRadius = 6 })
+                    .Width(36)
+                    .Height(36)
+                    .Padding(8)
+                    .Background(chipBrush)
+                    .HelpText(tip)
+                    .OnDragStart(() => ShellDragPayload.ForKind(k.ShellType.FullName!), DragOperations.Copy, _ => onDragEnd())
+                    .WithKey(module.Id + ":" + k.ShellType.FullName),
+                    tip);
+            })
             .ToArray();
 
         return (Border(FlexColumn(
@@ -407,6 +463,30 @@ class SettingsView : Component
     }
 
     private static List<TrayConfig.Entry> LoadDraft() => TrayConfig.Load().ToList();
+
+    // Ghost insertion slot shown in the strip while a drag hovers over it.
+    private static Element GhostSlot(Brush fill, Brush stroke) =>
+        (Border(null!) with { CornerRadius = 6 })
+            .Width(ChipSize)
+            .Height(ChipSize)
+            .Background(fill)
+            .BorderBrush(stroke)
+            .BorderThickness(2)
+            .WithKey("ghost");
+
+    // The settings window is a normal activated window, so XAML tooltips
+    // work — but ToolTipService only opens them after a hover delay. Drive
+    // the ToolTip manually so the name pops up the instant the pointer
+    // lands, and close it the moment a drag starts.
+    private static Element WithInstantTooltip(Element element, string text) =>
+        element.OnMount(fe =>
+        {
+            var tip = new ToolTip { Content = text };
+            ToolTipService.SetToolTip(fe, tip);
+            fe.PointerEntered += (_, _) => tip.IsOpen = true;
+            fe.PointerExited += (_, _) => tip.IsOpen = false;
+            fe.DragStarting += (_, _) => tip.IsOpen = false;
+        });
 
     private static bool TryGetPayload(DragData data, out ShellDragPayload payload)
     {

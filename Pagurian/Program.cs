@@ -16,6 +16,14 @@ ReactorApp.Run(_ =>
     ReactorApp.ShutdownPolicy = ShutdownPolicy.Explicit;
 
     PagurianLog.Initialize();
+
+    // Last-resort crash logging: XAML fail-fasts normally leave no trace in
+    // the console or WER, so log before the process goes down.
+    AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        PagurianLog.Host($"FATAL unhandled exception: {e.ExceptionObject}");
+    Microsoft.UI.Xaml.Application.Current?.UnhandledException += (_, e) =>
+        PagurianLog.Host($"FATAL XAML unhandled exception: {e.Exception}");
+
     ModuleLoader.LoadAll();
     TrayShells.LoadFromConfig(TrayConfig.Load());
     ShellMessageServer.Start();
