@@ -50,7 +50,8 @@ class MemBillboard : Billboard
         var summary = $"Used {usedGb:F1} GB / {totalGb:F1} GB ({mem.UsedPercent:F0}%)";
 
         var topRows = new List<Element>();
-        foreach (var p in mem.TopProcesses)
+        foreach (var p in mem.TopProcesses.Take(
+                     MetricsSettings.TopProcesses(Shell.Settings)))
         {
             double wsMb = p.WorkingSetBytes / (1024.0 * 1024.0);
             topRows.Add(Grid(

@@ -15,6 +15,11 @@ public class ShellAttribute : Attribute
 {
     public string DisplayName { get; init; } = "";
 
+    // Optional module-owned Reactor component shown when this shell kind is
+    // selected in the host Settings window. The loader validates that the
+    // type is a concrete ShellConfiguration subclass.
+    public Type? ConfigurationView { get; init; }
+
     // Module-assembly-relative path to the icon shown for this kind in the
     // configuration UI (e.g. "Assets/foo.png"); empty = the host falls back
     // to the Pagurian app icon.

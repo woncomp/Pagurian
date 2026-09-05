@@ -81,7 +81,8 @@ class CpuBillboard : Billboard
         }
 
         var topRows = new List<Element>();
-        foreach (var p in cpu.TopProcesses)
+        foreach (var p in cpu.TopProcesses.Take(
+                     MetricsSettings.TopProcesses(Shell.Settings)))
         {
             topRows.Add(Grid(
                 [GridSize.Star(), GridSize.Auto, GridSize.Px(64)],
@@ -122,7 +123,8 @@ class CpuBillboard : Billboard
                     .FontSize(12)
                     .SemiBold()
                     .Margin(0, 10, 0, 4),
-                VStack(2, topRows.ToArray()))
+                ScrollViewer(VStack(2, topRows.ToArray()))
+                    .Flex(1))
             .Padding(14);
     }
 }

@@ -55,6 +55,21 @@ static class TrayShells
             // keep: restart it under the new kind.
             if (live != null && live.GetType().FullName == entry.ShellType)
             {
+                if (!SettingsEqual(live.Settings, entry.Settings))
+                {
+                    live.Settings = entry.Settings;
+                    try
+                    {
+                        live.OnSettingsChanged();
+                        PagurianLog.Host(
+                            $"tray: shell {entry.ShellType} settings updated (#{entry.Id})");
+                    }
+                    catch (Exception ex)
+                    {
+                        PagurianLog.HostError(
+                            $"tray: {entry.ShellType} OnSettingsChanged failed", ex);
+                    }
+                }
                 ordered.Add(live);
                 continue;
             }
@@ -70,6 +85,15 @@ static class TrayShells
         _shells.Clear();
         _shells.AddRange(ordered);
         RebuildCells();
+    }
+
+    private static bool SettingsEqual(
+        System.Text.Json.JsonElement? left,
+        System.Text.Json.JsonElement? right)
+    {
+        if (left == null || right == null)
+            return left == null && right == null;
+        return System.Text.Json.JsonElement.DeepEquals(left.Value, right.Value);
     }
 
     // Instantiation pipeline for one config entry: kind lookup -> factory ->

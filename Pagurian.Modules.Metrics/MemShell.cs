@@ -2,7 +2,7 @@ using Pagurian.Sdk;
 
 namespace Pagurian.Modules.Metrics;
 
-[Shell(DisplayName = "Memory Load")]
+[Shell(DisplayName = "Memory Load", ConfigurationView = typeof(MemConfiguration))]
 public sealed class MemShell : Shell
 {
     public override void Startup()
@@ -12,6 +12,8 @@ public sealed class MemShell : Shell
             model: SystemMetricKind.Memory,
             billboard: () => new MemBillboard());
     }
+
+    public override void OnSettingsChanged() => SystemMetricsTracker.NotifyChanged();
 
     public override void Shutdown() => MetricsModule.Instance.ShellStopped();
 }

@@ -21,7 +21,9 @@ class HelloBillboard : Billboard
             TextBlock("Hello World")
                 .FontSize(16),
             Button("Say Hello Again",
-                    () => MessageBoxes.Show("Hello World Again!", "Pagurian"))
+                    () => MessageBoxes.Show(
+                        HelloSettings.Message(Shell.Settings),
+                        "Pagurian"))
                 .Margin(0, 12, 0, 0))
             .Padding(14);
 }

@@ -456,7 +456,7 @@ static class SystemMetricsTracker
         var top = candidates
             .OrderByDescending(c => c.Percent)
             .ThenBy(c => c.ProcessId)
-            .Take(3)
+            .Take(MetricsSettings.MaxTopProcesses)
             .ToList();
 
         return new CpuSnapshot(
@@ -478,7 +478,7 @@ static class SystemMetricsTracker
             .Where(p => p.WorkingSetBytes > 0)
             .OrderByDescending(p => p.WorkingSetBytes)
             .ThenBy(p => p.Pid)
-            .Take(3)
+            .Take(MetricsSettings.MaxTopProcesses)
             .Select(p => new MemoryProcessUsage(
                 p.Pid,
                 p.Name,

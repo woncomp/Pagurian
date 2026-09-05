@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using Microsoft.UI;
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
@@ -9,6 +10,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Pagurian.Sdk;
 using Windows.Storage.Pickers;
+using Windows.System;
 using Windows.UI;
 using Windows.UI.ViewManagement;
 using WinRT.Interop;
@@ -108,6 +110,7 @@ class SettingsView : Component
         var (appliedDir, setAppliedDir) = UseState(initialDir);
         var (stripHot, setStripHot) = UseState(false);
         var (poolHot, setPoolHot) = UseState(false);
+        var (selectedId, setSelectedId) = UseState<string?>(null);
         // Live drop-target preview on the strip: the ghost-slot index plus the
         // instance being dragged (null InstanceId = a pool kind is being added).
         var (preview, setPreview) = UseState<(int Index, string? InstanceId)?>(null);
@@ -157,6 +160,30 @@ class SettingsView : Component
             if (next.Count == draft.Count)
                 return;
             setDraft(next);
+            if (selectedId == instanceId)
+                setSelectedId(null);
+            setDirty(true);
+        }
+
+        void UpdateEntrySettings(string instanceId, JsonElement? settings)
+        {
+            if (settings is { } value && value.ValueKind != JsonValueKind.Object)
+            {
+                PagurianLog.HostError(
+                    $"settings: configuration view for #{instanceId} returned non-object JSON");
+                return;
+            }
+
+            var index = draft.FindIndex(e => e.Id == instanceId);
+            if (index < 0)
+                return;
+
+            var next = new List<TrayConfig.Entry>(draft);
+            next[index] = next[index] with
+            {
+                Settings = settings is { } replacement ? replacement.Clone() : null,
+            };
+            setDraft(next);
             setDirty(true);
         }
 
@@ -180,7 +207,10 @@ class SettingsView : Component
 
         void RevertDraft()
         {
-            setDraft(LoadDraft());
+            var entries = LoadDraft();
+            setDraft(entries);
+            if (selectedId != null && entries.All(e => e.Id != selectedId))
+                setSelectedId(null);
             setDirty(false);
         }
 
@@ -197,6 +227,8 @@ class SettingsView : Component
                 setAppliedDir(HostSettings.ConfigDir);
                 setDirText(HostSettings.ConfigDir);
                 setDraft(entries.ToList());
+                if (selectedId != null && entries.All(e => e.Id != selectedId))
+                    setSelectedId(null);
                 setDirty(false);
             }
             catch (Exception ex)
@@ -241,6 +273,10 @@ class SettingsView : Component
             : Color.FromArgb(0x08, 0, 0, 0));
         var poolHotBrush = new SolidColorBrush(Color.FromArgb(0x30, 0xE8, 0x3B, 0x3B));
         var accent = new UISettings().GetColorValue(UIColorType.Accent);
+        var selectionFill = new SolidColorBrush(
+            Color.FromArgb(0x28, accent.R, accent.G, accent.B));
+        var selectionStroke = new SolidColorBrush(
+            Color.FromArgb(0xFF, accent.R, accent.G, accent.B));
         var ghostFill = new SolidColorBrush(Color.FromArgb(0x2E, accent.R, accent.G, accent.B));
         var ghostStroke = new SolidColorBrush(Color.FromArgb(0xB0, accent.R, accent.G, accent.B));
 
@@ -282,8 +318,19 @@ class SettingsView : Component
             if (preview is { } pv && pv.Index == i)
                 chips.Add(GhostSlot(ghostFill, ghostStroke));
             if (i < draft.Count)
-                chips.Add(TrayChip(draft[i], chipBrush, missingBrush, ClearPreview,
-                    dimmed: preview?.InstanceId == draft[i].Id));
+            {
+                var entry = draft[i];
+                chips.Add(TrayChip(
+                    entry,
+                    chipBrush,
+                    missingBrush,
+                    selectionFill,
+                    selectionStroke,
+                    selected: selectedId == entry.Id,
+                    onSelected: () => setSelectedId(entry.Id),
+                    onDragEnd: ClearPreview,
+                    dimmed: preview?.InstanceId == entry.Id));
+            }
         }
         Element stripContent = chips.Count == 0
             ? TextBlock("Tray is empty — drag shells here from the modules below")
@@ -301,6 +348,17 @@ class SettingsView : Component
             .Background(stripHot ? stripHotBrush : stripBrush)
             .BorderBrush(outlineBrush)
             .BorderThickness(1)
+            .AutomationName("Tray shell selector")
+            .IsTabStop(true)
+            .OnTapped((_, _) => setSelectedId(null))
+            .OnKeyDown((_, args) =>
+            {
+                if (args.Key is VirtualKey.Enter or VirtualKey.Space)
+                {
+                    setSelectedId(null);
+                    args.Handled = true;
+                }
+            })
             .OnDragEnter(_ => setStripHot(true))
             .OnDragLeave(_ =>
             {
@@ -374,6 +432,22 @@ class SettingsView : Component
             })
             .Margin(0, 6, 0, 0);
 
+        var selectedEntry = selectedId == null
+            ? null
+            : draft.FirstOrDefault(e => e.Id == selectedId);
+        var bottomTitle = selectedEntry == null
+            ? "Modules"
+            : $"{NameFor(selectedEntry.ShellType)} configuration · #{selectedEntry.Id}";
+        var bottomContent = selectedEntry == null
+            ? pool
+            : ShellConfigurationPanel(
+                selectedEntry,
+                textBrush,
+                subtleBrush,
+                poolBrush,
+                outlineBrush,
+                settings => UpdateEntrySettings(selectedEntry.Id, settings));
+
         // ── Footer ──────────────────────────────────────────────────────
         var footer = HStack(8,
                 TextBlock("Unsaved changes")
@@ -419,12 +493,12 @@ class SettingsView : Component
                     .Margin(0, 2, 0, 0),
                 strip,
 
-                TextBlock("Modules")
+                TextBlock(bottomTitle)
                     .FontSize(13)
                     .SemiBold()
                     .Foreground(textBrush)
                     .Margin(0, 16, 0, 0),
-                pool,
+                bottomContent,
 
                 footer)
             .Padding(16);
@@ -435,7 +509,15 @@ class SettingsView : Component
     // loaded get a warning tint instead of being hidden. While the chip is
     // being dragged it stays mounted but dimmed (see the strip comment).
     private static Element TrayChip(
-        TrayConfig.Entry entry, Brush chipBrush, Brush missingBrush, Action onDragEnd, bool dimmed = false)
+        TrayConfig.Entry entry,
+        Brush chipBrush,
+        Brush missingBrush,
+        Brush selectionFill,
+        Brush selectionStroke,
+        bool selected,
+        Action onSelected,
+        Action onDragEnd,
+        bool dimmed = false)
     {
         var known = ModuleLoader.TryGetKind(entry.ShellType, out var kind);
         var name = NameFor(entry.ShellType);
@@ -452,11 +534,79 @@ class SettingsView : Component
                 .Height(ChipSize)
                 .Padding(9)
                 .Opacity(dimmed ? 0.3 : 1)
-                .Background(known ? chipBrush : missingBrush)
+                .Background(known
+                    ? selected ? selectionFill : chipBrush
+                    : missingBrush)
+                .BorderBrush(selectionStroke)
+                .BorderThickness(selected ? 2 : 0)
                 .HelpText(tip)
+                .AutomationName($"Configure {name}, shell {entry.Id}")
+                .IsTabStop(true)
+                .OnTapped((_, args) =>
+                {
+                    args.Handled = true;
+                    onSelected();
+                })
+                .OnKeyDown((_, args) =>
+                {
+                    if (args.Key is VirtualKey.Enter or VirtualKey.Space)
+                    {
+                        onSelected();
+                        args.Handled = true;
+                    }
+                })
                 .OnDragStart(() => ShellDragPayload.ForInstance(entry.Id), DragOperations.Move, _ => onDragEnd())
                 .WithKey(entry.Id),
             tip);
+    }
+
+    private static Element ShellConfigurationPanel(
+        TrayConfig.Entry entry,
+        Brush textBrush,
+        Brush subtleBrush,
+        Brush backgroundBrush,
+        Brush outlineBrush,
+        Action<JsonElement?> setSettings)
+    {
+        Element content;
+        if (!ModuleLoader.TryGetKind(entry.ShellType, out var kind))
+        {
+            content = FlexColumn(
+                TextBlock("Configuration unavailable")
+                    .FontSize(13)
+                    .SemiBold()
+                    .Foreground(textBrush),
+                TextBlock("The module that owns this shell is not loaded. Its existing settings will be preserved.")
+                    .FontSize(12)
+                    .Foreground(subtleBrush)
+                    .TextWrapping(TextWrapping.Wrap)
+                    .Margin(0, 6, 0, 0));
+        }
+        else if (kind.ConfigurationView == null)
+        {
+            content = TextBlock("No configurable settings.")
+                .FontSize(12)
+                .Foreground(subtleBrush);
+        }
+        else
+        {
+            var props = new ShellConfigurationProps(
+                entry.Id,
+                entry.Settings,
+                setSettings,
+                ThemeService.Instance,
+                Logger.For($"{entry.ShellType}#{entry.Id}"));
+            content = new ComponentElement(kind.ConfigurationView, props)
+                .WithKey($"configuration:{entry.ShellType}:{entry.Id}");
+        }
+
+        return (Border(ScrollViewer(content)) with { CornerRadius = 10 })
+            .Padding(12)
+            .Background(backgroundBrush)
+            .BorderBrush(outlineBrush)
+            .BorderThickness(1)
+            .Flex(1)
+            .Margin(0, 6, 0, 0);
     }
 
     // One pool card: module display name plus one draggable icon per shell

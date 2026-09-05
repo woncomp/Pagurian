@@ -39,6 +39,11 @@ public abstract class Shell
     // shell. Runs on the UI thread.
     public virtual void OnMessage(ShellMessage message) { }
 
+    // Called on the UI thread after a saved configuration changes Settings
+    // for an already-running shell. Initial settings are available before
+    // Startup and do not trigger this callback.
+    public virtual void OnSettingsChanged() { }
+
     // Attaches a cell to this shell. TCell is the Reactor component rendering
     // the cell's content (Reactor creates and pools component instances by
     // type, so per-cell state must live in `model`, not in TCell fields).

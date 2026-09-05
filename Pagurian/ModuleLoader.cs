@@ -169,6 +169,17 @@ static class ModuleLoader
                     "Shell — dll rejected");
                 return;
             }
+            if (attr.ConfigurationView is { } configurationView &&
+                (!typeof(ShellConfiguration).IsAssignableFrom(configurationView) ||
+                 configurationView.IsAbstract ||
+                 configurationView.ContainsGenericParameters))
+            {
+                PagurianLog.HostError(
+                    $"modules: {type.FullName} names invalid configuration view " +
+                    $"{configurationView.FullName}; it must be a concrete " +
+                    $"{nameof(ShellConfiguration)} subclass — dll rejected");
+                return;
+            }
             if (!kindIds.Add(type.FullName!))
             {
                 PagurianLog.HostError(
