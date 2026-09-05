@@ -377,9 +377,11 @@ static class TaskbarController
         var scale = (horizontal ? taskbar.Height : taskbar.Width) / TaskbarTrayWindow.WindowHeightDip;
         var windowScale = ScaleOf(_trayWindow!);
         TaskbarTrayWindow.SetContentScale(scale / windowScale);
+        var totalWidthDip = TaskbarTrayLayout.TotalWidthDip;
+        TaskbarTrayLayout.ReportMeasuredWidth(totalWidthDip);
         // ≥1 px even before the first layout pass (cells read 0 wide until
         // then): never hand SetWindowPos a 0-sized window.
-        var winW = Math.Max(TaskbarTrayLayout.TotalWidthDip * scale, 1);
+        var winW = Math.Max(totalWidthDip * scale, 1);
         var winH = (TaskbarTrayWindow.WindowHeightDip - 2 * TaskbarTrayWindow.WindowInsetYDip) * scale;
 
         double xPx, yPx;

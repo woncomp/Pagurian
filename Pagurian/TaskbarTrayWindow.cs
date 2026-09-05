@@ -151,7 +151,12 @@ class TaskbarTrayWindow : Component
         {
             void OnChanged() => setVersion(++tick.Current);
             TrayShells.Changed += OnChanged;
-            return () => TrayShells.Changed -= OnChanged;
+            TaskbarTrayLayout.MeasuredWidthChanged += OnChanged;
+            return () =>
+            {
+                TrayShells.Changed -= OnChanged;
+                TaskbarTrayLayout.MeasuredWidthChanged -= OnChanged;
+            };
         }, Array.Empty<object>());
 
         var cells = TrayShells.Cells;
@@ -165,7 +170,7 @@ class TaskbarTrayWindow : Component
         // child components by type, so a cell renders as a ComponentElement
         // carrying its props record.
         var contentWidth = Math.Max(TaskbarTrayLayout.TotalWidthDip, 1);
-        return Border(
+        var content = Border(
                 HStack(0,
                     cells.Select(cell =>
                         (Element)(Border(new ComponentElement(cell.ViewType, cell.Props))
@@ -181,7 +186,14 @@ class TaskbarTrayWindow : Component
             {
                 border.RenderTransform = ContentScaleTransform;
                 border.RenderTransformOrigin = new Windows.Foundation.Point(0, 0);
-            })
+            });
+
+        // The content keeps its explicit unscaled width for DPI compensation,
+        // while this unconstrained outer layer fills the HWND. If the native
+        // window grows before newly mounted cells finish measuring, the new
+        // space therefore shows the sampled taskbar gradient instead of the
+        // window's default white background.
+        return Border(content)
             .Background(TaskbarColorBrush);
     }
 }

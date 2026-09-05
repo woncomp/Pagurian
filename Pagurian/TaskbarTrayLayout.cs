@@ -14,17 +14,25 @@ namespace Pagurian;
 // grows it to the real content size within a tick or two.
 //
 // Both consumers run on the UI thread (Render and the controller's poll
-// tick), so no locking. This class must never raise events or set component
-// state: Render binds the refs and the controller resizes the window on its
-// next tick, with no feedback loop.
+// tick), so no locking. The controller reports measured-width changes back
+// through the guarded event below; stable measurements raise nothing, which
+// prevents a render/resize feedback loop.
 sealed record CellInfo(string Key, double InnerWidthDip, double CellWidthDip);
 
 static class TaskbarTrayLayout
 {
+    private const double WidthChangeToleranceDip = 0.5;
+
     // One imperative ref per cell Border, bound in Render via .Ref(). A
     // static cache like the window's brush caches, since cells come and go;
     // refs for removed cells are dropped from Render (PruneRefs).
     private static readonly Dictionary<string, ElementRef> _cellRefs = new();
+    private static double _lastReportedTotalWidthDip = double.NaN;
+
+    // Raised after the controller observes a new measured total width. The
+    // tray window uses this to replace the provisional width from the render
+    // that first mounted a cell with its final ActualWidth-based width.
+    public static event Action? MeasuredWidthChanged;
 
     public static ElementRef RefFor(string key)
     {
@@ -56,6 +64,21 @@ static class TaskbarTrayLayout
                 total += cell.CellWidthDip;
             return total;
         }
+    }
+
+    // Called by the controller's normal anchor pass after it has read all
+    // mounted cell refs. Stable measurements do not raise another event, so
+    // the resulting re-render cannot form a render/resize feedback loop.
+    public static void ReportMeasuredWidth(double totalWidthDip)
+    {
+        if (!double.IsNaN(_lastReportedTotalWidthDip) &&
+            Math.Abs(totalWidthDip - _lastReportedTotalWidthDip) <= WidthChangeToleranceDip)
+        {
+            return;
+        }
+
+        _lastReportedTotalWidthDip = totalWidthDip;
+        MeasuredWidthChanged?.Invoke();
     }
 
     // Drop refs whose cell is gone (dynamic shells remove cells), or the
