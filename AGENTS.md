@@ -2,256 +2,239 @@
 
 ## Build and run
 
-Always build/run with an explicit platform (required for WinUI 3, like the Tea project this repo mirrors):
+Always build/run with an explicit platform (required for WinUI 3):
 
 ```powershell
 dotnet build Pagurian.sln -p:Platform=x64
 dotnet run --project Pagurian -p:Platform=x64
 ```
 
-There are no tests and no linter. Verification is done by launching the app and observing
-the tray icon, taskbar icon window, popup, and message box.
+**Requires .NET SDK 10.0.400+** — the Microsoft.UI.Reactor analyzers/source
+generators reference Roslyn 5.6 and silently fail to load on older SDKs
+(CS9057); the fluent element modifiers (`.FontSize()`, `.Width()`, …) then
+vanish and every UI file fails with CS1955.
+
+There are no tests and no linter. Verification is done by launching the app
+and observing the tray icon, the taskbar tray, billboards, and message boxes.
 
 ### Quick compile check on macOS (temporary development)
 
-A full build requires Windows (the WinAppSDK self-contained step runs `mt.exe`,
-a Windows-only binary). For fast feedback while coding on macOS, run:
+A full build requires Windows (the WinAppSDK self-contained step runs
+`mt.exe`, a Windows-only binary). For fast feedback while coding on macOS:
 
 ```bash
 dotnet build Pagurian.sln -p:EnableWindowsTargeting=true
 ```
 
-The C# compiler runs to completion on macOS, so any syntax/type errors surface
-normally; the build then fails at the `mt.exe` manifest step, which is expected
-and unrelated to code correctness. Treat "compiles clean up to the mt.exe
-error" as a passing compile check; use a Windows machine/VM/CI for full builds
-and running the app.
+Treat "compiles clean up to the mt.exe/manifest errors" as a passing compile
+check; use a Windows machine/VM/CI for full builds and running the app. (The
+library projects set `EnableMsixTooling=false` + `AppxGeneratePriEnabled=false`
+so they don't run the Windows-only MakePri step; the PRI payloads are expanded
+by the host project instead.)
 
 ## What this app is
 
-A WinUI 3 Fluent-style utility that (1) runs a system-tray icon with a Quit-only
-native Win32 context menu, (2) injects a borderless window into the Windows
-taskbar (child of `Shell_TrayWnd`) that is a **horizontal container of widget
-cells**: the first cell replicates the native Windows 11 datetime widget — two
-centered 12-DIP lines (time over date, current-culture short formats, updated
-every second) — followed by fixed **CPU and memory** cells showing percentage +
-thin gauge, and then **one cell per tracked GitHub Copilot CLI session**
-(GitHub icon + colored status text), all blending into the taskbar, with the
-native rounded translucent hover/pressed highlight per cell and light/dark text
-adaptation, (3) opens a small popup (icon + "Hello World" + button → Win32
-MessageBox) when clicking the clock cell, (4) opens detail popups for the CPU
-and memory cells, and (5) registers a **Copilot CLI hook** while running: hook
-events flow in over a named pipe, each new session gets a taskbar cell showing
-its status (`Idle`/`Working`/`Blocked`, color-coded; `sessionEnd` removes the
-cell), hovering a session cell shows a tooltip with the session name, and
-clicking it opens a popup with the name, status, and the last received event
-dumped as JSON.
+A WinUI 3 Fluent-style utility that (1) runs a system-tray icon with a
+Quit-only native Win32 context menu, (2) injects a borderless **Tray** window
+into the Windows taskbar (child of `Shell_TrayWnd`) that lays out **Shells**
+horizontally, each shell contributing zero or more **ShellCells**, (3) shows
+**Billboards** (detail panels) above the tray when cells are clicked, and
+(4) receives messages for shells via `Pagurian.exe post {shell_id} <cmd>
+[args...]` (the Copilot CLI hooks are the primary caller).
 
-## High-level architecture
+Concepts:
 
-C#-only, no XAML. UI is built with **Microsoft.UI.Reactor 0.1.0-preview.12** (React-style
-components: `Component.Render()`, `useState`-style hooks, `static Factories` helpers).
+- **Tray** — the injected window; a horizontal stack of cells, ordered by the
+  config file. Host-owned.
+- **Shell** — a configured module feature instance (plain object, not a
+  component) with a persistent 4-digit id; the `post` target; a container of
+  cells. A shell with zero cells occupies no tray space.
+- **ShellCell** — a Reactor `Component` subclass rendering one cell's
+  content; hover/click/tooltip/billboard are per-cell. Cells have no id and
+  receive no messages.
+- **Billboard** — a Reactor `Component` subclass popped up above the owner
+  cell on click; content/size/lifecycle by the module, chrome/placement/
+  dismissal by the host. One at a time.
+- **Module** — an independent assembly (own csproj in this sln) discovered
+  and loaded at runtime from `<exe>\modules\*.dll` and
+  `%LOCALAPPDATA%\Pagurian\modules\*.dll`. Modules are strictly decoupled.
 
-- `Program.cs` — single entry. First statement is the **bridge-mode intercept**:
-  `Pagurian.exe --hook <event>` runs `CopilotHookBridge.Run(event)` and returns
-  before ever touching WinUI or the metrics tracker (see the Copilot hook
-  bullets below). Otherwise `ReactorApp.Run(startup)` where startup sets
-  `ShutdownPolicy.Explicit`, installs the Copilot hook file, starts the
-  session tracker and the system-metrics tracker, opens the tray icon
-  (`ReactorApp.OpenTrayIcon`, all `ReactorApp` methods are **static**), opens
-  the icon window, then hands both to the controller. Nothing else may own app
-  lifecycle; quitting happens only via the tray menu
-  (`TaskbarController.Stop()` → `SystemMetricsTracker.Stop()` →
-  `CopilotSessionTracker.Stop()` → `CopilotHookInstaller.Uninstall()` →
-  `tray.Close()` → `ReactorApp.Exit(0)` → `Environment.Exit(0)` — the last call
-  is required: `ReactorApp.Exit(0)` alone closes the windows but leaves the
-  process running).
-- `TaskbarController.cs` — the heart of the app. A `DispatcherQueueTimer` on
-  `ReactorApp.UIDispatcher` polls every 50 ms and does these things:
-  1. **Inject/anchor**: parents the icon window into `Shell_TrayWnd` (`SetParent`,
-     one attempt per tick) and keeps it positioned at the taskbar's left-bottom
-     corner via `SetWindowPos` in client coordinates; re-injects after Explorer
-     restarts. Anchor geometry is derived from the **live taskbar rect**, never
-     from the window's `DipScale` (which can lag behind display-topology
-     changes): taskbars are 48 DIP thick by design, so `taskbar.Height / 48`
-     doubles as the taskbar's own DPI scale, and the widget height is the taskbar
-     thickness minus `2 × WindowInsetYDip` (2 DIP clear top and bottom, so it
-     sits slightly inside the taskbar — and can never stick out of it), with
-     the position clamped inside the taskbar rect on top of that (a stale
-     DPI/rect leaving the widget covering the taskbar's top edge was a real
-     bug). The window **width** is `TaskbarIconWindow.TotalWidthDip()` — clock
-     cell + CPU cell + memory cell + one cell per tracked session — read every
-     tick, so session add/remove resizes the window through the normal
-     `SetWindowPos` path. After anchoring, the controller rebuilds the
-     **per-cell hit-test rects** (`_cellRectsPx`: clock, CPU, memory, then
-     sessions in first-seen order) used by hover/click/tooltip.
-  2. **Blend**: the taskbar is translucent, so its apparent color *varies along
-     its length* (wallpaper showing through — measured deltas over 25 levels
-     across the widget's own width; a single sampled color visibly mismatched
-     the far edge). The widget therefore paints a **gradient**
-     (`TaskbarIconWindow.TaskbarColorBrush`, a 5-stop `LinearGradientBrush`
-     along the taskbar's long axis) whose stops are sampled from the
-     2-DIP native taskbar sliver the widget's inset leaves uncovered (below
-     the widget for horizontal taskbars; above+below with linear
-     interpolation for vertical ones). Each stop is a trimmed mean over a
-     column slice of the captured strip (sort by luminance, average the
-     middle 50%) so acrylic noise and glyph pixels are dropped; the theme
-     color is the average of the stops. (The injected child window can't be
-     transparent, so the sampled opaque colors *are* the blend — like the
-     native clock's transparent background, minus the transparency.)
-     **Sampling never runs on the UI thread** — see "Screen reads block"
-     below; the tick only kicks off a throttled (250 ms) background capture
-     (`TaskbarInterop.CaptureScreenRegionPixels`, one BitBlt per strip) and
-     applies the result via `UIDispatcher.TryEnqueue`.
-  3. **Theme/hover visuals**: derives light/dark from the average sampled
-     taskbar luminance (Rec.601, threshold 140 — always matches the taskbar itself,
-     including translucency/accent tints; no registry/UISettings) and mutates
-     `TextBrush` (TextFillColorPrimary: white / #1A1A1A) plus the **per-cell**
-     hover overlay brush of the hovered cell only (`TaskbarIconWindow
-     .HoverBrushFor(widgetId)`: rounded translucent overlay inset 3×4 DIP with
-     4 DIP radius, alpha 0 idle, SubtleFillColorSecondary #0F white / #09 black
-     on hover, SubtleFillColorTertiary #0A / #06 while pressed; pressed =
-     `GetAsyncKeyState(VK_LBUTTON)` polled while hovering). A theme flip also
-     calls `CopilotSessionTracker.NotifyChanged()` and refreshes the CPU/memory
-     gauge accent/track brushes so the per-render status colors stay current.
-  4. **Popup/tooltip**: polls `GetCursorPos` + `GetAsyncKeyState(VK_LBUTTON)`
-     against the cached per-cell pixel rects; a left-button up→down edge
-     (50 ms polling reliably catches physical clicks) inside the clock cell
-     toggles the Hello popup, inside the CPU or memory cells toggles their
-     detail popups, inside a session cell toggles that session's popup, and a
-     click outside all cells and popups dismisses whichever is open (native
-     flyout style; clicks inside a popup don't dismiss; **one popup at a time**
-     — opening one closes the other). Resting the cursor on a session cell for
-     ~400 ms (8 ticks) opens a `TooltipWindow` with the session name above the
-     cell; leaving the cell or clicking hides it.
+Current modules: **Hello** (clock cell + Hello billboard), **Metrics** (CPU
+and MEM shells, each standalone, sharing one sampler), **Copilot** (CLI hook
+installer + per-session dynamic cells).
 
-- `TaskbarIconWindow.cs` / `HoverPopupWindow.cs` / `SessionPopupWindow.cs` /
-  `CpuMetricsPopupWindow.cs` / `MemoryMetricsPopupWindow.cs` / `TooltipWindow.cs`
-  — Reactor `Component`s plus `CreateSpec()` factories returning their `WindowSpec`.
- Window chrome comes entirely from `WindowSpec`
-  (`Style.None`, `Backdrop`, `CornerStyle.Rounded`, `NoActivate`, …), not from
-  content. `TaskbarIconWindow` is the **cell container**: an `HStack` of keyed
-  cells — the clock replica (`UseState` + a 1 s `DispatcherQueueTimer` in
-  `UseEffect` update the two `TextBlock` lines, guarded so it only re-renders
-  when the text actually changes) followed by one cell per tracked Copilot
-  session (GitHub icon + colored status text). It re-renders when
-  `CopilotSessionTracker.UiChanged` fires (a version-`UseState` bump — the Tea
-  refresh-counter pattern). Live visuals that change at poll frequency are
-  static brushes mutated in place by the controller (no re-render):
-  `TaskbarColorBrush` (the blend gradient), `TextBrush`, the per-cell
-  `HoverBrushFor(widgetId)` overlays, and the per-session `StatusBrushFor`
-  text colors (also the REACTOR_THEME_004-compliant answer to inline brushes).
-  `SessionPopupWindow` (per session: name, colored status, last-event JSON
-  dump in a `ScrollViewer`) subscribes to `UiChanged` the same way so it
-  live-updates while open. `TooltipWindow` is a tiny one-shot window (unique
-  `WindowKey` per show, closed on hide) — see the tooltip convention below.
-- `CopilotHookInstaller.cs` — writes/deletes the Copilot CLI hook file
-  `%USERPROFILE%\.copilot\hooks\pagurian-copilot-hook.json` (one file per hook
-  provider; installed on startup, removed on quit + `ProcessExit` backstop):
-  `{"version":1,"hooks":{...}}` registering all **14 camelCase events**
-  (`sessionStart`, `sessionEnd`, `userPromptSubmitted`, `userPromptTransformed`,
-  `preToolUse`, `postToolUse`, `postToolUseFailure`, `permissionRequest`,
-  `agentStop`, `subagentStart`, `subagentStop`, `errorOccurred`, `preCompact`,
-  `notification`), each `type:"command"` with `bash` + `powershell` forms of
-  `"<exe>" --hook <event>` and `timeoutSec:10`. Two gotchas from the
-  CopilotHookMonitor reference this mirrors: the file must be **UTF-8 without
-  BOM** (a BOM makes the CLI reject the whole file as invalid JSON), and under
-  `dotnet run` `Environment.ProcessPath` is `dotnet.exe`, so the hook must
-  point at `AppContext.BaseDirectory\Pagurian.exe` instead.
-- `CopilotHookBridge.cs` — bridge mode (`--hook <event>`): the CLI pipes the
-  event payload JSON to stdin; the bridge wraps it in a one-line envelope
-  `{"loggedAt":...,"event":...,"payload":<raw JSON|null>}`, appends it to
-  `hook-events.log` next to the exe, forwards it to pipe
-  `\\.\pipe\PagurianCopilotHook` (5 retries, 500 ms connect + 150 ms backoff),
-  swallows all exceptions and **always exits 0** — preToolUse command hooks are
-  fail-closed, so a non-zero exit would block Copilot tool calls.
-- `CopilotSessionTracker.cs` — named-pipe server (background thread, one
-  single-line JSON envelope per connection) that marshals every message to the
-  UI thread via `UIDispatcher.TryEnqueue` before touching state (all session
-  state is UI-thread-only — no locks). A session is created on the **first
-  event with an unknown `sessionId`** (any event), kept in first-seen order
-  (that is the cell order), and **removed when its `sessionEnd` event arrives**
-  — a cell exists only while its session is alive (an open popup for it closes
-  on the controller's next tick). Event → status: `sessionStart`/`agentStop` →
-  Idle, `userPromptSubmitted`/`preToolUse`/`postToolUse`/`postToolUseFailure` →
-  Working, `permissionRequest` → Blocked; all events update the pretty-printed
-  `LastEventDump`. Changes bump `Version` and raise
-  `UiChanged` (UI thread) — windows subscribe in `UseEffect` and re-render.
-- `SystemMetricsTracker.cs` — background CPU/memory sampler. Uses
-  `NtQuerySystemInformation` for per-logical-processor CPU, `GlobalMemoryStatusEx`
-  for total physical memory, and per-process `TotalProcessorTime`/`WorkingSet64`
-  for Top 3 rankings. Snapshots are immutable, published on the UI thread with a
-  `Version`/`UiChanged` refresh-counter pattern, and sampled at 1-second cadence
-  while the matching popup is visible and 10-second cadence otherwise.
-- `SystemMetricsColors.cs` — small helper for the CPU (green) and memory (blue)
-  gauge accents and the light/dark taskbar track colors.
-- `TaskbarInterop.cs` — all P/Invoke (no extra packages): `SHAppBarMessage` /
-  `FindWindow` / `GetCursorPos` / `MessageBoxW` / `ShowTrayMenu` (see below).
-- `AppAssets.cs` — resolves asset paths from `AppContext.BaseDirectory` (both images are
-  csproj `Content` with `CopyToOutputDirectory`; the .ico is also `ApplicationIcon`).
+## Solution layout
 
-## Key conventions (learned empirically, not obvious from the code)
+- `Pagurian` — the host (WinExe). See "Host architecture" below.
+- `Pagurian.Sdk` — the module contract assembly. Everything a module author
+  references: `PagurianModule` + `[PagurianModule]`, `Shell` + `[Shell]`,
+  `ShellCell` (+ `ShellCellProps`/`ShellCellHandle`), `Billboard`,
+  `IThemeService`, `ShellMessage`, `Logger`, `TextMeasurement`,
+  `ModuleAssets`, `MessageBoxes`. `[InternalsVisibleTo("Pagurian")]` hides
+  the host infrastructure members from modules.
+- `Pagurian.Modules.Hello` / `.Metrics` / `.Copilot` — the first-party
+  modules. Each has a `DeployToHostModules` post-build target copying its dll
+  (and assets) into the host output's `modules\` folder.
 
-- **Reactor window APIs use DIPs, not physical pixels.** `WindowSpec.Width/Height`,
-  `ManualPosition`, and `ReactorWindow.SetPosition/SetSize` all take DIPs and are
-  scaled by the window DPI internally (verified on a 250% DPI machine: passing
-  physical px placed windows 2.5× off-screen). Design sizes live as `*Dip`
-  constants in the window classes. **Raw Win32 calls are the exception**:
-  `SetWindowPos` for the injected icon child window, and the cursor hit-test
-  rects (`GetCursorPos`, taskbar rects) are all physical px — convert with
-  `ReactorWindow.DipScale` at the boundary.
-- **Screen reads block (~1 frame each) — never on the UI thread.** Every read
-  from the screen DC (`GetPixel`/`BitBlt` on `GetDC(NULL)`) synchronizes with
-  DWM composition and stalls ~one display frame (measured: 17 ms idle, 33 ms
-  under contention). Per-pixel `GetPixel` loops on the screen DC once cost
-  ~50 frames per 50 ms tick, starving the UI thread — and because the
-  cross-process `SetParent` attaches our input queue to Explorer's, the whole
-  taskbar stopped responding (the bug this design fixes). Rules: capture with
-  **one `BitBlt` per region** into a memory DC and read pixels from there
-  (plain memory reads), do it on a **background thread**, throttle it, and
-  apply brush changes via `UIDispatcher.TryEnqueue`.
-- **Taskbar rect**: use `FindWindowW("Shell_TrayWnd")` + `GetWindowRect` first —
-  it sends no message and reflects the actual on-screen position (auto-hide
-  slide included). `SHAppBarMessage(ABM_GETTASKBARPOS)` is a cross-process
-  `SendMessage` to the taskbar that can block the UI thread (see above), so
-  it is only a fallback for when window enumeration doesn't see
-  `Shell_TrayWnd`.
-- **Hover detection is cursor polling, not XAML pointer events.** The windows are
-  `NoActivate` topmost overlays; pointer-event modifiers proved unreliable in that
-  configuration, so `TaskbarController` polls `GetCursorPos` and keeps pixel rects in
-  sync. Keep that pattern if you add more hover targets. (Same for the pressed
-  state and for clicks: `GetAsyncKeyState(VK_LBUTTON)` polling, via
-  `TaskbarInterop.IsLeftButtonDown()` — a click is an up→down edge of that
-  state while the cursor is inside the target rect.) **Consequence: XAML
-  `.ToolTip()` doesn't fire either** — the session-name tooltip is a real
-  borderless window (`TooltipWindow`) shown/hidden by the controller after a
-  ~400 ms hover dwell.
-- **Copilot session names** come from `%USERPROFILE%\.copilot\session-state\
-  {sessionId}\workspace.yaml`, the top-level `name:` field, parsed with a plain
-  line scan (no YAML dependency). Missing file/field → the session id is the
-  display name; resolution is retried on every event until it succeeds because
-  the file can lag `sessionStart`. (Event payloads also carry `initialPrompt`/
-  `prompt`, but workspace.yaml is the source of truth by design.)
-- **Theme comes from the sampled taskbar pixel, not from app theme APIs.** The
-  widget must match the *taskbar*, which follows the Windows (system) mode and
-  may be translucency/accent-tinted; `UseIsDarkTheme()`/`AppsUseLightTheme`
-  follow the *app* mode and can disagree with it. Deriving light/dark from the
-  sampled luminance is always consistent with the actual backdrop.
-- **Message boxes**: use Win32 `MessageBoxW` (works headless in an unpackaged app);
-  `ContentDialog` needs an owner window and was avoided deliberately.
-- **Tray menu is a native Win32 popup menu**, not a Reactor flyout: on the tray icon's
-  `RightClick` event, `Program.cs` calls `TaskbarInterop.ShowTrayMenu(ownerHwnd)`
-  (`CreatePopupMenu` + `AppendMenuW` "Quit" = `QuitCommandId` + `TrackPopupMenu` with
-  `TPM_RETURNCMD | TPM_NONOTIFY` at the cursor; `SetForegroundWindow` + posted `WM_NULL`
-  so the menu dismisses correctly). The call blocks on the UI thread until selection;
-  a `QuitCommandId` result runs the quit sequence.
-- Reactor compiler warnings: images must end with `.AccessibilityHidden()` or
-  `.AutomationName(...)` (REACTOR_A11Y_002); hooks may only be called inside a
-  `Component.Render` override or a method named `Use*` (REACTOR_HOOKS_005 —
-  that's why `TaskbarIconWindow` is a `Component`, not a render lambda);
-  layout/alignment properties must use the pooled modifiers
-  (`.VerticalAlignment(...)`, …), not `.Set(...)` (REACTOR_POOL_001 — `.Set`
-  writes are lost on pool re-render). The build is kept at 0 warnings.
-- The codebase mirrors `D:\Workspace\gitea_backup\Tea` (`Tea.Gui` project): same csproj
-  settings (`net10.0-windows10.0.22621.0`, `UseWinUI`, `WindowsPackageType=None`,
-  `Platforms x64;ARM64`), same Reactor version.
+All projects target `net10.0-windows10.0.22621.0`, `UseWinUI`, platforms
+x64;ARM64, Microsoft.UI.Reactor 0.1.0-preview.12. Modules and the host must
+share one type universe: the loader uses the Default `AssemblyLoadContext`
+(`Assembly.LoadFrom`), so same TFM + same Reactor version is a hard
+requirement. Third-party modules only need to reference `Pagurian.Sdk`.
+
+## Host architecture (`Pagurian` project)
+
+- `Program.cs` — single entry. First statement is the **bridge-mode
+  intercept**: `Pagurian.exe post {id} <cmd> [args...]` runs `PostBridge.Run`
+  and returns before touching WinUI. Otherwise `ReactorApp.Run(startup)`:
+  `ShutdownPolicy.Explicit`, `PagurianLog.Initialize()`, `ModuleLoader
+  .LoadAll()`, `TrayShells.LoadFromConfig(TrayConfig.Load())`,
+  `ShellMessageServer.Start()`, then tray icon + tray window + controller.
+  Quit happens only via the tray menu: `TaskbarController.Stop()` →
+  `ShellMessageServer.Stop()` → `TrayShells.ShutdownAll()` →
+  `ModuleLoader.ShutdownAll()` → `tray.Close()` → `ReactorApp.Exit(0)` →
+  `Environment.Exit(0)` (the last call is required).
+- `ModuleLoader.cs` — per-dll reflection discovery with strict validation:
+  exactly one `[PagurianModule]` type deriving from `PagurianModule` (0 =
+  skip, 2+ = reject the dll), `[Shell]` types must derive from `Shell`, kind
+  ids (type FullNames) and module ids deduplicated. A failing dll never
+  stops the host; details go to the unified log. Successful loads register
+  the kind catalog (shell FullName → `ShellAttribute` instance).
+- `TrayConfig.cs` — `%LOCALAPPDATA%\Pagurian\config.json`:
+  `{ "tray": [ { "shell": "<FullName>", "id": "3842", "settings": {...}? } ] }`.
+  Order = tray order. Ids are 4-digit, globally unique; duplicates are logged
+  and skipped. The same kind twice = two instances. `settings` passes through
+  to `Shell.Settings` verbatim (reserved). A missing file is seeded with the
+  first-party shells and random ids (dev stand-in); an existing file is never
+  modified, and the host never auto-adds discovered shells.
+- `TrayShells.cs` — the ordered shell registry + flattened cell list.
+  `Shell.AddCell/RemoveCell` call back through an internal channel; every
+  change raises `Changed` → the tray window re-renders as a whole (no diff).
+  Also routes `post` messages by `Shell.InstanceId`.
+- `PostBridge.cs` / `ShellMessageServer.cs` — the `post` pipeline. The bridge
+  packs `{id, command, args, payload, receivedAt}` (stdin piped → payload,
+  embedded verbatim as raw JSON) onto the `Pagurian.ShellMessages` pipe with
+  retries and **always exits 0** (callers are fail-closed). The server
+  marshals each envelope to the UI thread and routes it; unknown ids / empty
+  commands are dropped with a log line.
+- `TaskbarTrayWindow.cs` — the Tray. Renders
+  `TrayShells.Cells` as keyed cell Borders (host chrome: hover overlay live
+  brush, 3×4 DIP hover margins, width read-back `Ref`), each wrapping a
+  `ComponentElement(cell.ViewType, cell.Props)`. Owns the sampled taskbar
+  blend gradient, the content-scale transform, and the hover-brush cache.
+- `TaskbarTrayLayout.cs` — cell widths read back from mounted controls'
+  `ActualWidth` through the refs; the window starts at a 1-DIP floor and
+  grows within a tick or two.
+- `TaskbarController.cs` — the 50 ms poll loop on the UI dispatcher:
+  inject/anchor into `Shell_TrayWnd` (re-inject after Explorer restarts),
+  background-throttled taskbar color sampling (NEVER on the UI thread — see
+  conventions), theme derivation, per-cell hover/pressed overlays, cursor
+  hit-testing, click dispatch (custom `OnClicked` delegate wins; otherwise
+  the cell's billboard toggles), hover-dwell tooltips, and unified billboard
+  management (position above owner cell / below at top-edge taskbars,
+  outside-click dismiss, one at a time, auto-close when the owner cell is
+  removed; `Billboard.OnOpened/OnClosed` invoked around the window lifetime;
+  fresh billboard instance per show via the cell's `CreateBillboard`).
+- `ThemeService.cs` — host `IThemeService`: `IsDark` from sampled luminance
+  (Rec.601, threshold 140 — always matches the taskbar itself), the shared
+  live `TextBrush` (mutated in place on flips), and the `Changed` broadcast.
+- `PagurianLog.cs` — the unified log (`%LOCALAPPDATA%\Pagurian\pagurian.log`,
+  timestamp + level + tag). Installs the Sdk `Logger` sink; host writes with
+  tag `host`.
+- `TooltipWindow.cs`, `TaskbarInterop.cs` (all P/Invoke), `AppAssets.cs`
+  (tray icon only).
+
+## Module contract essentials (Pagurian.Sdk)
+
+```csharp
+[PagurianModule(DisplayName = "...")]           // one per assembly; id = type FullName
+public sealed class MyModule : PagurianModule { public override void Startup()/Shutdown() ... }
+
+[Shell(DisplayName = "...")]                    // per Shell subclass; kind id = type FullName
+public sealed class MyShell : Shell
+{
+    public override void Startup() =>
+        AddCell<MyCell>(model: ..., tooltip: () => ..., billboard: () => new MyBillboard(...));
+    public override void OnMessage(ShellMessage m) ...   // "post {id} <cmd> args" arrives here
+}
+```
+
+- `Shell` lifecycle: `Startup()` (heavy resources online — samplers, hook
+  files), `Shutdown()`, `OnMessage(ShellMessage)` (UI thread). Context is
+  injected before Startup: `InstanceId`, `Settings`, `Theme`, `Log`.
+- `AddCell<TCell>(model, tooltip, billboard, onClicked)`: `TCell` is the
+  Reactor view component; behavior comes as delegates capturing the model
+  (they read live state). `onClicked` set → replaces the default
+  toggle-billboard behavior entirely.
+- **Reactor mechanics constraint**: Reactor embeds child components by TYPE
+  and creates the instances itself (`ComponentElement(Type, props)`), so a
+  cell's mutable per-cell state must live in the `model` object
+  (`Props.Model`), never in cell instance fields. Cells subclass
+  `ShellCell : Component<ShellCellProps>` and override `Render()` as usual
+  (hooks allowed there); conveniences: `Owner`, `ModelAs<T>()`, `Theme`,
+  `Log`.
+- `Billboard : Component`: `WidthDip`/`HeightDip`/`Title`, `OnOpened()`/
+  `OnClosed()` (self-report hooks — the metrics billboards switch sampler
+  cadence here), `Shell`/`Theme`/`Log` accessors. A fresh instance is created
+  per show.
+- Theme: read `Theme.IsDark` per render for computed colors; use the shared
+  `Theme.TextBrush` for body text; subscribe `Theme.Changed` in `UseEffect`
+  (with a monotonic local counter, NOT a tracker Version — theme flips don't
+  bump tracker versions) to re-render.
+- Assets: ship next to the module dll, resolve with
+  `ModuleAssets.Resolve(typeof(MyModule), "Assets/foo.png")`.
+
+## Key conventions (learned empirically)
+
+- **Reactor window APIs use DIPs; raw Win32 calls use physical pixels.**
+  `WindowSpec.Width/Height`, `ManualPosition`, `SetPosition/SetSize` are DIPs;
+  `SetWindowPos`, `GetCursorPos`, taskbar rects are physical px — convert
+  with the window `DipScale` at the boundary. Anchor geometry derives from
+  the live taskbar rect (48 DIP thickness ⇒ `taskbar.Height / 48` is the
+  taskbar's own DPI scale), never from the window's `DipScale`.
+- **Screen reads block (~1 frame each) — never on the UI thread.** Capture
+  with one `BitBlt` per region on a background thread, throttled (250 ms),
+  apply via `UIDispatcher.TryEnqueue`. (History: per-pixel `GetPixel` loops
+  on the UI thread once wedged the whole taskbar because the cross-process
+  `SetParent` attaches our input queue to Explorer's.)
+- **Taskbar rect**: `FindWindowW("Shell_TrayWnd")` + `GetWindowRect` first
+  (no message sent); `SHAppBarMessage(ABM_GETTASKBARPOS)` is a blocking
+  cross-process `SendMessage` — fallback only.
+- **Hover/click detection is cursor polling**, not XAML pointer events (the
+  windows are NoActivate topmost overlays). Clicks are up→down edges of
+  `GetAsyncKeyState(VK_LBUTTON)`. XAML `.ToolTip()` doesn't fire either —
+  tooltips are real borderless windows (`TooltipWindow`) after a ~400 ms
+  dwell.
+- **Theme comes from sampled taskbar pixels**, not app theme APIs.
+- **Message boxes**: Win32 `MessageBoxW` (`MessageBoxes.Show` in the Sdk).
+- **Tray menu is a native Win32 popup menu** (`TaskbarInterop.ShowTrayMenu`,
+  blocks the UI thread until selection; Quit runs the quit sequence).
+- **Fluent modifiers need `using Microsoft.UI.Reactor;`** — the pooled
+  element extensions (`ElementExtensions`, `GridSize`, …) live in that
+  namespace inside Reactor.dll; `Microsoft.UI.Reactor.Core` alone gives you
+  the element types but not the modifiers (CS1955/CS0103).
+- Reactor compiler warnings: images must end with `.AccessibilityHidden()`
+  or `.AutomationName(...)` (REACTOR_A11Y_002); hooks only inside
+  `Component.Render` overrides or `Use*` methods (REACTOR_HOOKS_005);
+  layout/alignment via pooled modifiers, not `.Set(...)` (REACTOR_POOL_001).
+  The build is kept at 0 warnings.
+- **Copilot hook file** (`Pagurian.Modules.Copilot`): UTF-8 **without BOM**
+  (a BOM makes the CLI reject the whole file); under `dotnet run`
+  `Environment.ProcessPath` is `dotnet.exe`, so the hook points at
+  `AppContext.BaseDirectory\Pagurian.exe`; commands are
+  `"<exe>" post {shellId} hook <event>` for all 14 camelCase events; the
+  shell's persistent config id is what keeps the hook stable across restarts.
+- **Session names** come from
+  `%USERPROFILE%\.copilot\session-state\{id}\workspace.yaml`, top-level
+  `name:` field, plain line scan; retried on every event until resolved.
+- The codebase mirrors `D:\Workspace\gitea_backup\Tea` (`Tea.Gui` project):
+  same csproj settings and Reactor version.
+
+## Docs
+
+- `docs/Plugin-Architecture-Handoff.md` — the approved architecture plan this
+  code implements. One deliberate implementation deviation: the plan sketched
+  cell behavior as virtual members on `ShellCell`; because Reactor owns
+  component instances, behavior is instead passed as delegates on
+  `ShellCellProps` at `AddCell` time (concepts unchanged).
+- `docs/roadmap/System-Metrics-Widgets-Design.md` — metrics cadence rules.

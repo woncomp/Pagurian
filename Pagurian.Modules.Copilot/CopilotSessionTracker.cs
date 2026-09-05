@@ -1,10 +1,9 @@
-using System.IO.Pipes;
-using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Reactor;
 
-namespace Pagurian;
+namespace Pagurian.Modules.Copilot;
 
 // Lifecycle status of a Copilot CLI session, derived from hook events (the
 // same mapping as the CopilotHookMonitor reference project):
@@ -23,7 +22,7 @@ enum CopilotSessionStatus
     Blocked,
 }
 
-// One tracked Copilot CLI session. Mutated on the UI thread only (pipe
+// One tracked Copilot CLI session. Mutated on the UI thread only (hook
 // messages are marshaled via UIDispatcher.TryEnqueue before touching state).
 sealed class CopilotSession
 {
@@ -37,19 +36,16 @@ sealed class CopilotSession
     public string LastEventDump { get; set; } = ""; // pretty-printed envelope JSON
 }
 
-// Receives Copilot hook events from the short-lived bridge processes
-// (CopilotHookBridge) over a named pipe and keeps the per-session state that
-// backs the taskbar widget cells, tooltips, and session popups. Sessions are
-// discovered from ANY event carrying an unknown sessionId, kept in first-seen
-// order (that is the left-to-right cell order), and removed the moment their
-// sessionEnd event arrives — a cell exists only while its session is alive.
+// Keeps the per-session state that backs the session cells, tooltips, and
+// billboards, fed by CopilotShell.OnMessage (hook events posted by the CLI).
+// Sessions are discovered from ANY event carrying an unknown sessionId and
+// removed the moment their sessionEnd event arrives — a cell exists only
+// while its session is alive. The shell subscribes to SessionStarted/
+// SessionEnded to attach/detach the matching cell.
 static class CopilotSessionTracker
 {
     private static readonly Dictionary<string, CopilotSession> _sessions = new();
-    private static readonly List<string> _order = new(); // first-seen order = cell order
-    private static IReadOnlyList<CopilotSession>? _snapshot;
 
-    private static CancellationTokenSource? _cts;
     private static DispatcherQueueTimer? _statusDebounceTimer;
 
     private static readonly TimeSpan StatusDebounce = TimeSpan.FromSeconds(1);
@@ -57,90 +53,47 @@ static class CopilotSessionTracker
 
     private static readonly JsonSerializerOptions IndentedJson = new() { WriteIndented = true };
 
-    // Bumped on every state change. Windows subscribe to UiChanged and
-    // re-render with the new Version (the Tea refresh-counter pattern); both
-    // are raised on the UI thread.
+    // Bumped on every state change. Cells and billboards subscribe to
+    // UiChanged and re-render with the new Version (the Tea refresh-counter
+    // pattern); raised on the UI thread.
     public static int Version { get; private set; }
     public static event Action? UiChanged;
 
-    public static IReadOnlyList<CopilotSession> Sessions =>
-        _snapshot ??= _order.Select(id => _sessions[id]).ToList();
+    // Raised on the UI thread when a session appears (any event with an
+    // unknown sessionId) / ends (sessionEnd).
+    public static event Action<CopilotSession>? SessionStarted;
+    public static event Action<CopilotSession>? SessionEnded;
 
     public static CopilotSession? Find(string sessionId) =>
         _sessions.TryGetValue(sessionId, out var s) ? s : null;
 
     public static void Start()
     {
-        _cts = new CancellationTokenSource();
         _statusDebounceTimer = ReactorApp.UIDispatcher!.CreateTimer();
         _statusDebounceTimer.Interval = StatusDebounceTimerInterval;
         _statusDebounceTimer.IsRepeating = true;
         _statusDebounceTimer.Tick += (_, _) => CommitStableStatuses();
         _statusDebounceTimer.Start();
-
-        var ct = _cts.Token;
-        Task.Run(() => PipeServerLoop(ct), ct);
     }
 
     public static void Stop()
     {
         _statusDebounceTimer?.Stop();
         _statusDebounceTimer = null;
-        _cts?.Cancel();
     }
 
-    // Lets non-tracker code (the theme flip in TaskbarController) force the
-    // subscribed windows to re-render.
-    public static void NotifyChanged()
+    // UI thread. One hook event: its name and the raw payload JSON the CLI
+    // piped to the posting process (null when the event carried no payload).
+    public static void HandleHookEvent(string eventName, string? payloadJson)
     {
-        _snapshot = null;
-        Version++;
-        UiChanged?.Invoke();
-    }
-
-    // Background thread. Accepts bridge connections and processes one
-    // single-line JSON message per connection.
-    private static async Task PipeServerLoop(CancellationToken ct)
-    {
-        while (!ct.IsCancellationRequested)
+        JsonNode? payload = null;
+        if (payloadJson != null)
         {
-            try
-            {
-                using var server = new NamedPipeServerStream(
-                    CopilotHookBridge.PipeName, PipeDirection.In, 1,
-                    PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
-                await server.WaitForConnectionAsync(ct);
-                using var reader = new StreamReader(server, Encoding.UTF8);
-                var line = await reader.ReadLineAsync(ct);
-                if (!string.IsNullOrWhiteSpace(line))
-                {
-                    using var msg = JsonDocument.Parse(line);
-                    var root = msg.RootElement.Clone();
-                    ReactorApp.UIDispatcher?.TryEnqueue(() => HandleHookMessage(root));
-                }
-            }
-            catch (OperationCanceledException) { break; }
-            catch
-            {
-                try { await Task.Delay(200, ct); }
-                catch (OperationCanceledException) { break; }
-            }
+            try { payload = JsonNode.Parse(payloadJson); }
+            catch { /* unparseable payloads still drive the state machine */ }
         }
-    }
 
-    // UI thread. One envelope: {"loggedAt":...,"event":...,"payload":{...}}.
-    private static void HandleHookMessage(JsonElement root)
-    {
-        var eventName = root.TryGetProperty("event", out var ev) && ev.ValueKind == JsonValueKind.String
-            ? ev.GetString() ?? "unknown"
-            : "unknown";
-        var hasPayload = root.TryGetProperty("payload", out var payload) &&
-                         payload.ValueKind == JsonValueKind.Object;
-        var sessionId = hasPayload &&
-                        payload.TryGetProperty("sessionId", out var sid) &&
-                        sid.ValueKind == JsonValueKind.String
-            ? sid.GetString() ?? ""
-            : "";
+        var sessionId = payload?["sessionId"]?.GetValue<string>() ?? "";
         if (sessionId.Length == 0)
             return; // events without a session can't get a cell
 
@@ -148,9 +101,9 @@ static class CopilotSessionTracker
         // (and an end event for a session we never saw creates nothing).
         if (eventName == "sessionEnd")
         {
-            if (_sessions.Remove(sessionId))
+            if (_sessions.Remove(sessionId, out var ended))
             {
-                _order.Remove(sessionId);
+                SessionEnded?.Invoke(ended);
                 NotifyChanged();
             }
             return;
@@ -160,11 +113,11 @@ static class CopilotSessionTracker
         {
             session = new CopilotSession { SessionId = sessionId, Name = sessionId };
             _sessions[sessionId] = session;
-            _order.Add(sessionId);
+            SessionStarted?.Invoke(session);
         }
 
         session.LastEventName = eventName;
-        session.LastEventDump = PrettyPrint(root);
+        session.LastEventDump = PrettyPrint(eventName, payload);
         var mappedStatus = eventName switch
         {
             "sessionStart" => (CopilotSessionStatus?)CopilotSessionStatus.Idle,
@@ -185,6 +138,12 @@ static class CopilotSessionTracker
             TryResolveName(session);
 
         NotifyChanged();
+    }
+
+    private static void NotifyChanged()
+    {
+        Version++;
+        UiChanged?.Invoke();
     }
 
     // Hook events arrive on the UI thread, so candidate transitions can be
@@ -238,15 +197,23 @@ static class CopilotSessionTracker
             NotifyChanged();
     }
 
-    private static string PrettyPrint(JsonElement root)
+    // The billboard's last-event dump keeps the old envelope shape:
+    // {"loggedAt":...,"event":...,"payload":{...}}.
+    private static string PrettyPrint(string eventName, JsonNode? payload)
     {
         try
         {
-            return JsonSerializer.Serialize(root, IndentedJson);
+            var envelope = new JsonObject
+            {
+                ["loggedAt"] = DateTime.Now.ToString("o"),
+                ["event"] = eventName,
+                ["payload"] = payload?.DeepClone(),
+            };
+            return envelope.ToJsonString(IndentedJson);
         }
         catch
         {
-            return root.GetRawText();
+            return $"{{\"event\":\"{eventName}\"}}";
         }
     }
 

@@ -1,14 +1,15 @@
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
+using Pagurian.Sdk;
 using static Microsoft.UI.Reactor.Factories;
 
 namespace Pagurian;
 
-// Tiny tooltip window showing a Copilot session's name while hovering its
-// taskbar cell. Implemented as a real window (not a XAML ToolTip) because the
-// taskbar cells live in a NoActivate window injected into the taskbar, where
-// pointer events — and thus XAML tooltips — are unreliable; the controller
-// shows/hides this from its cursor-polling loop instead.
+// Tiny tooltip window showing a cell's tooltip text while hovering it.
+// Implemented as a real window (not a XAML ToolTip) because the tray cells
+// live in a NoActivate window injected into the taskbar, where pointer events
+// — and thus XAML tooltips — are unreliable; the controller shows/hides this
+// from its cursor-polling loop instead.
 class TooltipWindow : Component
 {
     public const double WindowHeightDip = 26;

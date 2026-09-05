@@ -1,59 +1,44 @@
-using System.Collections.Generic;
-using System.Linq;
-using Microsoft.UI;
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
+using Pagurian.Sdk;
 using static Microsoft.UI.Reactor.Factories;
 
-namespace Pagurian;
+namespace Pagurian.Modules.Metrics;
 
-class CpuMetricsPopupWindow : Component
+// CPU details billboard: overall load, per-logical-processor gauges, and the
+// top processes. Re-renders on every sampler snapshot, so it stays live
+// while open. Opening it switches the sampler to its fast (1s) cadence.
+class CpuBillboard : Billboard
 {
-    public const double WindowWidthDip = 360;
-    public const double WindowHeightDip = 320;
-
     private const double ProcessorListHeightDip = 160;
-    private static int _instanceCount;
 
-    private readonly string _key;
+    public override double WidthDip => 360;
 
-    public CpuMetricsPopupWindow()
-    {
-        _key = $"pagurian-cpu-popup-{++_instanceCount}";
-    }
+    public override double HeightDip => 320;
 
-    public WindowSpec CreateSpec((double X, double Y) positionDip) => new()
-    {
-        Title = "CPU",
-        Width = WindowWidthDip,
-        Height = WindowHeightDip,
-        Style = WindowStyle.None,
-        CornerStyle = WindowCornerStyle.Rounded,
-        Backdrop = BackdropChoice.Of(BackdropKind.AcrylicThin),
-        ShowInTaskbar = false,
-        ShowInSwitcher = false,
-        NoActivate = true,
-        IsMinimizable = false,
-        IsMaximizable = false,
-        ResizeMode = WindowResizeMode.NoResize,
-        Level = WindowLevel.AlwaysOnTop,
-        StartPosition = WindowStartPosition.Manual,
-        ManualPosition = positionDip,
-        Key = WindowKey.Of(_key),
-        Icon = WindowIcon.FromPath(AppAssets.IconPath),
-    };
+    public override string Title => "CPU";
+
+    public override void OnOpened() => SystemMetricsTracker.SetPopupVisible(SystemMetricKind.Cpu, true);
+
+    public override void OnClosed() => SystemMetricsTracker.SetPopupVisible(SystemMetricKind.Cpu, false);
 
     public override Element Render()
     {
         var (_, setVersion) = UseState(0);
+        var tick = UseRef(0);
 
         UseEffect(() =>
         {
-            void OnChanged() => setVersion(SystemMetricsTracker.Version);
+            void OnChanged() => setVersion(++tick.Current);
             SystemMetricsTracker.UiChanged += OnChanged;
-            return () => SystemMetricsTracker.UiChanged -= OnChanged;
+            Theme.Changed += OnChanged;
+            return () =>
+            {
+                SystemMetricsTracker.UiChanged -= OnChanged;
+                Theme.Changed -= OnChanged;
+            };
         }, Array.Empty<object>());
 
         var cpu = SystemMetricsTracker.Cpu;
@@ -61,11 +46,9 @@ class CpuMetricsPopupWindow : Component
             return TextBlock("Data unavailable")
                 .Padding(14);
 
-        var isDark = TaskbarController.IsDarkTheme;
-        var accent = SystemMetricsColors.CpuAccent(isDark);
-        var track = SystemMetricsColors.GaugeTrack(isDark);
-        var accentBrush = new SolidColorBrush(accent);
-        var trackBrush = new SolidColorBrush(track);
+        var isDark = Theme.IsDark;
+        var accentBrush = new SolidColorBrush(SystemMetricsColors.CpuAccent(isDark));
+        var trackBrush = new SolidColorBrush(SystemMetricsColors.GaugeTrack(isDark));
 
         var processorRows = new List<Element>();
         for (int i = 0; i < cpu.PerLogicalProcessorPercent.Count; i++)

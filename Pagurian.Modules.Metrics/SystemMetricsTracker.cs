@@ -5,7 +5,7 @@ using System.Runtime.InteropServices;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Reactor;
 
-namespace Pagurian;
+namespace Pagurian.Modules.Metrics;
 
 internal enum SystemMetricKind
 {

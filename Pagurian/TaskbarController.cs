@@ -3,19 +3,22 @@ using System.Threading.Tasks;
 using Microsoft.UI;
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
+using Pagurian.Sdk;
 
 namespace Pagurian;
 
 // Owns the ongoing behaviors of the app:
-//  1. Keeps the tray window — a horizontal container of widget cells (clock,
-//     CPU, memory, plus one cell per tracked Copilot session) — anchored to
-//     the left-bottom corner of the taskbar, resizing it as cells come and go.
+//  1. Keeps the tray window — a horizontal container of shell cells —
+//     anchored to the left-bottom corner of the taskbar, resizing it as
+//     cells come and go.
 //  2. Per-cell interaction by polling the cursor position and left mouse
-//     button: native hover/pressed highlights, a tooltip with the session
-//     name after a short hover dwell, and popups — a click on the clock cell
-//     toggles the Hello popup, a click on the CPU or memory cell toggles its
-//     detail popup, a click on a session cell toggles that session's popup,
-//     and an outside click dismisses whichever is open.
+//     button: native hover/pressed highlights, a hover-dwell tooltip (the
+//     cell's GetTooltip delegate), click dispatch (the cell's OnClicked
+//     delegate, or its billboard toggle by default), and outside-click
+//     dismissal of the open billboard.
+//  3. Billboard management: one billboard at a time, positioned above its
+//     owner cell (below when the taskbar is at the screen's top edge),
+//     closed on outside click or when its owner cell is removed.
 // Runs on a DispatcherQueueTimer on the UI thread.
 //
 // The tray window is injected into the taskbar via SetParent (same approach as
@@ -26,7 +29,7 @@ namespace Pagurian;
 //
 // Note: Reactor window APIs (WindowSpec.Width/Height, ManualPosition,
 // ReactorWindow.SetPosition/SetSize) take DIPs and scale them by the window DPI
-// themselves. Raw Win32 calls (SetWindowPos for the injected icon, GetCursorPos
+// themselves. Raw Win32 calls (SetWindowPos for the injected window, GetCursorPos
 // hit-testing) operate in physical pixels. The controller computes anchor
 // positions in physical pixels (taskbar rects are physical) and converts to
 // DIPs only at the Reactor API boundary.
@@ -36,21 +39,18 @@ static class TaskbarController
     private const int InjectRetryIntervalTicks = 25; // ~5s at 200ms per tick
 
     private static ReactorWindow? _trayWindow;
-    private static ReactorWindow? _popupWindow;
-    private static ReactorWindow? _sessionPopupWindow;
-    private static string? _sessionPopupId;
-    private static ReactorWindow? _metricsPopupWindow;
-    private static SystemMetricKind? _metricsPopupKind;
+    private static ReactorWindow? _billboardWindow;
+    private static Billboard? _billboard;
+    private static string? _billboardOwnerKey;
     private static ReactorWindow? _tooltipWindow;
+    private static int _billboardCount; // unique WindowKey per opened billboard
 
     private static TaskbarInterop.RECT _trayRectPx;
-    private static TaskbarInterop.RECT _popupRectPx;
-    private static TaskbarInterop.RECT _sessionPopupRectPx;
-    private static TaskbarInterop.RECT _metricsPopupRectPx;
+    private static TaskbarInterop.RECT _billboardRectPx;
 
-    // Per-cell hit-test rects in physical pixels (clock, CPU, memory, then
-    // session ids in tracker order), rebuilt on every anchor pass.
-    private static readonly List<(string Id, TaskbarInterop.RECT Rect)> _cellRectsPx = new();
+    // Per-cell hit-test rects in physical pixels, keyed by cell key, rebuilt
+    // on every anchor pass.
+    private static readonly List<(string Key, TaskbarInterop.RECT Rect)> _cellRectsPx = new();
 
     private static (double X, double Y) _lastTrayPos = (double.MinValue, double.MinValue);
     private static (double W, double H) _lastTraySize = (0, 0);
@@ -58,27 +58,22 @@ static class TaskbarController
     private static int _ticksSinceInjectAttempt = int.MaxValue; // inject on first tick
     private static Microsoft.UI.Dispatching.DispatcherQueueTimer? _timer;
     private static Windows.UI.Color _taskbarColor = TaskbarTrayWindow.DefaultTaskbarColor; // average of the gradient stops, for theme derivation
-    private static string? _hoverWidgetId; // cell under the cursor (null = outside)
+    private static string? _hoverCellKey; // cell under the cursor (null = outside)
     private static bool _pressed;
     private static bool _wasLeftButtonDown; // previous tick's button state, for click-edge detection
-    private static bool _isDarkTheme;
 
-    // Tooltip dwell: the session-name tooltip appears only after the cursor
-    // rests on a session cell for ~400 ms (native tooltip timing).
+    // Tooltip dwell: the tooltip appears only after the cursor rests on a
+    // cell for ~400 ms (native tooltip timing).
     private const int TooltipDwellTicks = 8; // at 50 ms per tick
-    private static string? _tooltipHoverId; // cell the dwell timer is running for
+    private static string? _tooltipHoverKey; // cell the dwell timer is running for
     private static int _tooltipHoverTicks;
-
-    // The theme (derived from the sampled taskbar luminance) that the window
-    // and popups use for status colors.
-    public static bool IsDarkTheme => _isDarkTheme;
 
     // Screen-color sampling cadence. Every read from the screen DC synchronizes
     // with DWM composition and stalls for ~one display frame (measured: 17-33
     // ms), so sampling must NEVER run on the UI thread: a stalled UI thread
-    // stops pumping, and with the widget parented into the taskbar the attached
-    // input queues then wedge the whole taskbar (the reported bug). Sampling
-    // runs throttled on a background thread and applies via the dispatcher.
+    // stops pumping, and with the tray parented into the taskbar the attached
+    // input queues then wedge the whole taskbar. Sampling runs throttled on a
+    // background thread and applies via the dispatcher.
     private static readonly TimeSpan SampleInterval = TimeSpan.FromMilliseconds(250);
     private static DateTime _lastSampleUtc = DateTime.MinValue;
     private static int _sampleInFlight; // 0/1, Interlocked guarded
@@ -86,7 +81,7 @@ static class TaskbarController
     public static void Start(ReactorWindow trayWindow)
     {
         _trayWindow = trayWindow;
-        TaskbarDiagnostics.Log($"start hwnd={TrayWindowHwnd()} dipScale={ScaleOf(trayWindow):F3}");
+        PagurianLog.Host($"start hwnd={TrayWindowHwnd()} dipScale={ScaleOf(trayWindow):F3}");
 
         _timer = ReactorApp.UIDispatcher!.CreateTimer();
         _timer.Interval = PollInterval;
@@ -97,35 +92,21 @@ static class TaskbarController
 
     public static void Stop() => _timer?.Stop();
 
-    // Keeps the widget's theme brushes in sync with the sampled taskbar
-    // colors, mimicking the native Windows 11 clock (mutated in place, no
-    // re-render). The root background gradient itself is maintained by
-    // SyncTaskbarColor; here:
-    //  - text = theme-aware TextFillColorPrimary, where the theme is derived
-    //    from the sampled taskbar luminance so it always matches the taskbar
-    //    itself (light/dark/translucent/accent-tinted alike);
-    //  - hover overlay = per-cell rounded translucent SubtleFill rect, fully
-    //    transparent while idle, SubtleFillColorSecondary on hover and
-    //    SubtleFillColorTertiary while pressed (only the hovered cell gets
-    //    the overlay; clearing the previous one happens in the hover
-    //    transition in UpdateInteractions).
+    // Keeps the theme and the hovered cell's overlay in sync with the sampled
+    // taskbar colors. The theme flip (light/dark from sampled luminance) is
+    // applied to the shared ThemeService: the text brush is mutated in place
+    // and the Changed broadcast lets per-render-colored cells and billboards
+    // re-render themselves. The hover overlay (SubtleFillColorSecondary on
+    // hover, SubtleFillColorTertiary while pressed) is host chrome and is
+    // mutated in place here.
     private static void ApplyEffectiveBrushColor()
     {
-        var isDark = Luminance(_taskbarColor) <= 140;
-        if (isDark != _isDarkTheme)
-        {
-            _isDarkTheme = isDark;
-            TaskbarTrayWindow.TextBrush.Color = TaskbarTrayWindow.TextColorFor(isDark);
-            // Session status and metric gauge colors are per-render brushes, so the
-            // container and any open popup must re-render to pick the new theme.
-            CopilotSessionTracker.NotifyChanged();
-            SystemMetricsTracker.NotifyChanged();
-        }
+        ThemeService.Instance.Apply(Luminance(_taskbarColor) <= 140);
 
-        if (_hoverWidgetId != null)
+        if (_hoverCellKey != null)
         {
-            var overlay = TaskbarTrayWindow.HoverOverlayColorFor(isDark, _pressed);
-            var brush = TaskbarTrayWindow.HoverBrushFor(_hoverWidgetId);
+            var overlay = TaskbarTrayWindow.HoverOverlayColorFor(ThemeService.Instance.IsDark, _pressed);
+            var brush = TaskbarTrayWindow.HoverBrushFor(_hoverCellKey);
             if (brush.Color != overlay)
                 brush.Color = overlay;
         }
@@ -137,13 +118,13 @@ static class TaskbarController
     // Keeps the tray window's background in sync with the taskbar. The taskbar
     // is translucent, so its apparent color can vary along its length
     // (wallpaper showing through — measured deltas over 25 levels across the
-    // widget's own width): no single color blends the widget in. Instead the
-    // widget paints a gradient whose stops are sampled from the native
-    // taskbar sliver the widget's 2-DIP inset leaves uncovered — below the
-    // widget for horizontal taskbars, above and below for vertical ones —
-    // so each stop matches the real taskbar color at that spot. Every sample
-    // is a trimmed mean over a small patch, robust against acrylic noise and
-    // text/icon glyph pixels.
+    // tray's own width): no single color blends the tray in. Instead the tray
+    // paints a gradient whose stops are sampled from the native taskbar
+    // sliver the tray's 2-DIP inset leaves uncovered — below the tray for
+    // horizontal taskbars, above and below for vertical ones — so each stop
+    // matches the real taskbar color at that spot. Every sample is a trimmed
+    // mean over a small patch, robust against acrylic noise and text/icon
+    // glyph pixels.
     //
     // Runs on the UI thread every tick but only maintains the gradient axis;
     // the screen capture itself is throttled and async (see SampleInterval).
@@ -166,8 +147,8 @@ static class TaskbarController
 
         if (horizontal)
         {
-            // One strip captures all stops: the native sliver below the widget
-            // (uncovered thanks to WindowInsetYDip), spanning the widget's
+            // One strip captures all stops: the native sliver below the tray
+            // (uncovered thanks to WindowInsetYDip), spanning the tray's
             // width; each stop is a column slice of it (ApplyHorizontalSample).
             var sx = _trayRectPx.Left;
             var sy = _trayRectPx.Bottom;
@@ -190,7 +171,7 @@ static class TaskbarController
         }
         else
         {
-            // Vertical taskbar: only the widget's top and bottom edges have an
+            // Vertical taskbar: only the tray's top and bottom edges have an
             // uncovered native sliver, so capture those two strips across the
             // taskbar's thickness and interpolate between them.
             var x = taskbar.Left + 4;
@@ -217,7 +198,7 @@ static class TaskbarController
 
     // UI thread. One captured strip -> per-stop colors: stop i is a trimmed
     // mean over a ~5-px-wide column slice centered on its fraction along the
-    // widget's width (the same spots the old per-stop captures sampled).
+    // tray's width.
     private static void ApplyHorizontalSample(byte[] rgba, int width, int height)
     {
         var count = TaskbarTrayWindow.GradientStopCount;
@@ -233,7 +214,7 @@ static class TaskbarController
         ApplyStopColors(colors);
     }
 
-    // UI thread. Two captured strips (above/below the widget) -> per-stop
+    // UI thread. Two captured strips (above/below the tray) -> per-stop
     // colors interpolated along the taskbar's long axis.
     private static void ApplyVerticalSample(byte[] top, byte[] bottom, int width)
     {
@@ -327,7 +308,7 @@ static class TaskbarController
         {
             _ticksSinceInjectAttempt = 0;
             _injected = TryInject();
-            TaskbarDiagnostics.Log($"inject result={_injected} trayHwnd={TrayWindowHwnd()} taskbarHwnd={TaskbarInterop.FindTaskbar()}");
+            PagurianLog.Host($"inject result={_injected} trayHwnd={TrayWindowHwnd()} taskbarHwnd={TaskbarInterop.FindTaskbar()}");
         }
         else
         {
@@ -354,7 +335,7 @@ static class TaskbarController
         // One attempt per tick; the poll loop provides the retries so the UI
         // thread never blocks (AwqatSalaat sleeps between attempts instead).
         var previousParent = TaskbarInterop.SetParent(hwnd, taskbar);
-        TaskbarDiagnostics.Log($"set-parent trayHwnd={hwnd} taskbarHwnd={taskbar} previousParent={previousParent} style=0x{style:X8}");
+        PagurianLog.Host($"set-parent trayHwnd={hwnd} taskbarHwnd={taskbar} previousParent={previousParent} style=0x{style:X8}");
         return previousParent != IntPtr.Zero;
     }
 
@@ -389,13 +370,13 @@ static class TaskbarController
         // Taskbars are 48 DIPs thick by design, so the scale derived from the
         // real taskbar rect doubles as the taskbar's own DPI scale. Use it —
         // not the window's DipScale, which can lag behind monitor changes —
-        // and size the widget straight from the taskbar rect, minus a small
-        // vertical inset: winH < taskbar.Height always, so the widget can
-        // never stick out of the taskbar, whatever DPI it believes it is on.
+        // and size the tray straight from the taskbar rect, minus a small
+        // vertical inset: winH < taskbar.Height always, so the tray can never
+        // stick out of the taskbar, whatever DPI it believes it is on.
         var horizontal = taskbar.Width >= taskbar.Height;
         var scale = (horizontal ? taskbar.Height : taskbar.Width) / TaskbarTrayWindow.WindowHeightDip;
         var windowScale = ScaleOf(_trayWindow!);
-        var contentScaleChanged = TaskbarTrayWindow.SetContentScale(scale / windowScale);
+        TaskbarTrayWindow.SetContentScale(scale / windowScale);
         // ≥1 px even before the first layout pass (cells read 0 wide until
         // then): never hand SetWindowPos a 0-sized window.
         var winW = Math.Max(TaskbarTrayLayout.TotalWidthDip * scale, 1);
@@ -417,7 +398,7 @@ static class TaskbarController
         }
 
         // Belt and braces: clamp inside the taskbar so a stale rect or DPI
-        // mismatch can never leave the widget covering the taskbar's edge.
+        // mismatch can never leave the tray covering the taskbar's edge.
         xPx = Math.Clamp(xPx, taskbar.Left, Math.Max(taskbar.Left, taskbar.Right - winW));
         yPx = Math.Clamp(yPx, taskbar.Top, Math.Max(taskbar.Top, taskbar.Bottom - winH));
 
@@ -429,14 +410,13 @@ static class TaskbarController
             Bottom = (int)(yPx + winH),
         };
 
-        // Per-cell hit-test rects, left to right in the shared layout's order
-        // (clock, CPU, memory, then one cell per tracked Copilot session —
-        // the same order the window renders them).
+        // Per-cell hit-test rects, left to right in the layout's order (the
+        // same order the window renders them).
         _cellRectsPx.Clear();
         var cellLeft = xPx;
         foreach (var cell in TaskbarTrayLayout.Cells)
         {
-            _cellRectsPx.Add((cell.Id, CellRect(cellLeft, yPx, cell.CellWidthDip * scale, winH)));
+            _cellRectsPx.Add((cell.Key, CellRect(cellLeft, yPx, cell.CellWidthDip * scale, winH)));
             cellLeft += cell.CellWidthDip * scale;
         }
 
@@ -449,8 +429,6 @@ static class TaskbarController
 
         _lastTraySize = (winW, winH);
         _lastTrayPos = (xPx, yPx);
-        if (contentScaleChanged || sizeChanged)
-            CopilotSessionTracker.NotifyChanged();
 
         if (_injected)
         {
@@ -494,8 +472,8 @@ static class TaskbarController
         bool positioned,
         in TaskbarInterop.RECT actual)
     {
-        var cells = string.Join(", ", TaskbarTrayLayout.Cells.Select(c => $"{c.Id}:{c.CellWidthDip:F1}dip"));
-        TaskbarDiagnostics.Log(
+        var cells = string.Join(", ", TaskbarTrayLayout.Cells.Select(c => $"{c.Key}:{c.CellWidthDip:F1}dip"));
+        PagurianLog.Host(
             $"anchor mode={mode} positioned={positioned} hwnd={hwnd} parent={TaskbarInterop.GetAncestor(hwnd, TaskbarInterop.GA_PARENT)} " +
             $"taskbar=({taskbar.Left},{taskbar.Top})-({taskbar.Right},{taskbar.Bottom}) {taskbar.Width}x{taskbar.Height}px " +
             $"shell=({taskbarParent.Left},{taskbarParent.Top})-({taskbarParent.Right},{taskbarParent.Bottom}) {taskbarParent.Width}x{taskbarParent.Height}px " +
@@ -514,11 +492,11 @@ static class TaskbarController
             Bottom = (int)(yPx + hPx),
         };
 
-    private static TaskbarInterop.RECT? CellRectPx(string widgetId)
+    private static TaskbarInterop.RECT? CellRectPx(string cellKey)
     {
-        foreach (var (id, rect) in _cellRectsPx)
+        foreach (var (key, rect) in _cellRectsPx)
         {
-            if (id == widgetId)
+            if (key == cellKey)
                 return rect;
         }
         return null;
@@ -528,10 +506,10 @@ static class TaskbarController
     {
         var cursor = TaskbarInterop.GetCursorPosition();
 
-        // When a session ends the tracker drops it and its cell disappears;
-        // an open popup for that session goes with it.
-        if (_sessionPopupId != null && CopilotSessionTracker.Find(_sessionPopupId) == null)
-            HideSessionPopup();
+        // When a shell removes a cell (e.g. a Copilot session ends), an open
+        // billboard owned by that cell goes with it.
+        if (_billboardOwnerKey != null && TrayShells.FindCell(_billboardOwnerKey) == null)
+            CloseBillboard();
 
         // A click is an up→down transition of the left button. Physical
         // clicks last ~80-120 ms, so 50 ms polling reliably catches them.
@@ -539,13 +517,13 @@ static class TaskbarController
         var clickEdge = leftDown && !_wasLeftButtonDown;
         _wasLeftButtonDown = leftDown;
 
-        // Which widget cell is under the cursor, if any?
-        string? hoverId = null;
-        foreach (var (id, rect) in _cellRectsPx)
+        // Which cell is under the cursor, if any?
+        string? hoverKey = null;
+        foreach (var (key, rect) in _cellRectsPx)
         {
             if (rect.Contains(cursor))
             {
-                hoverId = id;
+                hoverKey = key;
                 break;
             }
         }
@@ -553,118 +531,91 @@ static class TaskbarController
         // Hover/pressed feedback like the native clock: SubtleFillColorSecondary
         // on hover, SubtleFillColorTertiary while the button is held — on the
         // hovered cell's own overlay brush (mutated live, no re-render).
-        if (hoverId != _hoverWidgetId || leftDown != _pressed)
+        if (hoverKey != _hoverCellKey || leftDown != _pressed)
         {
-            if (_hoverWidgetId != null && hoverId != _hoverWidgetId)
-                TaskbarTrayWindow.HoverBrushFor(_hoverWidgetId).Color = TaskbarTrayWindow.HoverOverlayHidden;
-            _hoverWidgetId = hoverId;
+            if (_hoverCellKey != null && hoverKey != _hoverCellKey)
+                TaskbarTrayWindow.HoverBrushFor(_hoverCellKey).Color = TaskbarTrayWindow.HoverOverlayHidden;
+            _hoverCellKey = hoverKey;
             _pressed = leftDown;
             ApplyEffectiveBrushColor();
         }
 
-        // Tooltip: after a short dwell on a session cell, show the session's
-        // name above the cell; hide on leave and on any click, and don't
-        // re-dwell while a popup is open.
+        // Tooltip: after a short dwell on a cell that has a GetTooltip
+        // delegate, show its text above the cell; hide on leave and on any
+        // click, and don't re-dwell while a billboard is open.
         if (clickEdge)
         {
             HideTooltip();
             _tooltipHoverTicks = 0;
         }
-        if (hoverId != _tooltipHoverId)
+        if (hoverKey != _tooltipHoverKey)
         {
-            _tooltipHoverId = hoverId;
+            _tooltipHoverKey = hoverKey;
             _tooltipHoverTicks = 0;
             HideTooltip();
         }
-        else if (hoverId != null
-                 && hoverId != TaskbarTrayWindow.ClockWidgetId
-                 && hoverId != TaskbarTrayWindow.CpuWidgetId
-                 && hoverId != TaskbarTrayWindow.MemoryWidgetId
-                 && !AnyPopupVisible())
+        else if (hoverKey != null
+                 && TrayShells.FindCell(hoverKey)?.Props.GetTooltip != null
+                 && _billboardWindow == null)
         {
             _tooltipHoverTicks++;
             if (_tooltipHoverTicks == TooltipDwellTicks)
-                ShowTooltip(hoverId);
+                ShowTooltip(hoverKey);
         }
 
-        // Click dispatch: toggle the clicked cell's popup, dismiss on outside
-        // click (native Windows 11 flyout style). Clicks inside an open popup
-        // itself (e.g., its button) don't dismiss it. One popup at a time:
-        // opening one closes the other.
+        // Click dispatch: a cell with a custom OnClicked gets it invoked
+        // verbatim; otherwise the cell's billboard (if any) toggles — the
+        // default OnClicked behavior. A click outside all cells dismisses
+        // the open billboard (native flyout style; clicks inside the
+        // billboard itself don't dismiss).
         if (!clickEdge)
             return;
 
-        if (hoverId == TaskbarTrayWindow.ClockWidgetId)
+        var cell = hoverKey != null ? TrayShells.FindCell(hoverKey) : null;
+        if (cell != null)
         {
-            HideMetricsPopup();
-            HideSessionPopup();
-            var popup = _popupWindow;
-            if (popup is { IsVisible: true })
-                popup.Hide();
-            else
-                EnsurePopupVisible();
+            if (cell.Props.OnClicked is { } onClicked)
+            {
+                CloseBillboard();
+                onClicked();
+            }
+            else if (cell.Props.CreateBillboard != null)
+            {
+                ToggleBillboard(cell);
+            }
         }
-        else if (hoverId == TaskbarTrayWindow.CpuWidgetId)
+        else if (_billboardWindow != null && !_billboardRectPx.Contains(cursor))
         {
-            HideSessionPopup();
-            if (_popupWindow is { IsVisible: true })
-                _popupWindow.Hide();
-            ToggleMetricsPopup(SystemMetricKind.Cpu, hoverId);
-        }
-        else if (hoverId == TaskbarTrayWindow.MemoryWidgetId)
-        {
-            HideSessionPopup();
-            if (_popupWindow is { IsVisible: true })
-                _popupWindow.Hide();
-            ToggleMetricsPopup(SystemMetricKind.Memory, hoverId);
-        }
-        else if (hoverId != null)
-        {
-            if (_popupWindow is { IsVisible: true })
-                _popupWindow.Hide();
-            HideMetricsPopup();
-            if (_sessionPopupId == hoverId && _sessionPopupWindow is { IsVisible: true })
-                HideSessionPopup(); // clicked its cell again: toggle off
-            else
-                ShowSessionPopup(hoverId);
-        }
-        else
-        {
-            if (_popupWindow is { IsVisible: true } helloPopup && !_popupRectPx.Contains(cursor))
-                helloPopup.Hide();
-            if (_sessionPopupWindow is { IsVisible: true } && !_sessionPopupRectPx.Contains(cursor))
-                HideSessionPopup();
-            if (_metricsPopupWindow is { IsVisible: true } && !_metricsPopupRectPx.Contains(cursor))
-                HideMetricsPopup();
+            CloseBillboard();
         }
     }
 
-    private static bool AnyPopupVisible() =>
-        _popupWindow is { IsVisible: true }
-        || _sessionPopupWindow is { IsVisible: true }
-        || _metricsPopupWindow is { IsVisible: true };
-
-    // Shows the session-name tooltip above the session's cell (below it when
-    // the taskbar is at the screen's top edge).
-    private static void ShowTooltip(string sessionId)
+    // Shows the cell's tooltip above the cell (below it when the taskbar is
+    // at the screen's top edge). The text is read from the delegate at show
+    // time, so it is always current.
+    private static void ShowTooltip(string cellKey)
     {
-        var session = CopilotSessionTracker.Find(sessionId);
-        var cell = CellRectPx(sessionId);
-        if (session == null || cell == null || _trayWindow == null)
+        var cell = TrayShells.FindCell(cellKey);
+        var rect = CellRectPx(cellKey);
+        if (cell == null || rect == null || _trayWindow == null)
+            return;
+
+        var text = cell.Props.GetTooltip?.Invoke();
+        if (string.IsNullOrEmpty(text))
             return;
 
         HideTooltip();
         var scale = ScaleOf(_trayWindow);
-        var xDip = cell.Value.Left / scale;
-        var yDip = cell.Value.Top / scale - TooltipWindow.WindowHeightDip - 4;
+        var xDip = rect.Value.Left / scale;
+        var yDip = rect.Value.Top / scale - TooltipWindow.WindowHeightDip - 4;
         if (yDip < 0)
-            yDip = cell.Value.Bottom / scale + 4;
+            yDip = rect.Value.Bottom / scale + 4;
 
-        var tooltip = new TooltipWindow(session.Name);
+        var tooltip = new TooltipWindow(text);
         _tooltipWindow = ReactorApp.OpenWindow(
             tooltip.CreateSpec((xDip, yDip)),
             () => tooltip);
-        _tooltipWindow.SetSize(TooltipWindow.WidthFor(session.Name), TooltipWindow.WindowHeightDip);
+        _tooltipWindow.SetSize(TooltipWindow.WidthFor(text), TooltipWindow.WindowHeightDip);
         _tooltipWindow.SetPosition(xDip, yDip);
         if (!_tooltipWindow.IsVisible)
             _tooltipWindow.Show();
@@ -676,132 +627,87 @@ static class TaskbarController
         _tooltipWindow = null;
     }
 
-    // Opens the popup for one Copilot session above its cell (below it when
-    // the taskbar is at the screen's top edge).
-    private static void ShowSessionPopup(string sessionId)
+    private static void ToggleBillboard(ShellCellHandle cell)
     {
-        HideSessionPopup();
-        var cell = CellRectPx(sessionId);
-        if (cell == null || _trayWindow == null)
-            return;
-
-        var scale = ScaleOf(_trayWindow);
-        var popupW = SessionPopupWindow.WindowWidthDip;  // DIPs
-        var popupH = SessionPopupWindow.WindowHeightDip; // DIPs
-
-        // Compute in DIPs — Reactor window APIs take DIPs; the physical pixel
-        // rect below is only for cursor hit-testing (GetCursorPos is physical).
-        var xDip = cell.Value.Left / scale;
-        var yDip = cell.Value.Top / scale - popupH - 6;
-        if (yDip < 0)
-            yDip = cell.Value.Bottom / scale + 6;
-
-        _sessionPopupRectPx = CellRect(xDip * scale, yDip * scale, popupW * scale, popupH * scale);
-
-        var popup = new SessionPopupWindow(sessionId);
-        _sessionPopupWindow = ReactorApp.OpenWindow(
-            popup.CreateSpec((xDip, yDip)),
-            () => popup);
-        _sessionPopupWindow.SetSize(popupW, popupH);
-        _sessionPopupWindow.SetPosition(xDip, yDip);
-        if (!_sessionPopupWindow.IsVisible)
-            _sessionPopupWindow.Show();
-        _sessionPopupId = sessionId;
-    }
-
-    private static void HideSessionPopup()
-    {
-        try { _sessionPopupWindow?.Close(); } catch { /* window may already be gone */ }
-        _sessionPopupWindow = null;
-        _sessionPopupId = null;
-    }
-
-    private static void ToggleMetricsPopup(SystemMetricKind kind, string cellId)
-    {
-        if (_metricsPopupWindow is { IsVisible: true } && _metricsPopupKind == kind)
+        // Clicked the owner cell of the open billboard: toggle off.
+        if (_billboardWindow != null && _billboardOwnerKey == cell.Key)
         {
-            HideMetricsPopup();
+            CloseBillboard();
             return;
         }
 
-        HideMetricsPopup();
-        var cell = CellRectPx(cellId);
-        if (cell == null || _trayWindow == null)
+        // One billboard at a time: opening one closes the other.
+        CloseBillboard();
+
+        var billboard = cell.Props.CreateBillboard!();
+        if (billboard == null)
             return;
 
-        var scale = ScaleOf(_trayWindow);
-        var (popupW, popupH) = kind == SystemMetricKind.Cpu
-            ? (CpuMetricsPopupWindow.WindowWidthDip, CpuMetricsPopupWindow.WindowHeightDip)
-            : (MemoryMetricsPopupWindow.WindowWidthDip, MemoryMetricsPopupWindow.WindowHeightDip);
-
-        var xDip = cell.Value.Left / scale;
-        var yDip = cell.Value.Top / scale - popupH - 6;
-        if (yDip < 0)
-            yDip = cell.Value.Bottom / scale + 6;
-
-        _metricsPopupRectPx = CellRect(xDip * scale, yDip * scale, popupW * scale, popupH * scale);
-
-        var popup = kind == SystemMetricKind.Cpu
-            ? (Component)new CpuMetricsPopupWindow()
-            : new MemoryMetricsPopupWindow();
-        var spec = kind == SystemMetricKind.Cpu
-            ? ((CpuMetricsPopupWindow)popup).CreateSpec((xDip, yDip))
-            : ((MemoryMetricsPopupWindow)popup).CreateSpec((xDip, yDip));
-
-        _metricsPopupWindow = ReactorApp.OpenWindow(spec, () => popup);
-        _metricsPopupWindow.SetSize(popupW, popupH);
-        _metricsPopupWindow.SetPosition(xDip, yDip);
-        if (!_metricsPopupWindow.IsVisible)
-            _metricsPopupWindow.Show();
-        _metricsPopupKind = kind;
-        SystemMetricsTracker.SetPopupVisible(kind, true);
-    }
-
-    private static void HideMetricsPopup()
-    {
-        if (_metricsPopupWindow == null)
+        var rect = CellRectPx(cell.Key);
+        if (rect == null || _trayWindow == null)
             return;
 
-        try { _metricsPopupWindow.Close(); } catch { /* window may already be gone */ }
-        if (_metricsPopupKind != null)
-            SystemMetricsTracker.SetPopupVisible(_metricsPopupKind.Value, false);
-        _metricsPopupWindow = null;
-        _metricsPopupKind = null;
-    }
-
-    private static void EnsurePopupVisible()
-    {
-        var scale = ScaleOf(_trayWindow!);
-        var popupW = HoverPopupWindow.WindowWidthDip;  // DIPs
-        var popupH = HoverPopupWindow.WindowHeightDip; // DIPs
+        billboard.OwnerCell = cell;
 
         // Compute in DIPs — Reactor window APIs take DIPs; the physical pixel
         // rect below is only for cursor hit-testing (GetCursorPos is physical).
-        var xDip = _trayRectPx.Left / scale;
-        var yDip = _trayRectPx.Top / scale - popupH - 6;
+        var scale = ScaleOf(_trayWindow);
+        var popupW = billboard.WidthDip;
+        var popupH = billboard.HeightDip;
+        var xDip = rect.Value.Left / scale;
+        var yDip = rect.Value.Top / scale - popupH - 6;
         if (yDip < 0)
-            yDip = _trayRectPx.Bottom / scale + 6; // taskbar at the top edge: open below
+            yDip = rect.Value.Bottom / scale + 6; // taskbar at the top edge: open below
 
-        _popupRectPx = new TaskbarInterop.RECT
-        {
-            Left = (int)(xDip * scale),
-            Top = (int)(yDip * scale),
-            Right = (int)((xDip + popupW) * scale),
-            Bottom = (int)((yDip + popupH) * scale),
-        };
+        _billboardRectPx = CellRect(xDip * scale, yDip * scale, popupW * scale, popupH * scale);
 
-        if (_popupWindow == null)
-        {
-            _popupWindow = ReactorApp.OpenWindow(
-                HoverPopupWindow.CreateSpec((xDip, yDip)),
-                () => new HoverPopupWindow());
-        }
+        _billboardWindow = ReactorApp.OpenWindow(
+            BillboardSpec(billboard, (xDip, yDip)),
+            () => billboard);
+        _billboardWindow.SetSize(popupW, popupH);
+        _billboardWindow.SetPosition(xDip, yDip);
+        if (!_billboardWindow.IsVisible)
+            _billboardWindow.Show();
 
-        _popupWindow.SetSize(popupW, popupH);
-        _popupWindow.SetPosition(xDip, yDip);
-        if (!_popupWindow.IsVisible)
-            _popupWindow.Show();
+        _billboard = billboard;
+        _billboardOwnerKey = cell.Key;
+        billboard.OnOpened();
     }
+
+    private static void CloseBillboard()
+    {
+        if (_billboardWindow == null)
+            return;
+
+        try { _billboardWindow.Close(); } catch { /* window may already be gone */ }
+        try { _billboard?.OnClosed(); } catch { /* module code must not break the host */ }
+        _billboardWindow = null;
+        _billboard = null;
+        _billboardOwnerKey = null;
+    }
+
+    // Host-standard billboard chrome: borderless, rounded, acrylic,
+    // NoActivate, always-on-top. Modules supply only content and size.
+    private static WindowSpec BillboardSpec(Billboard billboard, (double X, double Y) positionDip) => new()
+    {
+        Title = billboard.Title,
+        Width = billboard.WidthDip,
+        Height = billboard.HeightDip,
+        Style = WindowStyle.None,
+        CornerStyle = WindowCornerStyle.Rounded,
+        Backdrop = BackdropChoice.Of(BackdropKind.AcrylicThin),
+        ShowInTaskbar = false,
+        ShowInSwitcher = false,
+        NoActivate = true,
+        IsMinimizable = false,
+        IsMaximizable = false,
+        ResizeMode = WindowResizeMode.NoResize,
+        Level = WindowLevel.AlwaysOnTop,
+        StartPosition = WindowStartPosition.Manual,
+        ManualPosition = positionDip,
+        Key = WindowKey.Of($"pagurian-billboard-{++_billboardCount}"),
+        Icon = WindowIcon.FromPath(AppAssets.IconPath),
+    };
 
     private static double ScaleOf(ReactorWindow window) =>
         window.DipScale > 0 ? window.DipScale : 1.0;

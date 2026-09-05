@@ -1,59 +1,43 @@
-using System.Collections.Generic;
-using System.Linq;
-using Microsoft.UI;
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Media;
+using Pagurian.Sdk;
 using static Microsoft.UI.Reactor.Factories;
 
-namespace Pagurian;
+namespace Pagurian.Modules.Metrics;
 
-class MemoryMetricsPopupWindow : Component
+// Memory details billboard: used/total summary and the top processes by
+// working set. Re-renders on every sampler snapshot; opening it switches the
+// sampler to its fast (1s) cadence.
+class MemBillboard : Billboard
 {
-    public const double WindowWidthDip = 360;
-    public const double WindowHeightDip = 300;
-
     private const double ProcessListHeightDip = 140;
-    private static int _instanceCount;
 
-    private readonly string _key;
+    public override double WidthDip => 360;
 
-    public MemoryMetricsPopupWindow()
-    {
-        _key = $"pagurian-memory-popup-{++_instanceCount}";
-    }
+    public override double HeightDip => 300;
 
-    public WindowSpec CreateSpec((double X, double Y) positionDip) => new()
-    {
-        Title = "Memory",
-        Width = WindowWidthDip,
-        Height = WindowHeightDip,
-        Style = WindowStyle.None,
-        CornerStyle = WindowCornerStyle.Rounded,
-        Backdrop = BackdropChoice.Of(BackdropKind.AcrylicThin),
-        ShowInTaskbar = false,
-        ShowInSwitcher = false,
-        NoActivate = true,
-        IsMinimizable = false,
-        IsMaximizable = false,
-        ResizeMode = WindowResizeMode.NoResize,
-        Level = WindowLevel.AlwaysOnTop,
-        StartPosition = WindowStartPosition.Manual,
-        ManualPosition = positionDip,
-        Key = WindowKey.Of(_key),
-        Icon = WindowIcon.FromPath(AppAssets.IconPath),
-    };
+    public override string Title => "Memory";
+
+    public override void OnOpened() => SystemMetricsTracker.SetPopupVisible(SystemMetricKind.Memory, true);
+
+    public override void OnClosed() => SystemMetricsTracker.SetPopupVisible(SystemMetricKind.Memory, false);
 
     public override Element Render()
     {
         var (_, setVersion) = UseState(0);
+        var tick = UseRef(0);
 
         UseEffect(() =>
         {
-            void OnChanged() => setVersion(SystemMetricsTracker.Version);
+            void OnChanged() => setVersion(++tick.Current);
             SystemMetricsTracker.UiChanged += OnChanged;
-            return () => SystemMetricsTracker.UiChanged -= OnChanged;
+            Theme.Changed += OnChanged;
+            return () =>
+            {
+                SystemMetricsTracker.UiChanged -= OnChanged;
+                Theme.Changed -= OnChanged;
+            };
         }, Array.Empty<object>());
 
         var mem = SystemMetricsTracker.Memory;

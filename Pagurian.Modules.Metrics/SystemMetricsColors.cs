@@ -1,6 +1,6 @@
 using Microsoft.UI.Xaml.Media;
 
-namespace Pagurian;
+namespace Pagurian.Modules.Metrics;
 
 static class SystemMetricsColors
 {

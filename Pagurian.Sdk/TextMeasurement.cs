@@ -1,13 +1,13 @@
 using Microsoft.UI.Xaml;
 
-namespace Pagurian;
+namespace Pagurian.Sdk;
 
 // Measures text width in DIPs with a scratch WinUI TextBlock (Reactor exposes
 // no measure API — its FlexPanel measurement is internal). A detached
 // TextBlock measures fine off the visual tree as long as XAML is up; all
-// callers (Render, the controller's poll tick, tooltip creation) run on the
-// UI thread, so the scratch instance and the cache need no locking.
-static class TextMeasurement
+// callers run on the UI thread, so the scratch instance and the cache need no
+// locking.
+public static class TextMeasurement
 {
     private static Microsoft.UI.Xaml.Controls.TextBlock? _scratch;
     private static readonly Dictionary<(string Text, double FontSize), double> _cache = new();

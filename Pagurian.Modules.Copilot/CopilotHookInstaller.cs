@@ -2,14 +2,15 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 
-namespace Pagurian;
+namespace Pagurian.Modules.Copilot;
 
 // Installs/uninstalls the Copilot CLI hook file that makes the CLI invoke
-// "Pagurian.exe --hook <event>" for every hook event (see CopilotHookBridge).
+// "Pagurian.exe post {shellId} hook <event>" for every hook event (the events
+// then arrive at CopilotShell.OnMessage through the host's post pipeline).
 // The file lives at %USERPROFILE%\.copilot\hooks\pagurian-copilot-hook.json —
 // one JSON file per hook provider, so it coexists with other tools' hooks —
-// and exists only while Pagurian runs (deleted on quit and, as a backstop,
-// on process exit).
+// and exists only while the shell is in the tray (deleted on shell shutdown
+// and, as a backstop, on process exit).
 static class CopilotHookInstaller
 {
     // GOTCHA (learned from the CopilotHookMonitor reference): Encoding.UTF8
@@ -31,7 +32,7 @@ static class CopilotHookInstaller
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             ".copilot", "hooks", "pagurian-copilot-hook.json");
 
-    public static void Install()
+    public static void Install(string shellId)
     {
         try
         {
@@ -53,8 +54,8 @@ static class CopilotHookInstaller
             for (var i = 0; i < HookEvents.Length; i++)
             {
                 var ev = HookEvents[i];
-                var bash = JsonSerializer.Serialize($"\"{bashExe}\" --hook {ev}", json);
-                var powershell = JsonSerializer.Serialize($"& \"{exe}\" --hook {ev}", json);
+                var bash = JsonSerializer.Serialize($"\"{bashExe}\" post {shellId} hook {ev}", json);
+                var powershell = JsonSerializer.Serialize($"& \"{exe}\" post {shellId} hook {ev}", json);
                 sb.AppendLine($"    \"{ev}\": [");
                 sb.AppendLine("      {");
                 sb.AppendLine("        \"type\": \"command\",");

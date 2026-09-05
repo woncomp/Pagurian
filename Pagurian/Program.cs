@@ -1,13 +1,13 @@
 using Pagurian;
 using Microsoft.UI.Reactor;
 
-// Bridge mode: invoked by a Copilot CLI hook as "Pagurian.exe --hook <event>"
-// (see CopilotHookInstaller). Reads the event payload from stdin and forwards
-// it to the running app over a named pipe, then exits — never starts WinUI
-// and always exits 0 (preToolUse hooks are fail-closed).
-if (args is ["--hook", var hookEvent])
+// Bridge mode: "Pagurian.exe post {shell_id} <cmd> [args...]" delivers a
+// message to a shell of the running app over a named pipe, then exits —
+// never starts WinUI and always exits 0 (callers like the Copilot preToolUse
+// hook are fail-closed).
+if (args is ["post", .. var postArgs])
 {
-    CopilotHookBridge.Run(hookEvent);
+    PostBridge.Run(postArgs);
     return;
 }
 
@@ -15,11 +15,10 @@ ReactorApp.Run(_ =>
 {
     ReactorApp.ShutdownPolicy = ShutdownPolicy.Explicit;
 
-    // Copilot hook feature: register the CLI hooks and start listening for
-    // bridge events before any window opens.
-    CopilotHookInstaller.Install();
-    CopilotSessionTracker.Start();
-    SystemMetricsTracker.Start();
+    PagurianLog.Initialize();
+    ModuleLoader.LoadAll();
+    TrayShells.LoadFromConfig(TrayConfig.Load());
+    ShellMessageServer.Start();
 
     var tray = ReactorApp.OpenTrayIcon(new TrayIconSpec(
         Icon: WindowIcon.FromPath(AppAssets.IconPath),
@@ -42,9 +41,9 @@ ReactorApp.Run(_ =>
         // the windows but leaves this process running, so finish the job once
         // the WinUI unwind has been kicked off.
         TaskbarController.Stop();
-        SystemMetricsTracker.Stop();
-        CopilotSessionTracker.Stop();
-        CopilotHookInstaller.Uninstall();
+        ShellMessageServer.Stop();
+        TrayShells.ShutdownAll();
+        ModuleLoader.ShutdownAll();
         tray.Close();
         ReactorApp.Exit(0);
         Environment.Exit(0);

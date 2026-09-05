@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>false</EnableMsixTooling>
+    <AppxGeneratePriEnabled>false</AppxGeneratePriEnabled>
+    <Platforms>x64;ARM64</Platforms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Pagurian.Modules.Copilot</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.UI.Reactor" Version="0.1.0-preview.12" />
+    <ProjectReference Include="..\Pagurian.Sdk\Pagurian.Sdk.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Assets\icons8-github-64.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <!-- Deploy the module dll and its assets next to the host exe's modules
+       folder so the running app discovers it (see ModuleLoader). -->
+  <Target Name="DeployToHostModules" AfterTargets="Build">
+    <PropertyGroup>
+      <HostModulesDir>$(MSBuildThisFileDirectory)..\Pagurian\bin\$(Platform)\$(Configuration)\$(TargetFramework)\modules\</HostModulesDir>
+    </PropertyGroup>
+    <MakeDir Directories="$(HostModulesDir);$(HostModulesDir)Assets" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(HostModulesDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(Content)" DestinationFolder="$(HostModulesDir)Assets" SkipUnchangedFiles="true" />
+  </Target>
+</Project>
