@@ -30,6 +30,11 @@ static class ModuleLoader
             string[] dlls;
             try
             {
+                if (!Directory.Exists(dir))
+                {
+                    Directory.CreateDirectory(dir);
+                    PagurianLog.Host($"modules: created {dir}");
+                }
                 dlls = Directory.GetFiles(dir, "*.dll");
             }
             catch (Exception ex)

@@ -4,6 +4,8 @@
     <UseWinUI>true</UseWinUI>
     <EnableMsixTooling>false</EnableMsixTooling>
     <AppxGeneratePriEnabled>false</AppxGeneratePriEnabled>
+    <!-- The host generates the only app PRI. SDK 10.0.302 otherwise advertises this disabled library's non-existent project PRI to it. -->
+    <IncludeProjectPriFile>false</IncludeProjectPriFile>
     <Platforms>x64;ARM64</Platforms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>

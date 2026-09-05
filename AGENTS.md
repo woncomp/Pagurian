@@ -9,10 +9,7 @@ dotnet build Pagurian.sln -p:Platform=x64
 dotnet run --project Pagurian -p:Platform=x64
 ```
 
-**Requires .NET SDK 10.0.400+** — the Microsoft.UI.Reactor analyzers/source
-generators reference Roslyn 5.6 and silently fail to load on older SDKs
-(CS9057); the fluent element modifiers (`.FontSize()`, `.Width()`, …) then
-vanish and every UI file fails with CS1955.
+**Requires .NET SDK 10.0.302+** — SDK 10.0.302 is verified with Microsoft.UI.Reactor 0.1.0-preview.12. The library projects suppress their own project PRI files while the WinExe produces the app PRI, which keeps the standard x64 build working on this SDK.
 
 There are no tests and no linter. Verification is done by launching the app
 and observing the tray icon, the taskbar tray, billboards, and message boxes.

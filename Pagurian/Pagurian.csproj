@@ -14,7 +14,10 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.UI.Reactor" Version="0.1.0-preview.12" />
-    <ProjectReference Include="..\Pagurian.Sdk\Pagurian.Sdk.csproj" />
+    <ProjectReference Include="..\Pagurian.Sdk\Pagurian.Sdk.csproj">
+      <!-- Let the SDK library retain its disabled project-PRI setting. -->
+      <GlobalPropertiesToRemove>IncludeProjectPriFile</GlobalPropertiesToRemove>
+    </ProjectReference>
   </ItemGroup>
 
   <ItemGroup>
