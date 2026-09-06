@@ -51,7 +51,7 @@ static class SettingsWindow
         Width = 780,
         Height = 600,
         Style = WindowStyle.Default,
-        Backdrop = BackdropChoice.Of(BackdropKind.AcrylicThin),
+        Backdrop = BackdropChoice.Of(BackdropKind.MicaAlt),
         ShowInTaskbar = true,
         ShowInSwitcher = true,
         NoActivate = false,

@@ -203,10 +203,11 @@ public sealed class MyShell : Shell
   `OnClosed()` (self-report hooks — the metrics billboards switch sampler
   cadence here), `Shell`/`Theme`/`Log` accessors. A fresh instance is created
   per show.
-- Theme: read `Theme.IsDark` per render for computed colors; use the shared
-  `Theme.TextBrush` for body text; subscribe `Theme.Changed` in `UseEffect`
-  (with a monotonic local counter, NOT a tracker Version — theme flips don't
-  bump tracker versions) to re-render.
+- Theme: cells and billboards receive the sampled taskbar theme; shell
+  configuration views receive the effective Windows theme of the Settings
+  surface. Read `Theme.IsDark` for computed colors, use `Theme.TextBrush`
+  for body text, and subscribe `Theme.Changed` in `UseEffect` when computed
+  colors must be refreshed.
 - Assets: ship next to the module dll, resolve with
   `ModuleAssets.Resolve(typeof(MyModule), "Assets/foo.png")`.
 

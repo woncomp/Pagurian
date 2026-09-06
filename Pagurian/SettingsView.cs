@@ -6,13 +6,11 @@ using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Reactor.Input;
 using Microsoft.UI.Reactor.Layout;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media;
 using Pagurian.Sdk;
 using Windows.Storage.Pickers;
 using Windows.System;
-using Windows.UI;
-using Windows.UI.ViewManagement;
 using WinRT.Interop;
 using static Microsoft.UI.Reactor.Factories;
 
@@ -71,7 +69,7 @@ class SettingsView : Component
 
     // Strip geometry; the drop handler maps DragTargetArgs.Position.X through
     // these constants back to an insertion index.
-    private const double StripPadX = 8;
+    private const double StripPadX = 12;
     private const double ChipSize = 40;
     private const double ChipGap = 4;
     private const double ChipPitch = ChipSize + ChipGap;
@@ -86,18 +84,19 @@ class SettingsView : Component
 
     public override Element Render()
     {
-        // Re-render on taskbar theme flips (all colors are computed per render).
-        var (_, setVersion) = UseState(0);
-        var tick = UseRef(0);
-        UseEffect(() =>
-        {
-            void OnChanged() => setVersion(++tick.Current);
-            ThemeService.Instance.Changed += OnChanged;
-            return () =>
-            {
-                ThemeService.Instance.Changed -= OnChanged;
-            };
-        }, Array.Empty<object>());
+        // Settings follows the effective Windows theme, independently of the
+        // sampled taskbar theme used by cells and billboards.
+        var colorScheme = UseColorScheme();
+        var highContrastScheme = UseHighContrastScheme();
+        var reduceMotion = UseReducedMotion();
+        var settingsTheme = UseMemo(
+            () => new SettingsThemeService(colorScheme, highContrastScheme),
+            Array.Empty<object>());
+        UseEffect(
+            () => settingsTheme.Apply(colorScheme, highContrastScheme),
+            colorScheme,
+            highContrastScheme ?? "");
+        var highContrast = colorScheme == ColorScheme.HighContrast;
 
         // Draft tray membership, loaded once from the config file — entries
         // whose module is not loaded stay visible/editable and are never
@@ -162,6 +161,19 @@ class SettingsView : Component
             setDraft(next);
             if (selectedId == instanceId)
                 setSelectedId(null);
+            setDirty(true);
+        }
+
+        void AddKind(string kindId)
+        {
+            var next = new List<TrayConfig.Entry>(draft)
+            {
+                new(
+                    kindId,
+                    TrayConfig.NextId(draft.Select(e => e.Id)),
+                    null),
+            };
+            setDraft(next);
             setDirty(true);
         }
 
@@ -247,64 +259,65 @@ class SettingsView : Component
                 setDirText(path);
         }
 
-        var isDark = ThemeService.Instance.IsDark;
-        var textBrush = ThemeService.Instance.TextBrush;
-        var subtleBrush = new SolidColorBrush(isDark
-            ? Color.FromArgb(0x99, 255, 255, 255)
-            : Color.FromArgb(0x99, 0, 0, 0));
-        var outlineBrush = new SolidColorBrush(isDark
-            ? Color.FromArgb(0x30, 255, 255, 255)
-            : Color.FromArgb(0x30, 0, 0, 0));
-        var chipBrush = new SolidColorBrush(isDark
-            ? Color.FromArgb(0x14, 255, 255, 255)
-            : Color.FromArgb(0x10, 0, 0, 0));
-        var missingBrush = new SolidColorBrush(Color.FromArgb(0x40, 0xE8, 0x11, 0x11));
-        var stripBrush = new SolidColorBrush(isDark
-            ? Color.FromArgb(0xFF, 0x20, 0x20, 0x20)
-            : Color.FromArgb(0xFF, 0xF3, 0xF3, 0xF3));
-        var stripHotBrush = new SolidColorBrush(isDark
-            ? Color.FromArgb(0xFF, 0x30, 0x30, 0x30)
-            : Color.FromArgb(0xFF, 0xE4, 0xE4, 0xE4));
-        var cardBrush = new SolidColorBrush(isDark
-            ? Color.FromArgb(0x0C, 255, 255, 255)
-            : Color.FromArgb(0x0C, 0, 0, 0));
-        var poolBrush = new SolidColorBrush(isDark
-            ? Color.FromArgb(0x08, 255, 255, 255)
-            : Color.FromArgb(0x08, 0, 0, 0));
-        var poolHotBrush = new SolidColorBrush(Color.FromArgb(0x30, 0xE8, 0x3B, 0x3B));
-        var accent = new UISettings().GetColorValue(UIColorType.Accent);
-        var selectionFill = new SolidColorBrush(
-            Color.FromArgb(0x28, accent.R, accent.G, accent.B));
-        var selectionStroke = new SolidColorBrush(
-            Color.FromArgb(0xFF, accent.R, accent.G, accent.B));
-        var ghostFill = new SolidColorBrush(Color.FromArgb(0x2E, accent.R, accent.G, accent.B));
-        var ghostStroke = new SolidColorBrush(Color.FromArgb(0xB0, accent.R, accent.G, accent.B));
-
         // ── Configuration folder ────────────────────────────────────────
         var trimmedDir = dirText.Trim();
         var dirChanged = trimmedDir.Length > 0 &&
             !string.Equals(trimmedDir, appliedDir, StringComparison.OrdinalIgnoreCase);
 
+        var highContrastWindow = Theme.Ref("SystemColorWindowColorBrush");
+        var highContrastText = Theme.Ref("SystemColorWindowTextColorBrush");
+        var highContrastHighlight = Theme.Ref("SystemColorHighlightColorBrush");
+        var cardFill = highContrast ? highContrastWindow : Theme.CardBackground;
+        var cardStroke = highContrast ? highContrastText : Theme.CardStroke;
+        var cardStrokeThickness = highContrast ? 2 : 1;
+
         var configRow = Grid(
-            [GridSize.Star(), GridSize.Auto, GridSize.Auto, GridSize.Auto],
+            [GridSize.Star(), GridSize.Auto],
             [GridSize.Auto],
             [
                 TextBox(dirText, v => setDirText(v),
                         placeholderText: "Folder containing config.json")
                     .AutomationName("Configuration folder")
-                    .VerticalAlignment(VerticalAlignment.Center)
+                    .HelpText("Folder that contains Pagurian's config.json file")
+                    .VAlign(VerticalAlignment.Center)
                     .Grid(row: 0, column: 0),
                 Button("Browse…", Browse)
                     .Margin(8, 0, 0, 0)
                     .Grid(row: 0, column: 1),
-                Button("Apply", ApplyDir)
-                    .IsEnabled(dirChanged)
-                    .Margin(8, 0, 0, 0)
-                    .Grid(row: 0, column: 2),
-                Button("Reset", () => setDirText(HostSettings.DefaultConfigDir))
-                    .Margin(8, 0, 0, 0)
-                    .Grid(row: 0, column: 3),
             ]);
+
+        var configMeta = Grid(
+            [GridSize.Star(), GridSize.Auto],
+            [GridSize.Auto],
+            [
+                Caption($"Active file: {Path.Combine(appliedDir, "config.json")}")
+                    .TextWrapping(TextWrapping.WrapWholeWords)
+                    .Foreground(Theme.SecondaryText)
+                    .VAlign(VerticalAlignment.Center)
+                    .Grid(row: 0, column: 0),
+                HStack(8,
+                        Button("Reset", () => setDirText(HostSettings.DefaultConfigDir)),
+                        Button("Apply", ApplyDir)
+                            .IsEnabled(dirChanged)
+                            .ApplyStyle("AccentButtonStyle"))
+                    .Grid(row: 0, column: 1),
+            ])
+            .Margin(0, 12, 0, 0);
+
+        var configCard = SettingsCard(
+                FlexColumn(
+                    Subtitle("Configuration folder")
+                        .HeadingLevel(AutomationHeadingLevel.Level2),
+                    Body("Choose where Pagurian stores its tray configuration.")
+                        .TextWrapping(TextWrapping.WrapWholeWords)
+                        .Foreground(Theme.SecondaryText)
+                        .Margin(0, 4, 0, 0),
+                    configRow.Margin(0, 12, 0, 0),
+                    configMeta),
+                cardFill,
+                cardStroke,
+                cardStrokeThickness)
+            .Landmark(AutomationLandmarkType.Form);
 
         // ── Tray mock ───────────────────────────────────────────────────
         // While a drag hovers the strip, a ghost slot marks the insertion
@@ -316,38 +329,50 @@ class SettingsView : Component
         for (var i = 0; i <= draft.Count; i++)
         {
             if (preview is { } pv && pv.Index == i)
-                chips.Add(GhostSlot(ghostFill, ghostStroke));
+                chips.Add(GhostSlot(highContrast));
             if (i < draft.Count)
             {
                 var entry = draft[i];
                 chips.Add(TrayChip(
                     entry,
-                    chipBrush,
-                    missingBrush,
-                    selectionFill,
-                    selectionStroke,
                     selected: selectedId == entry.Id,
                     onSelected: () => setSelectedId(entry.Id),
+                    onRemove: () => RemoveInstance(entry.Id),
                     onDragEnd: ClearPreview,
+                    position: i + 1,
+                    setSize: draft.Count,
+                    highContrast,
+                    reduceMotion,
                     dimmed: preview?.InstanceId == entry.Id));
             }
         }
         Element stripContent = chips.Count == 0
-            ? TextBlock("Tray is empty — drag shells here from the modules below")
-                .FontSize(12)
-                .Foreground(subtleBrush)
-                .HorizontalAlignment(HorizontalAlignment.Center)
-                .VerticalAlignment(VerticalAlignment.Center)
+            ? Caption("Tray is empty — drag or click a shell below to add it")
+                .Foreground(Theme.SecondaryText)
+                .HAlign(HorizontalAlignment.Center)
+                .VAlign(VerticalAlignment.Center)
             : HStack(ChipGap, chips.ToArray())
-                .VerticalAlignment(VerticalAlignment.Center)
-                .SpringLayoutAnimation();
+                .VAlign(VerticalAlignment.Center);
+        if (!reduceMotion && chips.Count > 0)
+            stripContent = stripContent.SpringLayoutAnimation();
 
-        var strip = (Border(stripContent) with { CornerRadius = 8 })
-            .Height(56)
-            .Padding(StripPadX, 0, StripPadX, 0)
-            .Background(stripHot ? stripHotBrush : stripBrush)
-            .BorderBrush(outlineBrush)
-            .BorderThickness(1)
+        var stripFill = stripHot
+            ? highContrast ? highContrastWindow : Theme.SystemAttentionBackground
+            : highContrast ? highContrastWindow : Theme.LayerFill;
+        var stripStroke = stripHot
+            ? highContrast ? highContrastHighlight : Theme.Accent
+            : highContrast ? highContrastText : Theme.ControlStroke;
+        var stripPanelBase = Grid(
+                [GridSize.Star()],
+                [GridSize.Star()],
+                [Border(stripContent).Padding(StripPadX, 8, StripPadX, 8)])
+            .Background(stripFill);
+        Element stripPanel = !reduceMotion && !highContrast
+            ? stripPanelBase.BackgroundTransition()
+            : stripPanelBase;
+        var stripBase = (Border(stripPanel) with { CornerRadius = 8 })
+            .MinHeight(64)
+            .WithBorder(stripStroke, highContrast ? 2 : 1)
             .AutomationName("Tray shell selector")
             .IsTabStop(true)
             .OnTapped((_, _) => setSelectedId(null))
@@ -383,8 +408,8 @@ class SettingsView : Component
                 ClearPreview();
                 if (TryGetPayload(args.Data, out var p))
                     DropOnStrip(p, args.Position.X);
-            })
-            .Margin(0, 6, 0, 0);
+            });
+        Element strip = stripBase;
 
         // ── Module pool ─────────────────────────────────────────────────
         var cards = ModuleLoader.Modules
@@ -394,21 +419,32 @@ class SettingsView : Component
                     .Where(k => k.ShellType.Assembly == m.GetType().Assembly)
                     .ToList()))
             .Where(x => x.Kinds.Count > 0)
-            .Select(x => ModuleCard(x.Module, x.Kinds, textBrush, chipBrush, cardBrush, outlineBrush, ClearPreview))
+            .Select(x => ModuleCard(x.Module, x.Kinds, AddKind, ClearPreview, highContrast))
             .ToArray();
         Element poolContent = cards.Length == 0
-            ? TextBlock("No modules loaded")
-                .FontSize(12)
-                .Foreground(subtleBrush)
-            : (FlexRow(cards) with { Wrap = FlexWrap.Wrap, RowGap = 10, ColumnGap = 10 })
-                .Padding(2);
+            ? Body("No modules loaded")
+                .Foreground(Theme.SecondaryText)
+            : (FlexRow(cards) with { Wrap = FlexWrap.Wrap, RowGap = 12, ColumnGap = 12 });
 
-        var pool = (Border(ScrollViewer(poolContent)) with { CornerRadius = 10 })
-            .Padding(10)
-            .Background(poolHot ? poolHotBrush : poolBrush)
-            .BorderBrush(outlineBrush)
-            .BorderThickness(1)
-            .Flex(1)
+        var poolFill = poolHot
+            ? highContrast ? highContrastWindow : Theme.SystemCriticalBackground
+            : cardFill;
+        var poolStroke = poolHot
+            ? highContrast ? highContrastHighlight : Theme.SystemCritical
+            : cardStroke;
+        var pool = SettingsCard(
+                FlexColumn(
+                    Subtitle("Modules")
+                        .HeadingLevel(AutomationHeadingLevel.Level2),
+                    Body("Drag a shell to choose its exact position, or click it to add it to the end of the tray.")
+                        .TextWrapping(TextWrapping.WrapWholeWords)
+                        .Foreground(Theme.SecondaryText)
+                        .Margin(0, 4, 0, 0),
+                    poolContent.Margin(0, 16, 0, 0)),
+                poolFill,
+                poolStroke,
+                poolHot || highContrast ? 2 : 1)
+            .AutomationName("Available modules")
             .OnDragEnter(args =>
             {
                 if (TryGetPayload(args.Data, out var p) && p.InstanceId != null)
@@ -429,80 +465,126 @@ class SettingsView : Component
                 ClearPreview();
                 if (TryGetPayload(args.Data, out var p) && p.InstanceId != null)
                     RemoveInstance(p.InstanceId);
-            })
-            .Margin(0, 6, 0, 0);
+            });
 
         var selectedEntry = selectedId == null
             ? null
             : draft.FirstOrDefault(e => e.Id == selectedId);
-        var bottomTitle = selectedEntry == null
-            ? "Modules"
-            : $"{NameFor(selectedEntry.ShellType)} configuration · #{selectedEntry.Id}";
-        var bottomContent = selectedEntry == null
-            ? pool
-            : ShellConfigurationPanel(
-                selectedEntry,
-                textBrush,
-                subtleBrush,
-                poolBrush,
-                outlineBrush,
-                settings => UpdateEntrySettings(selectedEntry.Id, settings));
+        Element modulesCard;
+        if (selectedEntry == null)
+        {
+            modulesCard = pool;
+        }
+        else
+        {
+            var selectedName = NameFor(selectedEntry.ShellType);
+            var selectedHeader = Grid(
+                [GridSize.Star(), GridSize.Auto],
+                [GridSize.Auto],
+                [
+                    FlexColumn(
+                            Subtitle($"{selectedName} configuration")
+                                .HeadingLevel(AutomationHeadingLevel.Level2),
+                            Caption($"Shell #{selectedEntry.Id}")
+                                .Foreground(Theme.SecondaryText)
+                                .Margin(0, 4, 0, 0))
+                        .Grid(row: 0, column: 0),
+                    Button("Back to modules", () => setSelectedId(null))
+                        .Grid(row: 0, column: 1),
+                ]);
+            modulesCard = SettingsCard(
+                FlexColumn(
+                    selectedHeader,
+                    ShellConfigurationPanel(
+                            selectedEntry,
+                            settingsTheme,
+                            highContrast,
+                            settings => UpdateEntrySettings(selectedEntry.Id, settings))
+                        .Margin(0, 16, 0, 0)),
+                cardFill,
+                cardStroke,
+                cardStrokeThickness);
+        }
+
+        var trayCard = SettingsCard(
+            FlexColumn(
+                Subtitle("Tray")
+                    .HeadingLevel(AutomationHeadingLevel.Level2),
+                Body("Drag shells onto the strip to add them, drag sideways to reorder, or drag them back to Modules to remove them.")
+                    .TextWrapping(TextWrapping.WrapWholeWords)
+                    .Foreground(Theme.SecondaryText)
+                    .Margin(0, 4, 0, 0),
+                strip.Margin(0, 16, 0, 0)),
+            cardFill,
+            cardStroke,
+            cardStrokeThickness);
 
         // ── Footer ──────────────────────────────────────────────────────
-        var footer = HStack(8,
-                TextBlock("Unsaved changes")
-                    .FontSize(12)
-                    .Foreground(subtleBrush)
-                    .IsVisible(dirty)
-                    .VerticalAlignment(VerticalAlignment.Center),
-                Button("Revert", RevertDraft)
-                    .IsEnabled(dirty),
-                Button("Save", SaveDraft)
-                    .IsEnabled(dirty)
-                    .ApplyStyle("AccentButtonStyle"))
-            .HorizontalAlignment(HorizontalAlignment.Right)
-            .Margin(0, 12, 0, 0);
+        var footerStatusBrush = dirty && !highContrast
+            ? Theme.SystemCaution
+            : Theme.SecondaryText;
+        var footer = Border(
+                Grid(
+                    [GridSize.Star(), GridSize.Auto, GridSize.Auto],
+                    [GridSize.Auto],
+                    [
+                        Caption(dirty ? "Unsaved changes" : "All changes saved")
+                            .Foreground(footerStatusBrush)
+                            .VAlign(VerticalAlignment.Center)
+                            .Grid(row: 0, column: 0),
+                        Button("Revert", RevertDraft)
+                            .IsEnabled(dirty)
+                            .AccessKey("R")
+                            .Grid(row: 0, column: 1),
+                        Button("Save", SaveDraft)
+                            .IsEnabled(dirty)
+                            .AccessKey("S")
+                            .ApplyStyle("AccentButtonStyle")
+                            .Margin(8, 0, 0, 0)
+                            .Grid(row: 0, column: 2),
+                    ]))
+            .Padding(24, 12, 24, 12)
+            .Background(highContrast ? highContrastWindow : Theme.LayerFill)
+            .WithBorder(highContrast ? highContrastText : Theme.DividerStroke, highContrast ? 2 : 1);
 
-        return FlexColumn(
-                TextBlock("Settings")
-                    .FontSize(20)
-                    .SemiBold()
-                    .Foreground(textBrush),
+        var page = ScrollView(
+                Border(
+                    FlexColumn(
+                        Title("Settings")
+                            .HeadingLevel(AutomationHeadingLevel.Level1),
+                        Body("Configure where Pagurian stores its data and how shells appear in the taskbar tray.")
+                            .TextWrapping(TextWrapping.WrapWholeWords)
+                            .Foreground(Theme.SecondaryText)
+                            .Margin(0, 8, 0, 0),
+                        configCard.Margin(0, 24, 0, 0),
+                        trayCard.Margin(0, 16, 0, 0),
+                        modulesCard.Margin(0, 16, 0, 0)))
+                .Padding(24))
+            .HorizontalContentAlignment(HorizontalAlignment.Stretch)
+            .Landmark(AutomationLandmarkType.Main);
 
-                TextBlock("Configuration folder")
-                    .FontSize(13)
-                    .SemiBold()
-                    .Foreground(textBrush)
-                    .Margin(0, 14, 0, 0),
-                configRow.Margin(0, 6, 0, 0),
-                TextBlock($"Active config file: {Path.Combine(appliedDir, "config.json")}")
-                    .FontSize(11)
-                    .Foreground(subtleBrush)
-                    .TextWrapping(TextWrapping.Wrap)
-                    .Margin(0, 4, 0, 0),
-
-                TextBlock("Tray")
-                    .FontSize(13)
-                    .SemiBold()
-                    .Foreground(textBrush)
-                    .Margin(0, 16, 0, 0),
-                TextBlock("Drag shells onto the strip to add them · drag sideways to reorder · drag back into the module pool to remove. Save applies the changes to the real tray.")
-                    .FontSize(11)
-                    .Foreground(subtleBrush)
-                    .TextWrapping(TextWrapping.Wrap)
-                    .Margin(0, 2, 0, 0),
-                strip,
-
-                TextBlock(bottomTitle)
-                    .FontSize(13)
-                    .SemiBold()
-                    .Foreground(textBrush)
-                    .Margin(0, 16, 0, 0),
-                bottomContent,
-
-                footer)
-            .Padding(16);
+        return Grid(
+                [GridSize.Star()],
+                [GridSize.Auto, GridSize.Star(), GridSize.Auto],
+                [
+                    TitleBar("Pagurian")
+                        .Grid(row: 0, column: 0),
+                    page.Grid(row: 1, column: 0),
+                    footer.Grid(row: 2, column: 0),
+                ])
+            .Backdrop(BackdropKind.MicaAlt);
     }
+
+    private static BorderElement SettingsCard(
+        Element content,
+        ThemeRef background,
+        ThemeRef stroke,
+        double strokeThickness) =>
+        Border(content)
+            .Padding(16)
+            .CornerRadius(8)
+            .Background(background)
+            .WithBorder(stroke, strokeThickness);
 
     // One chip on the tray mock: the kind's preview icon (Pagurian icon as
     // fallback), draggable for reorder/removal. Entries whose module is not
@@ -510,83 +592,110 @@ class SettingsView : Component
     // being dragged it stays mounted but dimmed (see the strip comment).
     private static Element TrayChip(
         TrayConfig.Entry entry,
-        Brush chipBrush,
-        Brush missingBrush,
-        Brush selectionFill,
-        Brush selectionStroke,
         bool selected,
         Action onSelected,
+        Action onRemove,
         Action onDragEnd,
+        int position,
+        int setSize,
+        bool highContrast,
+        bool reduceMotion,
         bool dimmed = false)
     {
-        var known = ModuleLoader.TryGetKind(entry.ShellType, out var kind);
+        var known = ModuleLoader.TryGetKind(entry.ShellType, out _);
         var name = NameFor(entry.ShellType);
         var tip = known
             ? $"{name}  ·  #{entry.Id}"
             : $"{name}  ·  #{entry.Id} (module not loaded)";
-        return WithInstantTooltip(
-            (Border(Image(IconFor(entry.ShellType))
-                        .Width(22)
-                        .Height(22)
-                        .AccessibilityHidden())
-                    with { CornerRadius = 6 })
-                .Width(ChipSize)
-                .Height(ChipSize)
-                .Padding(9)
-                .Opacity(dimmed ? 0.3 : 1)
-                .Background(known
-                    ? selected ? selectionFill : chipBrush
-                    : missingBrush)
-                .BorderBrush(selectionStroke)
-                .BorderThickness(selected ? 2 : 0)
-                .HelpText(tip)
-                .AutomationName($"Configure {name}, shell {entry.Id}")
-                .IsTabStop(true)
-                .OnTapped((_, args) =>
+        var windowFill = Theme.Ref("SystemColorWindowColorBrush");
+        var windowText = Theme.Ref("SystemColorWindowTextColorBrush");
+        var highlight = Theme.Ref("SystemColorHighlightColorBrush");
+        var fill = highContrast
+            ? windowFill
+            : !known
+                ? Theme.SystemCriticalBackground
+                : selected ? Theme.SubtleFill : Theme.ControlFill;
+        var stroke = highContrast
+            ? selected || !known ? highlight : windowText
+            : !known
+                ? Theme.SystemCritical
+                : selected ? Theme.Accent : Theme.ControlStroke;
+        var strokeThickness = highContrast || selected || !known ? 2 : 1;
+
+        var chipPanelBase = Grid(
+                [GridSize.Star()],
+                [GridSize.Star()],
+                [
+                    Image(IconFor(entry.ShellType))
+                        .Width(24)
+                        .Height(24)
+                        .AccessibilityHidden()
+                        .HAlign(HorizontalAlignment.Center)
+                        .VAlign(VerticalAlignment.Center),
+                ])
+            .Background(fill);
+        Element chipPanel = !reduceMotion && !highContrast
+            ? chipPanelBase.BackgroundTransition()
+            : chipPanelBase;
+        var chipBase = (Border(chipPanel) with { CornerRadius = 4 })
+            .Width(ChipSize)
+            .Height(ChipSize)
+            .WithBorder(stroke, strokeThickness)
+            .HelpText($"{tip}. Press Delete to remove.")
+            .AutomationName($"Configure {name}, shell {entry.Id}")
+            .PositionInSet(position, setSize)
+            .IsTabStop(true)
+            .OnTapped((_, args) =>
+            {
+                args.Handled = true;
+                onSelected();
+            })
+            .OnKeyDown((_, args) =>
+            {
+                if (args.Key is VirtualKey.Enter or VirtualKey.Space)
                 {
-                    args.Handled = true;
                     onSelected();
-                })
-                .OnKeyDown((_, args) =>
+                    args.Handled = true;
+                }
+                else if (args.Key is VirtualKey.Delete or VirtualKey.Back)
                 {
-                    if (args.Key is VirtualKey.Enter or VirtualKey.Space)
-                    {
-                        onSelected();
-                        args.Handled = true;
-                    }
-                })
-                .OnDragStart(() => ShellDragPayload.ForInstance(entry.Id), DragOperations.Move, _ => onDragEnd())
-                .WithKey(entry.Id),
-            tip);
+                    onRemove();
+                    args.Handled = true;
+                }
+            })
+            .OnDragStart(
+                () => ShellDragPayload.ForInstance(entry.Id),
+                DragOperations.Move,
+                _ => onDragEnd());
+
+        Element chip = chipBase;
+        if (dimmed && !highContrast)
+            chip = chip.Opacity(0.32);
+
+        return WithInstantTooltip(chip.WithKey(entry.Id), tip);
     }
 
     private static Element ShellConfigurationPanel(
         TrayConfig.Entry entry,
-        Brush textBrush,
-        Brush subtleBrush,
-        Brush backgroundBrush,
-        Brush outlineBrush,
+        IThemeService settingsTheme,
+        bool highContrast,
         Action<JsonElement?> setSettings)
     {
         Element content;
         if (!ModuleLoader.TryGetKind(entry.ShellType, out var kind))
         {
             content = FlexColumn(
-                TextBlock("Configuration unavailable")
-                    .FontSize(13)
-                    .SemiBold()
-                    .Foreground(textBrush),
-                TextBlock("The module that owns this shell is not loaded. Its existing settings will be preserved.")
-                    .FontSize(12)
-                    .Foreground(subtleBrush)
-                    .TextWrapping(TextWrapping.Wrap)
-                    .Margin(0, 6, 0, 0));
+                BodyStrong("Configuration unavailable")
+                    .Foreground(highContrast ? Theme.PrimaryText : Theme.SystemCritical),
+                Body("The module that owns this shell is not loaded. Its existing settings will be preserved.")
+                    .TextWrapping(TextWrapping.WrapWholeWords)
+                    .Foreground(Theme.SecondaryText)
+                    .Margin(0, 8, 0, 0));
         }
         else if (kind.ConfigurationView == null)
         {
-            content = TextBlock("No configurable settings.")
-                .FontSize(12)
-                .Foreground(subtleBrush);
+            content = Body("No configurable settings.")
+                .Foreground(Theme.SecondaryText);
         }
         else
         {
@@ -594,77 +703,109 @@ class SettingsView : Component
                 entry.Id,
                 entry.Settings,
                 setSettings,
-                ThemeService.Instance,
+                settingsTheme,
                 Logger.For($"{entry.ShellType}#{entry.Id}"));
             content = new ComponentElement(kind.ConfigurationView, props)
                 .WithKey($"configuration:{entry.ShellType}:{entry.Id}");
         }
 
-        return (Border(ScrollViewer(content)) with { CornerRadius = 10 })
-            .Padding(12)
-            .Background(backgroundBrush)
-            .BorderBrush(outlineBrush)
-            .BorderThickness(1)
-            .Flex(1)
-            .Margin(0, 6, 0, 0);
+        return Border(content)
+            .Padding(16)
+            .CornerRadius(8)
+            .Background(highContrast
+                ? Theme.Ref("SystemColorWindowColorBrush")
+                : Theme.LayerFill)
+            .WithBorder(
+                highContrast
+                    ? Theme.Ref("SystemColorWindowTextColorBrush")
+                    : Theme.SurfaceStroke,
+                highContrast ? 2 : 1);
     }
 
-    // One pool card: module display name plus one draggable icon per shell
-    // kind the module offers.
+    // One module card with a visible, clickable and draggable tile per shell
+    // kind. Click/keyboard appends; drag supports exact insertion.
     private static Element ModuleCard(
         PagurianModule module,
         List<ShellAttribute> kinds,
-        Brush textBrush,
-        Brush chipBrush,
-        Brush cardBrush,
-        Brush outlineBrush,
-        Action onDragEnd)
+        Action<string> onAddKind,
+        Action onDragEnd,
+        bool highContrast)
     {
-        var icons = kinds
-            .Select(k =>
+        var tiles = kinds
+            .Select((k, index) =>
             {
-                var tip = k.DisplayName.Length > 0 ? k.DisplayName : ShortName(k.ShellType.FullName!);
-                return (Element)WithInstantTooltip(
-                    (Border(Image(k.PreviewIconPath ?? AppAssets.IconPath)
-                            .Width(20)
-                            .Height(20)
-                            .AccessibilityHidden())
-                        with { CornerRadius = 6 })
-                    .Width(36)
-                    .Height(36)
-                    .Padding(8)
-                    .Background(chipBrush)
-                    .HelpText(tip)
-                    .OnDragStart(() => ShellDragPayload.ForKind(k.ShellType.FullName!), DragOperations.Copy, _ => onDragEnd())
-                    .WithKey(module.Id + ":" + k.ShellType.FullName),
-                    tip);
+                var kindId = k.ShellType.FullName!;
+                var name = k.DisplayName.Length > 0 ? k.DisplayName : ShortName(kindId);
+                return (Element)Button(
+                        Grid(
+                            [GridSize.Auto, GridSize.Star()],
+                            [GridSize.Auto],
+                            [
+                                Image(k.PreviewIconPath ?? AppAssets.IconPath)
+                                    .Width(24)
+                                    .Height(24)
+                                    .AccessibilityHidden()
+                                    .VAlign(VerticalAlignment.Center)
+                                    .Grid(row: 0, column: 0),
+                                FlexColumn(
+                                        BodyStrong(name)
+                                            .TextWrapping(TextWrapping.WrapWholeWords),
+                                        Caption("Drag or click to add")
+                                            .Foreground(Theme.SecondaryText)
+                                            .Margin(0, 4, 0, 0))
+                                    .Margin(12, 0, 0, 0)
+                                    .Grid(row: 0, column: 1),
+                            ]),
+                        () => onAddKind(kindId))
+                    .MinWidth(224)
+                    .Padding(12)
+                    .HorizontalContentAlignment(HorizontalAlignment.Stretch)
+                    .AutomationName($"Add {name} to tray")
+                    .PositionInSet(index + 1, kinds.Count)
+                    .OnDragStart(
+                        () => ShellDragPayload.ForKind(kindId),
+                        DragOperations.Copy,
+                        _ => onDragEnd())
+                    .WithKey(module.Id + ":" + kindId);
             })
             .ToArray();
 
-        return (Border(FlexColumn(
-                    TextBlock(module.DisplayName.Length > 0 ? module.DisplayName : ShortName(module.Id))
-                        .FontSize(12)
-                        .SemiBold()
-                        .Foreground(textBrush),
-                    HStack(6, icons).Margin(0, 6, 0, 0)))
-                with { CornerRadius = 10 })
-            .Padding(10)
-            .Background(cardBrush)
-            .BorderBrush(outlineBrush)
-            .BorderThickness(1)
+        return Border(
+                FlexColumn(
+                    BodyStrong(module.DisplayName.Length > 0
+                        ? module.DisplayName
+                        : ShortName(module.Id)),
+                    VStack(8, tiles)
+                        .Margin(0, 12, 0, 0)))
+            .MinWidth(256)
+            .Padding(16)
+            .CornerRadius(8)
+            .Background(highContrast
+                ? Theme.Ref("SystemColorWindowColorBrush")
+                : Theme.SubtleFill)
+            .WithBorder(
+                highContrast
+                    ? Theme.Ref("SystemColorWindowTextColorBrush")
+                    : Theme.CardStroke,
+                highContrast ? 2 : 1)
             .WithKey(module.Id);
     }
 
     private static List<TrayConfig.Entry> LoadDraft() => TrayConfig.Load().ToList();
 
     // Ghost insertion slot shown in the strip while a drag hovers over it.
-    private static Element GhostSlot(Brush fill, Brush stroke) =>
-        (Border(null!) with { CornerRadius = 6 })
+    private static Element GhostSlot(bool highContrast) =>
+        (Border(null!) with { CornerRadius = 4 })
             .Width(ChipSize)
             .Height(ChipSize)
-            .Background(fill)
-            .BorderBrush(stroke)
-            .BorderThickness(2)
+            .Background(highContrast
+                ? Theme.Ref("SystemColorWindowColorBrush")
+                : Theme.SystemAttentionBackground)
+            .WithBorder(
+                highContrast
+                    ? Theme.Ref("SystemColorHighlightColorBrush")
+                    : Theme.Accent,
+                2)
             .WithKey("ghost");
 
     // The settings window is a normal activated window, so XAML tooltips

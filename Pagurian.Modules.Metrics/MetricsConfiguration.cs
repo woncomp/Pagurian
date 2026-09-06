@@ -1,6 +1,7 @@
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
 using Pagurian.Sdk;
+using ReactorTheme = Microsoft.UI.Reactor.Core.Theme;
 using static Microsoft.UI.Reactor.Factories;
 
 namespace Pagurian.Modules.Metrics;
@@ -13,9 +14,9 @@ abstract class MetricsConfiguration : ShellConfiguration
     {
         var count = MetricsSettings.TopProcesses(Settings);
         return FlexColumn(
-            TextBlock($"Choose how many processes the {MetricName} billboard displays.")
-                .FontSize(12)
-                .Foreground(Theme.TextBrush),
+            Body($"Choose how many processes the {MetricName} billboard displays.")
+                .TextWrapping(Microsoft.UI.Xaml.TextWrapping.WrapWholeWords)
+                .Foreground(ReactorTheme.SecondaryText),
             NumberBox(
                     count,
                     value =>
@@ -31,7 +32,7 @@ abstract class MetricsConfiguration : ShellConfiguration
                     MetricsSettings.MinTopProcesses,
                     MetricsSettings.MaxTopProcesses)
                 .SpinButtons()
-                .Width(220)
+                .MinWidth(220)
                 .HorizontalAlignment(Microsoft.UI.Xaml.HorizontalAlignment.Left)
                 .Margin(0, 8, 0, 0));
     }

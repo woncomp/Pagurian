@@ -27,5 +27,6 @@ public sealed record ShellConfigurationProps(
     string InstanceId,
     JsonElement? Settings,
     Action<JsonElement?> SetSettings,
+    // The effective theme of the Settings surface hosting this component.
     IThemeService Theme,
     Logger Log);

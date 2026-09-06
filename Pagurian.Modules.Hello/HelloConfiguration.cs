@@ -12,15 +12,12 @@ class HelloConfiguration : ShellConfiguration
     {
         var message = HelloSettings.Message(Settings);
         return FlexColumn(
-            TextBlock("Message-box text")
-                .FontSize(12)
-                .SemiBold()
-                .Foreground(Theme.TextBrush),
+            BodyStrong("Message-box text"),
             TextBox(message, value => SetSettings(HelloSettings.Write(value)))
                 .AutomationName("Message-box text")
                 .AcceptsReturn()
                 .TextWrapping(TextWrapping.Wrap)
-                .Height(96)
-                .Margin(0, 6, 0, 0));
+                .MinHeight(96)
+                .Margin(0, 8, 0, 0));
     }
 }
