@@ -1,8 +1,12 @@
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Documents;
 using Pagurian.Sdk;
 using static Microsoft.UI.Reactor.Factories;
+using ReactorTheme = Microsoft.UI.Reactor.Core.Theme;
 
 namespace Pagurian.Modules.Metrics;
 
@@ -11,11 +15,27 @@ namespace Pagurian.Modules.Metrics;
 // sampler to its fast (1s) cadence.
 class MemBillboard : Billboard
 {
-    private const double ProcessListHeightDip = 140;
+    private const double BaseHeightDip = 132;
+    private const double ProcessRowHeightDip = 32;
+    private const double MinHeightDip = 164;
+    private const double MaxHeightDip = 560;
 
-    public override double WidthDip => 360;
+    public override double WidthDip => 420;
 
-    public override double HeightDip => 300;
+    public override double HeightDip
+    {
+        get
+        {
+            var processCount = Math.Min(
+                MetricsSettings.TopProcesses(Shell.Settings),
+                SystemMetricsTracker.Memory?.TopProcesses.Count ?? 0);
+
+            return Math.Clamp(
+                BaseHeightDip + ProcessRowHeightDip * processCount,
+                MinHeightDip,
+                MaxHeightDip);
+        }
+    }
 
     public override string Title => "Memory";
 
@@ -27,6 +47,7 @@ class MemBillboard : Billboard
     {
         var (_, setVersion) = UseState(0);
         var tick = UseRef(0);
+        var colorScheme = UseColorScheme();
 
         UseEffect(() =>
         {
@@ -40,63 +61,156 @@ class MemBillboard : Billboard
             };
         }, Array.Empty<object>());
 
-        var mem = SystemMetricsTracker.Memory;
-        if (mem == null)
-            return TextBlock("Data unavailable")
-                .Padding(14);
+        var highContrast = colorScheme == ColorScheme.HighContrast;
+        var requestedTheme = highContrast
+            ? ElementTheme.Default
+            : Theme.IsDark ? ElementTheme.Dark : ElementTheme.Light;
+        var memory = SystemMetricsTracker.Memory;
 
-        double usedGb = mem.UsedBytes / (1024.0 * 1024.0 * 1024.0);
-        double totalGb = mem.TotalBytes / (1024.0 * 1024.0 * 1024.0);
-        var summary = $"Used {usedGb:F1} GB / {totalGb:F1} GB ({mem.UsedPercent:F0}%)";
-
-        var topRows = new List<Element>();
-        foreach (var p in mem.TopProcesses.Take(
-                     MetricsSettings.TopProcesses(Shell.Settings)))
+        Element scrollContent;
+        if (memory == null)
         {
-            double wsMb = p.WorkingSetBytes / (1024.0 * 1024.0);
-            topRows.Add(Grid(
-                [GridSize.Star(), GridSize.Auto, GridSize.Px(80), GridSize.Px(56)],
-                [GridSize.Auto],
-                [
-                    TextBlock(p.Name)
-                        .FontSize(12)
-                        .MaxLines(1)
-                        .TextTrimming(TextTrimming.CharacterEllipsis)
-                        .VerticalAlignment(VerticalAlignment.Center)
-                        .Grid(row: 0, column: 0),
-                    TextBlock(p.ProcessId.ToString())
-                        .FontSize(12)
-                        .VerticalAlignment(VerticalAlignment.Center)
-                        .Grid(row: 0, column: 1),
-                    TextBlock($"{wsMb:F0} MB")
-                        .FontSize(12)
-                        .TextAlignment(TextAlignment.Right)
-                        .VerticalAlignment(VerticalAlignment.Center)
-                        .Grid(row: 0, column: 2),
-                    TextBlock($"{p.SystemPercent:F1}%")
-                        .FontSize(12)
-                        .TextAlignment(TextAlignment.Right)
-                        .VerticalAlignment(VerticalAlignment.Center)
-                        .Grid(row: 0, column: 3),
-                ]));
+            scrollContent = MaterialCard(
+                Body("Data unavailable")
+                    .Foreground(ReactorTheme.SecondaryText),
+                highContrast);
         }
-        if (topRows.Count == 0)
-            topRows.Add(TextBlock("No process data available.").FontSize(12).FontStyle(Windows.UI.Text.FontStyle.Italic));
+        else
+        {
+            var usedGb = memory.UsedBytes / (1024.0 * 1024.0 * 1024.0);
+            var totalGb = memory.TotalBytes / (1024.0 * 1024.0 * 1024.0);
+            var visibleProcesses = memory.TopProcesses
+                .Take(MetricsSettings.TopProcesses(Shell.Settings))
+                .ToList();
+            var processRows = visibleProcesses
+                .Select((process, index) =>
+                    ProcessRow(process, index, visibleProcesses.Count))
+                .ToArray();
 
-        return FlexColumn(
-                TextBlock("Memory")
-                    .FontSize(14)
-                    .SemiBold(),
-                TextBlock(summary)
-                    .FontSize(12)
-                    .Margin(0, 4, 0, 0),
-                TextBlock("Top processes by working set")
-                    .FontSize(12)
-                    .SemiBold()
-                    .Margin(0, 10, 0, 4),
-                ScrollViewer(
-                    VStack(2, topRows.ToArray()))
-                    .Height(ProcessListHeightDip))
-            .Padding(14);
+            Element processList = processRows.Length > 0
+                ? VStack(8, processRows)
+                : Caption("No process data available.")
+                    .Foreground(ReactorTheme.SecondaryText);
+
+            var summaryCard = MaterialCard(
+                VStack(8,
+                    Grid(
+                        [GridSize.Star(), GridSize.Auto],
+                        [GridSize.Auto],
+                        [
+                            BodyStrong("Memory Used")
+                                .HeadingLevel(AutomationHeadingLevel.Level1)
+                                .Grid(row: 0, column: 0),
+                            Caption($"{usedGb:F1} GB / {totalGb:F1} GB")
+                                .Foreground(ReactorTheme.SecondaryText)
+                                .VAlign(VerticalAlignment.Center)
+                                .Set(text => Typography.SetNumeralAlignment(
+                                    text,
+                                    FontNumeralAlignment.Tabular))
+                                .Grid(row: 0, column: 1),
+                        ]),
+                    Progress(memory.UsedPercent)
+                        .Height(4)),
+                highContrast);
+
+            var processesCard = MaterialCard(
+                VStack(8,
+                    BodyStrong("Top processes by working set")
+                        .HeadingLevel(AutomationHeadingLevel.Level1),
+                    processList),
+                highContrast);
+
+            scrollContent = VStack(8,
+                summaryCard,
+                processesCard);
+        }
+
+        var content = (ScrollViewer(scrollContent) with
+            {
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                VerticalScrollMode = ScrollMode.Enabled,
+                HorizontalScrollMode = ScrollMode.Disabled,
+            })
+            .HorizontalContentAlignment(HorizontalAlignment.Stretch);
+
+        return Page(content, highContrast)
+            .RequestedTheme(requestedTheme);
     }
+
+    private static Element ProcessRow(
+        MemoryProcessUsage process,
+        int index,
+        int count)
+    {
+        var workingSetMb = process.WorkingSetBytes / (1024.0 * 1024.0);
+
+        return Border(
+                (Grid(
+                    [GridSize.Star(), GridSize.Px(48), GridSize.Px(72), GridSize.Px(48)],
+                    [GridSize.Auto],
+                    [
+                        Caption(process.Name)
+                            .MaxLines(1)
+                            .TextTrimming(TextTrimming.CharacterEllipsis)
+                            .ToolTip(process.Name)
+                            .VAlign(VerticalAlignment.Center)
+                            .Grid(row: 0, column: 0),
+                        Caption(process.ProcessId.ToString())
+                            .Foreground(ReactorTheme.SecondaryText)
+                            .VAlign(VerticalAlignment.Center)
+                            .Set(text => Typography.SetNumeralAlignment(
+                                text,
+                                FontNumeralAlignment.Tabular))
+                            .Grid(row: 0, column: 1),
+                        Caption($"{workingSetMb:F0} MB")
+                            .TextAlignment(TextAlignment.Right)
+                            .VAlign(VerticalAlignment.Center)
+                            .Set(text => Typography.SetNumeralAlignment(
+                                text,
+                                FontNumeralAlignment.Tabular))
+                            .Grid(row: 0, column: 2),
+                        Caption($"{process.SystemPercent:F1}%")
+                            .TextAlignment(TextAlignment.Right)
+                            .VAlign(VerticalAlignment.Center)
+                            .Set(text => Typography.SetNumeralAlignment(
+                                text,
+                                FontNumeralAlignment.Tabular))
+                            .Grid(row: 0, column: 3),
+                    ]) with
+                {
+                    ColumnSpacing = 8,
+                }))
+            .Padding(0, 4)
+            .PositionInSet(index + 1, count)
+            .WithKey($"process:{process.ProcessId}:{process.Name}");
+    }
+
+    private static BorderElement Page(Element content, bool highContrast)
+    {
+        var page = Border(content)
+            .Padding(8)
+            .CornerRadius(8);
+
+        return highContrast
+            ? page
+                .Background(ReactorTheme.Ref("SystemColorWindowColorBrush"))
+                .WithBorder(ReactorTheme.Ref("SystemColorWindowTextColorBrush"), 2)
+                .Set(border => border.BackgroundSizing = BackgroundSizing.InnerBorderEdge)
+            : page;
+    }
+
+    private static BorderElement MaterialCard(Element content, bool highContrast) =>
+        Border(content)
+            .Padding(12)
+            .CornerRadius(8)
+            .Background(highContrast
+                ? ReactorTheme.Ref("SystemColorWindowColorBrush")
+                : ReactorTheme.Ref("LayerOnAcrylicFillColorDefaultBrush"))
+            .WithBorder(
+                highContrast
+                    ? ReactorTheme.Ref("SystemColorWindowTextColorBrush")
+                    : ReactorTheme.SurfaceStroke,
+                highContrast ? 2 : 1)
+            .Set(border => border.BackgroundSizing = BackgroundSizing.InnerBorderEdge);
 }

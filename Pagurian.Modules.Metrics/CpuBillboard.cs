@@ -1,9 +1,12 @@
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Documents;
 using Pagurian.Sdk;
 using static Microsoft.UI.Reactor.Factories;
+using ReactorTheme = Microsoft.UI.Reactor.Core.Theme;
 
 namespace Pagurian.Modules.Metrics;
 
@@ -12,11 +15,9 @@ namespace Pagurian.Modules.Metrics;
 // while open. Opening it switches the sampler to its fast (1s) cadence.
 class CpuBillboard : Billboard
 {
-    private const double ProcessorListHeightDip = 160;
+    public override double WidthDip => 400;
 
-    public override double WidthDip => 360;
-
-    public override double HeightDip => 320;
+    public override double HeightDip => 440;
 
     public override string Title => "CPU";
 
@@ -28,6 +29,7 @@ class CpuBillboard : Billboard
     {
         var (_, setVersion) = UseState(0);
         var tick = UseRef(0);
+        var colorScheme = UseColorScheme();
 
         UseEffect(() =>
         {
@@ -41,90 +43,193 @@ class CpuBillboard : Billboard
             };
         }, Array.Empty<object>());
 
+        var highContrast = colorScheme == ColorScheme.HighContrast;
+        var requestedTheme = highContrast
+            ? ElementTheme.Default
+            : Theme.IsDark ? ElementTheme.Dark : ElementTheme.Light;
         var cpu = SystemMetricsTracker.Cpu;
+
+        Element scrollContent;
         if (cpu == null)
-            return TextBlock("Data unavailable")
-                .Padding(14);
-
-        var isDark = Theme.IsDark;
-        var accentBrush = new SolidColorBrush(SystemMetricsColors.CpuAccent(isDark));
-        var trackBrush = new SolidColorBrush(SystemMetricsColors.GaugeTrack(isDark));
-
-        var processorRows = new List<Element>();
-        for (int i = 0; i < cpu.PerLogicalProcessorPercent.Count; i++)
         {
-            var pct = cpu.PerLogicalProcessorPercent[i];
-            processorRows.Add(Grid(
-                [GridSize.Px(52), GridSize.Star(), GridSize.Px(44)],
-                [GridSize.Auto],
-                [
-                    TextBlock($"CPU {i}")
-                        .FontSize(12)
-                        .VerticalAlignment(VerticalAlignment.Center)
-                        .Grid(row: 0, column: 0),
-                    Progress(pct)
-                        .Height(4)
-                        .Margin(0, 0, 8, 0)
-                        .VerticalAlignment(VerticalAlignment.Center)
-                        .Set(pb =>
-                        {
-                            pb.Foreground = accentBrush;
-                            pb.Background = trackBrush;
-                        })
-                        .Grid(row: 0, column: 1),
-                    TextBlock($"{pct:F0}%")
-                        .FontSize(12)
-                        .TextAlignment(TextAlignment.Right)
-                        .VerticalAlignment(VerticalAlignment.Center)
-                        .Grid(row: 0, column: 2),
-                ]));
+            scrollContent = MaterialCard(
+                Body("Data unavailable")
+                    .Foreground(ReactorTheme.SecondaryText),
+                highContrast);
+        }
+        else
+        {
+            var processorRows = cpu.PerLogicalProcessorPercent
+                .Select((percent, index) =>
+                    ProcessorRow(
+                        index,
+                        percent,
+                        cpu.PerLogicalProcessorPercent.Count))
+                .ToArray();
+
+            var visibleProcesses = cpu.TopProcesses
+                .Take(MetricsSettings.TopProcesses(Shell.Settings))
+                .ToList();
+            var processRows = visibleProcesses
+                .Select((process, index) =>
+                    ProcessRow(process, index, visibleProcesses.Count))
+                .ToArray();
+
+            Element processList = processRows.Length > 0
+                ? VStack(8, processRows)
+                : Caption("No process data available.")
+                    .Foreground(ReactorTheme.SecondaryText);
+
+            var summaryCard = MaterialCard(
+                VStack(8,
+                    Grid(
+                        [GridSize.Star(), GridSize.Auto],
+                        [GridSize.Auto],
+                        [
+                            VStack(4,
+                                    Caption("Overall CPU")
+                                        .Foreground(ReactorTheme.SecondaryText),
+                                    TextBlock($"{cpu.TotalPercent:F1}%")
+                                        .ApplyStyle("TitleTextBlockStyle")
+                                        .Set(text => Typography.SetNumeralAlignment(
+                                            text,
+                                            FontNumeralAlignment.Tabular)))
+                                .Grid(row: 0, column: 0),
+                            Caption($"{cpu.PerLogicalProcessorPercent.Count} logical processors")
+                                .Foreground(ReactorTheme.SecondaryText)
+                                .VAlign(VerticalAlignment.Bottom)
+                                .Grid(row: 0, column: 1),
+                        ]),
+                    Progress(cpu.TotalPercent)
+                        .Height(4)),
+                highContrast);
+
+            var processorsCard = MaterialCard(
+                VStack(8,
+                    BodyStrong("Logical processors")
+                        .HeadingLevel(AutomationHeadingLevel.Level2),
+                    VStack(8, processorRows)),
+                highContrast);
+
+            var processesCard = MaterialCard(
+                VStack(8,
+                    BodyStrong("Top processes")
+                        .HeadingLevel(AutomationHeadingLevel.Level2),
+                    processList),
+                highContrast);
+
+            scrollContent = VStack(8,
+                summaryCard,
+                processorsCard,
+                processesCard);
         }
 
-        var topRows = new List<Element>();
-        foreach (var p in cpu.TopProcesses.Take(
-                     MetricsSettings.TopProcesses(Shell.Settings)))
-        {
-            topRows.Add(Grid(
-                [GridSize.Star(), GridSize.Auto, GridSize.Px(64)],
-                [GridSize.Auto],
-                [
-                    TextBlock(p.Name)
-                        .FontSize(12)
-                        .MaxLines(1)
-                        .TextTrimming(TextTrimming.CharacterEllipsis)
-                        .VerticalAlignment(VerticalAlignment.Center)
-                        .Grid(row: 0, column: 0),
-                    TextBlock(p.ProcessId.ToString())
-                        .FontSize(12)
-                        .VerticalAlignment(VerticalAlignment.Center)
-                        .Grid(row: 0, column: 1),
-                    TextBlock($"{p.Percent:F1}%")
-                        .FontSize(12)
-                        .TextAlignment(TextAlignment.Right)
-                        .VerticalAlignment(VerticalAlignment.Center)
-                        .Grid(row: 0, column: 2),
-                ]));
-        }
-        if (topRows.Count == 0)
-            topRows.Add(TextBlock("No process data available.").FontSize(12).FontStyle(Windows.UI.Text.FontStyle.Italic));
+        var content = FlexColumn(
+            VStack(4,
+                Subtitle("CPU")
+                    .HeadingLevel(AutomationHeadingLevel.Level1),
+                Caption("Live system load")
+                    .Foreground(ReactorTheme.SecondaryText)),
+            (ScrollViewer(scrollContent) with
+            {
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                VerticalScrollMode = ScrollMode.Enabled,
+                HorizontalScrollMode = ScrollMode.Disabled,
+            })
+                .Margin(0, 8, 0, 0)
+                .HorizontalContentAlignment(HorizontalAlignment.Stretch)
+                .Flex(1));
 
-        return FlexColumn(
-                TextBlock($"Overall CPU: {cpu.TotalPercent:F1}%")
-                    .FontSize(14)
-                    .SemiBold(),
-                TextBlock("Logical processors")
-                    .FontSize(12)
-                    .SemiBold()
-                    .Margin(0, 10, 0, 4),
-                ScrollViewer(
-                    VStack(2, processorRows.ToArray()))
-                    .Height(ProcessorListHeightDip),
-                TextBlock("Top processes")
-                    .FontSize(12)
-                    .SemiBold()
-                    .Margin(0, 10, 0, 4),
-                ScrollViewer(VStack(2, topRows.ToArray()))
-                    .Flex(1))
-            .Padding(14);
+        return Page(content, highContrast)
+            .RequestedTheme(requestedTheme);
     }
+
+    private static Element ProcessorRow(int index, double percent, int count) =>
+        Border(
+                Grid(
+                    [GridSize.Px(56), GridSize.Star(), GridSize.Px(48)],
+                    [GridSize.Auto],
+                    [
+                        Caption($"CPU {index}")
+                            .VAlign(VerticalAlignment.Center)
+                            .Grid(row: 0, column: 0),
+                        Progress(percent)
+                            .Height(4)
+                            .Margin(0, 0, 8, 0)
+                            .VAlign(VerticalAlignment.Center)
+                            .Grid(row: 0, column: 1),
+                        Caption($"{percent:F0}%")
+                            .TextAlignment(TextAlignment.Right)
+                            .VAlign(VerticalAlignment.Center)
+                            .Set(text => Typography.SetNumeralAlignment(
+                                text,
+                                FontNumeralAlignment.Tabular))
+                            .Grid(row: 0, column: 2),
+                    ]))
+            .Padding(0, 4)
+            .PositionInSet(index + 1, count)
+            .WithKey($"processor:{index}");
+
+    private static Element ProcessRow(
+        CpuProcessUsage process,
+        int index,
+        int count) =>
+        Border(
+                Grid(
+                    [GridSize.Star(), GridSize.Px(56), GridSize.Px(72)],
+                    [GridSize.Auto],
+                    [
+                        Caption(process.Name)
+                            .MaxLines(1)
+                            .TextTrimming(TextTrimming.CharacterEllipsis)
+                            .ToolTip(process.Name)
+                            .VAlign(VerticalAlignment.Center)
+                            .Grid(row: 0, column: 0),
+                        Caption(process.ProcessId.ToString())
+                            .Foreground(ReactorTheme.SecondaryText)
+                            .VAlign(VerticalAlignment.Center)
+                            .Set(text => Typography.SetNumeralAlignment(
+                                text,
+                                FontNumeralAlignment.Tabular))
+                            .Grid(row: 0, column: 1),
+                        Caption($"{process.Percent:F1}%")
+                            .TextAlignment(TextAlignment.Right)
+                            .VAlign(VerticalAlignment.Center)
+                            .Set(text => Typography.SetNumeralAlignment(
+                                text,
+                                FontNumeralAlignment.Tabular))
+                            .Grid(row: 0, column: 2),
+                    ]))
+            .Padding(0, 4)
+            .PositionInSet(index + 1, count)
+            .WithKey($"process:{process.ProcessId}:{process.Name}");
+
+    private static BorderElement Page(Element content, bool highContrast)
+    {
+        var page = Border(content)
+            .Padding(8)
+            .CornerRadius(8);
+
+        return highContrast
+            ? page
+                .Background(ReactorTheme.Ref("SystemColorWindowColorBrush"))
+                .WithBorder(ReactorTheme.Ref("SystemColorWindowTextColorBrush"), 2)
+                .Set(border => border.BackgroundSizing = BackgroundSizing.InnerBorderEdge)
+            : page;
+    }
+
+    private static BorderElement MaterialCard(Element content, bool highContrast) =>
+        Border(content)
+            .Padding(12)
+            .CornerRadius(8)
+            .Background(highContrast
+                ? ReactorTheme.Ref("SystemColorWindowColorBrush")
+                : ReactorTheme.Ref("LayerOnAcrylicFillColorDefaultBrush"))
+            .WithBorder(
+                highContrast
+                    ? ReactorTheme.Ref("SystemColorWindowTextColorBrush")
+                    : ReactorTheme.SurfaceStroke,
+                highContrast ? 2 : 1)
+            .Set(border => border.BackgroundSizing = BackgroundSizing.InnerBorderEdge);
 }
