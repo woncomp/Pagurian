@@ -15,9 +15,35 @@ namespace Pagurian.Modules.Metrics;
 // while open. Opening it switches the sampler to its fast (1s) cadence.
 class CpuBillboard : Billboard
 {
+    private const int ProcessorColumns = 8;
+    private const double BaseHeightDip = 184;
+    private const double ProcessorGridRowHeightDip = 40;
+    private const double ProcessRowHeightDip = 32;
+    private const double MinHeightDip = 176;
+    private const double MaxHeightDip = 640;
+
     public override double WidthDip => 400;
 
-    public override double HeightDip => 440;
+    public override double HeightDip
+    {
+        get
+        {
+            var cpu = SystemMetricsTracker.Cpu;
+            var processorCount = cpu?.PerLogicalProcessorPercent.Count ?? 0;
+            var processorRowCount =
+                (processorCount + ProcessorColumns - 1) / ProcessorColumns;
+            var processCount = Math.Min(
+                MetricsSettings.TopProcesses(Shell.Settings),
+                cpu?.TopProcesses.Count ?? 0);
+
+            return Math.Clamp(
+                BaseHeightDip +
+                    ProcessorGridRowHeightDip * processorRowCount +
+                    ProcessRowHeightDip * processCount,
+                MinHeightDip,
+                MaxHeightDip);
+        }
+    }
 
     public override string Title => "CPU";
 
@@ -59,13 +85,37 @@ class CpuBillboard : Billboard
         }
         else
         {
-            var processorRows = cpu.PerLogicalProcessorPercent
+            var processorGauges = cpu.PerLogicalProcessorPercent
                 .Select((percent, index) =>
-                    ProcessorRow(
+                    ProcessorGauge(
                         index,
                         percent,
                         cpu.PerLogicalProcessorPercent.Count))
                 .ToArray();
+            var processorColumnCount = Math.Min(
+                ProcessorColumns,
+                Math.Max(1, processorGauges.Length));
+            var processorRowCount =
+                (processorGauges.Length + ProcessorColumns - 1) /
+                ProcessorColumns;
+
+            Element processorGrid = processorGauges.Length > 0
+                ? Grid(
+                    Enumerable.Repeat(
+                            GridSize.Star(),
+                            processorColumnCount)
+                        .ToArray(),
+                    Enumerable.Repeat(
+                            GridSize.Auto,
+                            processorRowCount)
+                        .ToArray(),
+                    processorGauges) with
+                    {
+                        ColumnSpacing = 8,
+                        RowSpacing = 8,
+                    }
+                : Caption("No processor data available.")
+                    .Foreground(ReactorTheme.SecondaryText);
 
             var visibleProcesses = cpu.TopProcesses
                 .Take(MetricsSettings.TopProcesses(Shell.Settings))
@@ -86,18 +136,17 @@ class CpuBillboard : Billboard
                         [GridSize.Star(), GridSize.Auto],
                         [GridSize.Auto],
                         [
-                            VStack(4,
-                                    Caption("Overall CPU")
-                                        .Foreground(ReactorTheme.SecondaryText),
-                                    TextBlock($"{cpu.TotalPercent:F1}%")
-                                        .ApplyStyle("TitleTextBlockStyle")
-                                        .Set(text => Typography.SetNumeralAlignment(
-                                            text,
-                                            FontNumeralAlignment.Tabular)))
+                            BodyStrong("Overall CPU")
+                                .HeadingLevel(AutomationHeadingLevel.Level1)
                                 .Grid(row: 0, column: 0),
-                            Caption($"{cpu.PerLogicalProcessorPercent.Count} logical processors")
+                            Caption(
+                                    $"{cpu.TotalPercent:F1}% · " +
+                                    $"{cpu.PerLogicalProcessorPercent.Count} logical processors")
                                 .Foreground(ReactorTheme.SecondaryText)
-                                .VAlign(VerticalAlignment.Bottom)
+                                .VAlign(VerticalAlignment.Center)
+                                .Set(text => Typography.SetNumeralAlignment(
+                                    text,
+                                    FontNumeralAlignment.Tabular))
                                 .Grid(row: 0, column: 1),
                         ]),
                     Progress(cpu.TotalPercent)
@@ -108,7 +157,7 @@ class CpuBillboard : Billboard
                 VStack(8,
                     BodyStrong("Logical processors")
                         .HeadingLevel(AutomationHeadingLevel.Level2),
-                    VStack(8, processorRows)),
+                    processorGrid),
                 highContrast);
 
             var processesCard = MaterialCard(
@@ -124,52 +173,36 @@ class CpuBillboard : Billboard
                 processesCard);
         }
 
-        var content = FlexColumn(
-            VStack(4,
-                Subtitle("CPU")
-                    .HeadingLevel(AutomationHeadingLevel.Level1),
-                Caption("Live system load")
-                    .Foreground(ReactorTheme.SecondaryText)),
-            (ScrollViewer(scrollContent) with
+        var content = (ScrollViewer(scrollContent) with
             {
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
                 VerticalScrollMode = ScrollMode.Enabled,
                 HorizontalScrollMode = ScrollMode.Disabled,
             })
-                .Margin(0, 8, 0, 0)
-                .HorizontalContentAlignment(HorizontalAlignment.Stretch)
-                .Flex(1));
+            .HorizontalContentAlignment(HorizontalAlignment.Stretch);
 
         return Page(content, highContrast)
             .RequestedTheme(requestedTheme);
     }
 
-    private static Element ProcessorRow(int index, double percent, int count) =>
+    private static Element ProcessorGauge(int index, double percent, int count) =>
         Border(
-                Grid(
-                    [GridSize.Px(56), GridSize.Star(), GridSize.Px(48)],
-                    [GridSize.Auto],
-                    [
-                        Caption($"CPU {index}")
-                            .VAlign(VerticalAlignment.Center)
-                            .Grid(row: 0, column: 0),
-                        Progress(percent)
-                            .Height(4)
-                            .Margin(0, 0, 8, 0)
-                            .VAlign(VerticalAlignment.Center)
-                            .Grid(row: 0, column: 1),
-                        Caption($"{percent:F0}%")
-                            .TextAlignment(TextAlignment.Right)
-                            .VAlign(VerticalAlignment.Center)
-                            .Set(text => Typography.SetNumeralAlignment(
-                                text,
-                                FontNumeralAlignment.Tabular))
-                            .Grid(row: 0, column: 2),
-                    ]))
+                VStack(4,
+                    Progress(percent)
+                        .Height(4),
+                    Caption($"{percent:F0}%")
+                        .TextAlignment(TextAlignment.Center)
+                        .Set(text => Typography.SetNumeralAlignment(
+                            text,
+                            FontNumeralAlignment.Tabular))))
             .Padding(0, 4)
+            .ToolTip($"CPU {index}")
             .PositionInSet(index + 1, count)
-            .WithKey($"processor:{index}");
+            .WithKey($"processor:{index}")
+            .Grid(
+                row: index / ProcessorColumns,
+                column: index % ProcessorColumns);
 
     private static Element ProcessRow(
         CpuProcessUsage process,
