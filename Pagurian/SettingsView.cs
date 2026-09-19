@@ -833,7 +833,6 @@ class SettingsView : Component
                 index + 1,
                 draft.Count,
                 highContrast,
-                reduceMotion,
                 targetVisualScale,
                 activeTrayDragId != entry.Id
                     ? 1
@@ -848,37 +847,41 @@ class SettingsView : Component
             : HStack(ChipGap * targetVisualScale, chips)
                 .VAlign(VerticalAlignment.Center);
 
-        Element targetContent = trayIcons;
+        var insertionIndicatorVisible = false;
+        var insertionOffset = 0d;
         if (dragSession is { Zone: ShellDropZone.Tray } trayDrag &&
             !IsOriginalTrayPosition(trayDrag, draft))
         {
+            insertionIndicatorVisible = true;
             var insertionIndex = Math.Clamp(
                 trayDrag.CandidateIndex,
                 0,
                 draft.Count - (trayDrag.Payload.InstanceId == null ? 0 : 1));
-            var insertionOffset = InsertionOffsetFor(
+            insertionOffset = InsertionOffsetFor(
                 trayDrag.Payload,
                 insertionIndex,
                 draft);
-            var indicator = (Border(null) with
-                {
-                    CornerRadius = InsertionIndicatorWidth * targetVisualScale / 2,
-                })
-                .Width(InsertionIndicatorWidth * targetVisualScale)
-                .Height(32 * targetVisualScale)
-                .Margin(insertionOffset * targetVisualScale, 0, 0, 0)
-                .HAlign(HorizontalAlignment.Left)
-                .VAlign(VerticalAlignment.Center)
-                .Background(highContrast
-                    ? Theme.Ref("SystemColorHighlightColorBrush")
-                    : Theme.Accent)
-                .AccessibilityHidden()
-                .WithKey("shell-insertion-indicator");
-            targetContent = Grid(
-                [GridSize.Star()],
-                [GridSize.Star()],
-                [trayIcons, indicator]);
         }
+        var indicator = (Border(null) with
+            {
+                CornerRadius = InsertionIndicatorWidth * targetVisualScale / 2,
+            })
+            .Width(InsertionIndicatorWidth * targetVisualScale)
+            .Height(32 * targetVisualScale)
+            .Margin(insertionOffset * targetVisualScale, 0, 0, 0)
+            .HAlign(HorizontalAlignment.Left)
+            .VAlign(VerticalAlignment.Center)
+            .Background(highContrast
+                ? Theme.Ref("SystemColorHighlightColorBrush")
+                : Theme.Accent)
+            .Opacity(insertionIndicatorVisible ? 1 : 0)
+            .OnMountAdd(element => element.IsHitTestVisible = false)
+            .AccessibilityHidden()
+            .WithKey("shell-insertion-indicator");
+        var targetContent = Grid(
+            [GridSize.Star()],
+            [GridSize.Star()],
+            [trayIcons, indicator]);
 
         var targetHeightDip = (ChipSize + 8) * targetVisualScale;
         var stripHot = dragSession?.Zone == ShellDropZone.Tray;
@@ -1263,7 +1266,6 @@ class SettingsView : Component
         int position,
         int setSize,
         bool highContrast,
-        bool reduceMotion,
         double scale,
         double opacity)
     {
@@ -1289,11 +1291,8 @@ class SettingsView : Component
                 [GridSize.Star()],
                 [ShellIconVisual(entry.ShellType, highContrast, scale)])
             .Background(fill);
-        Element chipPanel = !reduceMotion && !highContrast
-            ? chipPanelBase.BackgroundTransition()
-            : chipPanelBase;
 
-        var chipBase = WithThresholdDrag((Border(chipPanel) with { CornerRadius = 4 * scale })
+        var chipBase = WithThresholdDrag((Border(chipPanelBase) with { CornerRadius = 4 * scale })
             .Width(ChipSize * scale)
             .Height(ChipSize * scale)
             .WithBorder(stroke, highContrast || selected ? 2 : known ? 1 : 0)
