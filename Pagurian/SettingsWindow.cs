@@ -104,6 +104,6 @@ static class SettingsWindow
         Level = WindowLevel.Normal,
         StartPosition = WindowStartPosition.CenterOnPrimary,
         Key = Key,
-        Icon = WindowIcon.FromPath(AppAssets.IconPath),
+        Icon = WindowIcon.FromPath(AppAssets.ApplicationIconPath),
     };
 }

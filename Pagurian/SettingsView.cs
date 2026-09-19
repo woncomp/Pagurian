@@ -1526,7 +1526,7 @@ class SettingsView : Component
                     ? kind.DisplayName
                     : ShortName(kindId);
                 var dragIcon = WithThresholdDrag(WithInstantTooltip(Border(
-                        Image(kind.PreviewIconPath ?? AppAssets.IconPath)
+                        Image(kind.PreviewIconPath ?? AppAssets.ModuleFallbackIconPath)
                             .Width(24)
                             .Height(24)
                             .AccessibilityHidden()
@@ -1749,7 +1749,7 @@ class SettingsView : Component
     private static string IconFor(string kindId) =>
         ModuleLoader.TryGetKind(kindId, out var kind) && kind.PreviewIconPath is { } path
             ? path
-            : AppAssets.IconPath;
+            : AppAssets.ModuleFallbackIconPath;
 
     private static string NameFor(string kindId) =>
         ModuleLoader.TryGetKind(kindId, out var kind) && kind.DisplayName.Length > 0

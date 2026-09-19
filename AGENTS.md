@@ -158,7 +158,7 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   `TrayShells.ApplyConfig`, and keeps Settings open; Revert reloads the last
   persisted configuration into that draft. Closing with unsaved changes
   discards only after confirmation. Icons:
-  `[Shell].PreviewIconPath` with `AppAssets.IconPath` fallback.
+  `[Shell].PreviewIconPath` with `AppAssets.ModuleFallbackIconPath` fallback.
 - `PostBridge.cs` / `ShellMessageServer.cs` — the `post` pipeline. The bridge
   packs `{id, command, args, payload, receivedAt}` (stdin piped → payload,
   embedded verbatim as raw JSON) onto the `Pagurian.ShellMessages` pipe with
@@ -206,7 +206,7 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   loading user settings or writing to the user log. The latter needs an
   interactive Windows desktop (`-BuildOnly` skips its UI run).
 - `TooltipWindow.cs`, `TaskbarInterop.cs` (all P/Invoke), `AppAssets.cs`
-  (tray icon only).
+  (application and module-fallback icon paths).
 
 ## Module contract essentials (Pagurian.Sdk)
 

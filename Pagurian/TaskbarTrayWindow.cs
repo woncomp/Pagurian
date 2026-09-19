@@ -52,7 +52,7 @@ class TaskbarTrayWindow : Component
         StartPosition = WindowStartPosition.Manual,
         ManualPosition = (0, 0),
         Key = WindowKey.Of("pagurian-icon"),
-        Icon = WindowIcon.FromPath(AppAssets.IconPath),
+        Icon = WindowIcon.FromPath(AppAssets.ApplicationIconPath),
     };
 
     // Number of stops in the taskbar-color gradient: sampled across the

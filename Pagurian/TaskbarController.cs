@@ -977,7 +977,7 @@ static class TaskbarController
         StartPosition = WindowStartPosition.Manual,
         ManualPosition = positionDip,
         Key = WindowKey.Of($"pagurian-billboard-{++_billboardCount}"),
-        Icon = WindowIcon.FromPath(AppAssets.IconPath),
+        Icon = WindowIcon.FromPath(AppAssets.ApplicationIconPath),
     };
 
     private static double ScaleOf(ReactorWindow window) =>

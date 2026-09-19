@@ -2,10 +2,11 @@ namespace Pagurian;
 
 static class AppAssets
 {
-    // Kept as the fallback for shell kinds that do not provide a preview icon.
-    public static string IconPath { get; } =
-        Path.Combine(AppContext.BaseDirectory, "Assets", "Bokehlicia-Captiva-Atom.ico");
+    // The Pagurian application icon used by the executable, host windows, and system tray.
+    public static string ApplicationIconPath { get; } =
+        Path.Combine(AppContext.BaseDirectory, "Assets", "Pagurian-256.ico");
 
-    public static string TrayIconPath { get; } =
-        Path.Combine(AppContext.BaseDirectory, "Assets", "Pagurian-256.png");
+    // Kept only as the fallback for shell kinds that do not provide a preview icon.
+    public static string ModuleFallbackIconPath { get; } =
+        Path.Combine(AppContext.BaseDirectory, "Assets", "Bokehlicia-Captiva-Atom.ico");
 }

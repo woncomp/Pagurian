@@ -48,7 +48,7 @@ class TooltipWindow : Component
         StartPosition = WindowStartPosition.Manual,
         ManualPosition = positionDip,
         Key = WindowKey.Of(_key),
-        Icon = WindowIcon.FromPath(AppAssets.IconPath),
+        Icon = WindowIcon.FromPath(AppAssets.ApplicationIconPath),
     };
 
     public override Element Render() =>
