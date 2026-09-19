@@ -25,8 +25,10 @@ class SettingsView : Component
 {
     private static readonly ConditionalWeakTable<FrameworkElement, InstantTooltipBinding>
         InstantTooltipBindings = new();
+    private static readonly HashSet<InstantTooltipBinding> MountedInstantTooltipBindings = [];
     private static readonly ConditionalWeakTable<FrameworkElement, ThresholdDragBinding>
         ThresholdDragBindings = new();
+    private static int _instantTooltipSuppressionDepth;
 
     private const double StripPadX = 12;
     private const double ChipSize = 44;
@@ -46,6 +48,7 @@ class SettingsView : Component
             PointerEntered = OnPointerEntered;
             PointerExited = OnPointerExited;
             DragStarting = OnDragStarting;
+            Opened = OnOpened;
         }
 
         public ToolTip ToolTip { get; }
@@ -53,6 +56,7 @@ class SettingsView : Component
         public Microsoft.UI.Xaml.Input.PointerEventHandler PointerEntered { get; }
         public Microsoft.UI.Xaml.Input.PointerEventHandler PointerExited { get; }
         public Windows.Foundation.TypedEventHandler<UIElement, DragStartingEventArgs> DragStarting { get; }
+        public RoutedEventHandler Opened { get; }
 
         private void OnPointerEntered(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs args) =>
             SetOpen(sender, true);
@@ -62,6 +66,12 @@ class SettingsView : Component
 
         private void OnDragStarting(UIElement sender, DragStartingEventArgs args) =>
             SetOpen(sender, false);
+
+        private void OnOpened(object sender, RoutedEventArgs args)
+        {
+            if (InstantTooltipsSuppressed)
+                ToolTip.IsOpen = false;
+        }
 
         private void SetOpen(object sender, bool isOpen)
         {
@@ -73,8 +83,10 @@ class SettingsView : Component
                 return;
             }
 
-            ToolTip.IsOpen = isOpen;
+            ToolTip.IsOpen = isOpen && !InstantTooltipsSuppressed;
         }
+
+        public void Close() => ToolTip.IsOpen = false;
     }
 
     private sealed record ShellDragPayload(string? KindId, string? InstanceId)
@@ -184,6 +196,7 @@ class SettingsView : Component
 
         private async void BeginDrag(Microsoft.UI.Input.PointerPoint point)
         {
+            SuspendInstantTooltips();
             try
             {
                 await _element.StartDragAsync(point);
@@ -194,6 +207,7 @@ class SettingsView : Component
             }
             finally
             {
+                ResumeInstantTooltips();
                 Reset(releaseCapture: true);
             }
         }
@@ -1507,11 +1521,15 @@ class SettingsView : Component
         DetachInstantTooltip(element);
         var binding = new InstantTooltipBinding(text);
         InstantTooltipBindings.Add(element, binding);
+        MountedInstantTooltipBindings.Add(binding);
         ToolTipService.SetToolTip(element, binding.ToolTip);
         binding.IsActive = true;
         element.PointerEntered += binding.PointerEntered;
         element.PointerExited += binding.PointerExited;
         element.DragStarting += binding.DragStarting;
+        binding.ToolTip.Opened += binding.Opened;
+        if (InstantTooltipsSuppressed)
+            binding.Close();
     }
 
     private static void DetachInstantTooltip(FrameworkElement element)
@@ -1523,8 +1541,36 @@ class SettingsView : Component
         element.PointerEntered -= binding.PointerEntered;
         element.PointerExited -= binding.PointerExited;
         element.DragStarting -= binding.DragStarting;
+        binding.ToolTip.Opened -= binding.Opened;
+        binding.Close();
         ToolTipService.SetToolTip(element, null);
+        MountedInstantTooltipBindings.Remove(binding);
         InstantTooltipBindings.Remove(element);
+    }
+
+    private static bool InstantTooltipsSuppressed =>
+        _instantTooltipSuppressionDepth > 0;
+
+    private static void SuspendInstantTooltips()
+    {
+        _instantTooltipSuppressionDepth++;
+        CloseInstantTooltips();
+    }
+
+    private static void ResumeInstantTooltips()
+    {
+        if (_instantTooltipSuppressionDepth > 0)
+            _instantTooltipSuppressionDepth--;
+
+        // PointerExited is not guaranteed while the system drag owns pointer
+        // routing, so close every mounted tooltip once more at completion.
+        CloseInstantTooltips();
+    }
+
+    private static void CloseInstantTooltips()
+    {
+        foreach (var binding in MountedInstantTooltipBindings)
+            binding.Close();
     }
 
     private static bool TryGetPayload(DragData data, out ShellDragPayload payload)
