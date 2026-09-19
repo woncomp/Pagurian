@@ -723,22 +723,48 @@ class SettingsView : Component
                 ? Theme.SystemCriticalBackground
                 : selected ? Theme.SubtleFill : Theme.ControlFill;
         var stroke = highContrast
-            ? selected || !known ? highlight : windowText
-            : !known
-                ? Theme.SystemCritical
-                : selected ? Theme.Accent : Theme.ControlStroke;
+            ? selected ? highlight : windowText
+            : selected ? Theme.Accent : Theme.ControlStroke;
+
+        Element[] iconLayers = known
+            ?
+            [
+                Image(IconFor(entry.ShellType))
+                    .Width(24 * scale)
+                    .Height(24 * scale)
+                    .AccessibilityHidden()
+                    .HAlign(HorizontalAlignment.Center)
+                    .VAlign(VerticalAlignment.Center),
+            ]
+            :
+            [
+                Image(IconFor(entry.ShellType))
+                    .Width(24 * scale)
+                    .Height(24 * scale)
+                    .AccessibilityHidden()
+                    .HAlign(HorizontalAlignment.Center)
+                    .VAlign(VerticalAlignment.Center),
+                BodyStrong("\u25B2")
+                    .FontSize(26 * scale)
+                    .Foreground(highContrast ? highlight : Theme.SystemCaution)
+                    .Opacity(0.76)
+                    .AccessibilityHidden()
+                    .HAlign(HorizontalAlignment.Center)
+                    .VAlign(VerticalAlignment.Center),
+                BodyStrong("!")
+                    .FontSize(12 * scale)
+                    .Foreground(Theme.Ref("SystemColorWindowTextColorBrush"))
+                    .Opacity(0.76)
+                    .Margin(0, 4 * scale, 0, 0)
+                    .AccessibilityHidden()
+                    .HAlign(HorizontalAlignment.Center)
+                    .VAlign(VerticalAlignment.Center),
+            ];
 
         var chipPanelBase = Grid(
                 [GridSize.Star()],
                 [GridSize.Star()],
-                [
-                    Image(IconFor(entry.ShellType))
-                        .Width(24 * scale)
-                        .Height(24 * scale)
-                        .AccessibilityHidden()
-                        .HAlign(HorizontalAlignment.Center)
-                        .VAlign(VerticalAlignment.Center),
-                ])
+                iconLayers)
             .Background(fill);
         Element chipPanel = !reduceMotion && !highContrast
             ? chipPanelBase.BackgroundTransition()
@@ -747,7 +773,7 @@ class SettingsView : Component
         var chipBase = (Border(chipPanel) with { CornerRadius = 4 * scale })
             .Width(ChipSize * scale)
             .Height(ChipSize * scale)
-            .WithBorder(stroke, highContrast || selected || !known ? 2 : 1)
+            .WithBorder(stroke, highContrast || selected ? 2 : known ? 1 : 0)
             .HelpText($"{tip}. Press Delete to remove.")
             .AutomationName($"Configure {name}, shell {entry.Id}")
             .PositionInSet(position, setSize)
