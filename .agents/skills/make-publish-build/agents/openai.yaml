@@ -1,0 +1,7 @@
+interface:
+  display_name: "Make Publish Build"
+  short_description: "Publish and relaunch Pagurian safely"
+  default_prompt: "Use $make-publish-build to publish and relaunch Pagurian."
+
+policy:
+  allow_implicit_invocation: false
