@@ -8,10 +8,8 @@ using Microsoft.UI.Reactor.Layout;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media;
 using Pagurian.Sdk;
 using Windows.System;
-using Windows.UI.ViewManagement;
 using static Microsoft.UI.Reactor.Factories;
 
 namespace Pagurian;
@@ -31,10 +29,6 @@ class ShellEditorView : Component
     private const double ChipGap = 4;
     private const double ChipPitch = ChipSize + ChipGap;
     private const double EmptyTargetWidth = 160;
-    private static readonly SolidColorBrush DarkScrimBrush = new(
-        Windows.UI.Color.FromArgb(0x88, 0, 0, 0));
-    private static readonly SolidColorBrush LightScrimBrush = new(
-        Windows.UI.Color.FromArgb(0x70, 255, 255, 255));
 
     private sealed class InstantTooltipBinding
     {
@@ -91,15 +85,8 @@ class ShellEditorView : Component
         UseEffect(requestInitialFocus, Array.Empty<object>());
         var highContrast = colorScheme == ColorScheme.HighContrast;
         var advancedEffects = UseMemo(
-            () =>
-            {
-                try { return new UISettings().AdvancedEffectsEnabled; }
-                catch { return false; }
-            },
+            ShellEditorBackdrop.AdvancedEffectsEnabled,
             Array.Empty<object>());
-        var useDesktopAcrylic = advancedEffects &&
-            ShellEditorWindow.DesktopAcrylicSupported &&
-            !highContrast;
 
         var configurationTheme = UseMemo(
             () => new ConfigurationThemeService(colorScheme, highContrastScheme),
@@ -306,14 +293,24 @@ class ShellEditorView : Component
         var targetStroke = stripHot
             ? highContrast ? Theme.Ref("SystemColorHighlightColorBrush") : Theme.Accent
             : highContrast ? Theme.Ref("SystemColorWindowTextColorBrush") : Theme.ControlStroke;
+        var targetBorderThickness = stripHot || highContrast ? 2d : 1d;
+        // Width/Height include BorderThickness and Padding. Reserve the
+        // border inside the fixed taskbar-sized target so its 40-DIP chips do
+        // not overflow and get clipped along the right or bottom edge.
+        var targetPaddingX = Math.Max(
+            0,
+            StripPadX * targetVisualScale - targetBorderThickness);
+        var targetPaddingY = Math.Max(
+            0,
+            2 * targetVisualScale - targetBorderThickness);
 
         var target = (Border(targetContent) with { CornerRadius = 4 * targetVisualScale })
             .Width(targetWidthDip)
             .Height(targetHeightDip)
-            .Padding(StripPadX * targetVisualScale, 2 * targetVisualScale,
-                StripPadX * targetVisualScale, 2 * targetVisualScale)
+            .Padding(targetPaddingX, targetPaddingY,
+                targetPaddingX, targetPaddingY)
             .Background(targetFill)
-            .WithBorder(targetStroke, stripHot || highContrast ? 2 : 1)
+            .WithBorder(targetStroke, targetBorderThickness)
             .AutomationName("Target taskbar tray")
             .HelpText("Drop shell icons here. Drag existing icons to reorder them.")
             .IsTabStop(true)
@@ -486,20 +483,17 @@ class ShellEditorView : Component
                 : Theme.DividerStroke, highContrast ? 2 : 1)
             .Grid(row: 2, column: 0);
 
-        var virtualScreen = geometry.VirtualScreenPx;
-        var primaryScreen = geometry.PrimaryScreenPx;
-        var primaryLeftDip = (primaryScreen.Left - virtualScreen.Left) / overlayScale;
-        var primaryTopDip = (primaryScreen.Top - virtualScreen.Top) / overlayScale;
-        var primaryWidthDip = primaryScreen.Width / overlayScale;
-        var primaryHeightDip = primaryScreen.Height / overlayScale;
+        var editorScreen = geometry.EditorMonitor.MonitorRect;
+        var editorWidthDip = editorScreen.Width / overlayScale;
+        var editorHeightDip = editorScreen.Height / overlayScale;
         var panelWidth = Math.Max(
             360,
-            Math.Min(PanelDesiredWidth, primaryWidthDip - 2 * PanelScreenMargin));
+            Math.Min(PanelDesiredWidth, editorWidthDip - 2 * PanelScreenMargin));
         var panelHeight = Math.Max(
             420,
-            Math.Min(PanelDesiredHeight, primaryHeightDip - 2 * PanelScreenMargin));
-        var panelLeft = primaryLeftDip + (primaryWidthDip - panelWidth) / 2;
-        var panelTop = primaryTopDip + (primaryHeightDip - panelHeight) / 2;
+            Math.Min(PanelDesiredHeight, editorHeightDip - 2 * PanelScreenMargin));
+        var panelLeft = (editorWidthDip - panelWidth) / 2;
+        var panelTop = (editorHeightDip - panelHeight) / 2;
 
         var panelBackground = panelHot
             ? highContrast ? Theme.Ref("SystemColorWindowColorBrush") : Theme.SystemCriticalBackground
@@ -545,14 +539,22 @@ class ShellEditorView : Component
         if (geometry.TaskbarSurface is { } targetSurface)
         {
             var targetRect = targetSurface.Place(targetWidthDesignDip);
-            targetLeft = (targetRect.Left - virtualScreen.Left) / overlayScale;
-            targetTop = (targetRect.Top - virtualScreen.Top) / overlayScale;
+            targetLeft = (targetRect.Left - editorScreen.Left) / overlayScale;
+            targetTop = (targetRect.Top - editorScreen.Top) / overlayScale;
         }
         else
         {
-            targetLeft = primaryLeftDip + 8;
-            targetTop = primaryTopDip + primaryHeightDip - targetHeightDip - 4;
+            targetLeft = 8;
+            targetTop = editorHeightDip - targetHeightDip - 4;
         }
+        targetLeft = Math.Clamp(
+            targetLeft,
+            0,
+            Math.Max(0, editorWidthDip - targetWidthDip));
+        targetTop = Math.Clamp(
+            targetTop,
+            0,
+            Math.Max(0, editorHeightDip - targetHeightDip));
 
         var discardDialog = ContentDialog(
             "Discard changes?",
@@ -570,14 +572,12 @@ class ShellEditorView : Component
             },
         };
 
-        var virtualWidthDip = virtualScreen.Width / overlayScale;
-        var virtualHeightDip = virtualScreen.Height / overlayScale;
         Element root = Canvas(
                 target.Canvas(targetLeft, targetTop),
                 panel,
                 discardDialog)
-            .Width(virtualWidthDip)
-            .Height(virtualHeightDip)
+            .Width(editorWidthDip)
+            .Height(editorHeightDip)
             .OnKeyDown((_, args) =>
             {
                 if (args.Key != VirtualKey.Escape || discardDialogOpen)
@@ -587,19 +587,7 @@ class ShellEditorView : Component
                 RequestCancel();
             });
 
-        if (!useDesktopAcrylic)
-        {
-            root = root.Background(Theme.Ref("SystemColorWindowColorBrush"));
-        }
-        else
-        {
-            var dark = colorScheme == ColorScheme.Dark;
-            root = root.Background(dark ? DarkScrimBrush : LightScrimBrush);
-        }
-
-        return root.Backdrop(useDesktopAcrylic
-            ? BackdropKind.DesktopAcrylic
-            : BackdropKind.None);
+        return ShellEditorBackdrop.Apply(root, colorScheme, advancedEffects);
     }
 
     private static Element TargetChip(

@@ -132,16 +132,19 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
 - `SettingsWindow.cs` / `SettingsView.cs` — the singleton host-settings
   window: config-directory row (TextBox + folder picker →
   `HostSettings.SetConfigDir` → config reload → `TrayShells.ApplyConfig`).
-- `ShellEditorWindow.cs` / `ShellEditorView.cs` — the singleton activated,
-  topmost, taskbar/Alt-Tab-hidden editor spanning the physical virtual desktop.
-  Desktop Acrylic plus a scrim obscures existing windows and taskbars; the
-  catalog is centered on the primary display and the draft target is mapped to
-  the real primary-taskbar tray anchor through `TaskbarTrayPlacement`. Drag or
-  keyboard-add from the module pool, reorder in the target, and remove back to
-  the catalog. Per-instance `ShellConfiguration` is hosted here. All changes
-  stay in a draft; Save and exit does `TrayConfig.Save` then
-  `TrayShells.ApplyConfig`, while cancel/close discards after confirmation.
-  Icons: `[Shell].PreviewIconPath` with `AppAssets.IconPath` fallback.
+- `ShellEditorWindow.cs` / `ShellEditorView.cs` — one topmost,
+  taskbar/Alt-Tab-hidden surface per physical display. The activated editor
+  surface lives on the display containing the primary `Shell_TrayWnd`; every
+  other display gets a non-activating, hit-testable backdrop surface. Desktop
+  Acrylic plus a scrim obscures existing windows and taskbars. The catalog and
+  draft target share the primary surface so typed drag stays within one HWND;
+  target coordinates map from the real taskbar anchor through
+  `TaskbarTrayPlacement` into that monitor's local DIPs. Drag or keyboard-add
+  from the module pool, reorder in the target, and remove back to the catalog.
+  Per-instance `ShellConfiguration` is hosted here. All changes stay in a
+  draft; Save and exit does `TrayConfig.Save` then `TrayShells.ApplyConfig`,
+  while cancel/close discards after confirmation. Icons:
+  `[Shell].PreviewIconPath` with `AppAssets.IconPath` fallback.
 - `PostBridge.cs` / `ShellMessageServer.cs` — the `post` pipeline. The bridge
   packs `{id, command, args, payload, receivedAt}` (stdin piped → payload,
   embedded verbatim as raw JSON) onto the `Pagurian.ShellMessages` pipe with

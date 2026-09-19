@@ -20,14 +20,29 @@ static class TaskbarInterop
         public int X, Y;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MONITORINFO
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct MONITORINFOEX
     {
         public uint cbSize;
         public RECT rcMonitor;
         public RECT rcWork;
         public uint dwFlags;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string? szDevice;
     }
+
+    public readonly record struct DisplayMonitor(
+        string DeviceName,
+        RECT MonitorRect,
+        RECT WorkRect,
+        bool IsPrimary);
+
+    private delegate bool MonitorEnumProc(
+        IntPtr hMonitor,
+        IntPtr hdcMonitor,
+        ref RECT monitorRect,
+        IntPtr data);
 
     public const int GWL_STYLE = -16;
     public const int WS_POPUP = unchecked((int)0x80000000);
@@ -44,6 +59,7 @@ static class TaskbarInterop
     private const int SM_CXVIRTUALSCREEN = 78;
     private const int SM_CYVIRTUALSCREEN = 79;
     private const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
+    private const uint MONITORINFOF_PRIMARY = 0x00000001;
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr FindWindowW(string? lpClassName, string? lpWindowName);
@@ -74,8 +90,15 @@ static class TaskbarInterop
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromRect(ref RECT lprc, uint dwFlags);
 
+    [DllImport("user32.dll")]
+    private static extern bool EnumDisplayMonitors(
+        IntPtr hdc,
+        IntPtr clipRect,
+        MonitorEnumProc callback,
+        IntPtr data);
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern bool GetMonitorInfoW(IntPtr hMonitor, ref MONITORINFO lpmi);
+    private static extern bool GetMonitorInfoW(IntPtr hMonitor, ref MONITORINFOEX lpmi);
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
     private static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
@@ -395,24 +418,90 @@ static class TaskbarInterop
     public static POINT GetCursorPosition() =>
         GetCursorPos(out var p) ? p : default;
 
+    // Enumerates every active physical display in screen coordinates. Device
+    // names (for example \\.\DISPLAY1) remain stable while rectangles move,
+    // making them suitable keys for the Shell editor's overlay windows.
+    public static bool TryGetDisplayMonitors(out DisplayMonitor[] monitors)
+    {
+        var found = new List<DisplayMonitor>();
+        var complete = true;
+        MonitorEnumProc callback = (
+            IntPtr monitor,
+            IntPtr monitorDc,
+            ref RECT monitorRect,
+            IntPtr data) =>
+        {
+            if (TryReadDisplayMonitor(monitor, out var display))
+                found.Add(display);
+            else
+                complete = false;
+            return true;
+        };
+
+        var enumerated = EnumDisplayMonitors(
+            IntPtr.Zero,
+            IntPtr.Zero,
+            callback,
+            IntPtr.Zero);
+        GC.KeepAlive(callback);
+
+        monitors = found
+            .OrderByDescending(display => display.IsPrimary)
+            .ThenBy(display => display.MonitorRect.Top)
+            .ThenBy(display => display.MonitorRect.Left)
+            .ThenBy(display => display.DeviceName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        return enumerated && complete && monitors.Length > 0;
+    }
+
+    // Resolves the display containing (or nearest to) a physical screen rect.
+    public static bool TryGetDisplayMonitor(in RECT screenRect, out DisplayMonitor display)
+    {
+        var rect = screenRect;
+        var monitor = MonitorFromRect(ref rect, MONITOR_DEFAULTTONEAREST);
+        return TryReadDisplayMonitor(monitor, out display);
+    }
+
+    private static bool TryReadDisplayMonitor(IntPtr monitor, out DisplayMonitor display)
+    {
+        if (monitor != IntPtr.Zero)
+        {
+            var info = new MONITORINFOEX
+            {
+                cbSize = (uint)Marshal.SizeOf<MONITORINFOEX>(),
+            };
+            if (GetMonitorInfoW(monitor, ref info) &&
+                info.rcMonitor.Right > info.rcMonitor.Left &&
+                info.rcMonitor.Bottom > info.rcMonitor.Top)
+            {
+                var deviceName = string.IsNullOrWhiteSpace(info.szDevice)
+                    ? $"monitor-{monitor.ToInt64():X}"
+                    : info.szDevice;
+                display = new DisplayMonitor(
+                    deviceName,
+                    info.rcMonitor,
+                    info.rcWork,
+                    (info.dwFlags & MONITORINFOF_PRIMARY) != 0);
+                return true;
+            }
+        }
+
+        display = default;
+        return false;
+    }
+
     // Returns the physical-pixel work area of the monitor nearest a physical
     // screen rectangle. Unlike the virtual-desktop metrics below, rcWork
     // excludes that monitor's taskbar and respects secondary monitors with
     // negative coordinates.
     public static bool TryGetMonitorWorkArea(in RECT screenRect, out RECT workArea)
     {
-        var rect = screenRect;
-        var monitor = MonitorFromRect(ref rect, MONITOR_DEFAULTTONEAREST);
-        if (monitor != IntPtr.Zero)
+        if (TryGetDisplayMonitor(screenRect, out var display) &&
+            display.WorkRect.Right > display.WorkRect.Left &&
+            display.WorkRect.Bottom > display.WorkRect.Top)
         {
-            var info = new MONITORINFO { cbSize = (uint)Marshal.SizeOf<MONITORINFO>() };
-            if (GetMonitorInfoW(monitor, ref info) &&
-                info.rcWork.Right > info.rcWork.Left &&
-                info.rcWork.Bottom > info.rcWork.Top)
-            {
-                workArea = info.rcWork;
-                return true;
-            }
+            workArea = display.WorkRect;
+            return true;
         }
 
         workArea = default;
