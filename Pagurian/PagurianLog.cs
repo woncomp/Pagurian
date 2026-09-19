@@ -8,6 +8,9 @@ namespace Pagurian;
 // via the sink installed in Initialize.
 static class PagurianLog
 {
+    private static readonly object FileGate = new();
+    private static readonly DiagnosticLogQueue NavigationQueue = new(AppendLine);
+
     public static readonly string LogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "Pagurian",
@@ -20,13 +23,37 @@ static class PagurianLog
     public static void HostError(string message, Exception? ex = null) =>
         Write("host", "ERROR", ex == null ? message : $"{message}: {ex}");
 
-    private static void Write(string tag, string level, string message)
+    internal static void Navigation(string sessionId, string message, string level = "INFO") =>
+        NavigationQueue.Enqueue(sessionId, message, level);
+
+    internal static Task FlushNavigationAsync() => NavigationQueue.FlushAsync();
+
+    internal static void FlushNavigationOnExit()
     {
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(LogPath)!);
-            File.AppendAllText(LogPath,
-                $"{DateTimeOffset.Now:O} [{level}] [{tag}] {message}{Environment.NewLine}");
+            // Regular Settings close uses the asynchronous flush. Explicit
+            // process exit cannot wait forever if disk I/O is stalled.
+            FlushNavigationAsync().Wait(TimeSpan.FromSeconds(2));
+        }
+        catch
+        {
+            // Diagnostic failures must never prevent application exit.
+        }
+    }
+
+    private static void Write(string tag, string level, string message)
+        => AppendLine($"{DateTimeOffset.Now:O} [{level}] [{tag}] {message}");
+
+    private static void AppendLine(string line)
+    {
+        try
+        {
+            lock (FileGate)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(LogPath)!);
+                File.AppendAllText(LogPath, line + Environment.NewLine);
+            }
         }
         catch
         {

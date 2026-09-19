@@ -68,6 +68,8 @@ ReactorApp.Run(_ =>
         ModuleLoader.ShutdownAll();
         tray.Close();
         ReactorApp.Exit(0);
+        ShellNavigationDiagnostics.CompleteAllForExit();
+        PagurianLog.FlushNavigationOnExit();
         Environment.Exit(0);
     };
 });

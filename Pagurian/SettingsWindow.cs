@@ -36,10 +36,22 @@ static class SettingsWindow
         }
 
         _allowClose = false;
-        var window = ReactorApp.OpenWindow(CreateSpec(), () => new SettingsView());
+        var diagnostics = new ShellNavigationDiagnostics();
+        ReactorWindow window;
+        try
+        {
+            window = ReactorApp.OpenWindow(CreateSpec(), () => new SettingsView(diagnostics));
+        }
+        catch
+        {
+            diagnostics.WindowClosed("open-failed");
+            throw;
+        }
         _window = window;
         window.Closed += (_, _) =>
         {
+            // Runs even when CloseIfOpen cleared _window before forced teardown.
+            diagnostics.WindowClosed("window-event");
             if (!ReferenceEquals(_window, window))
                 return;
 

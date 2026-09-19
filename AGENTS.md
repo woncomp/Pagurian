@@ -189,6 +189,22 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
 - `PagurianLog.cs` — the unified log (`%LOCALAPPDATA%\Pagurian\pagurian.log`,
   timestamp + level + tag). Installs the Sdk `Logger` sink; host writes with
   tag `host`.
+- `ShellNavigationDiagnostics.cs` — passive Shell configuration navigation
+  probes on the existing host/page controls (no wrappers or Composition access).
+  The unified log's `shell-navigation` tag correlates session, PID, event sequence,
+  navigation requests, accepted routes, Reactor mount/unmount and XAML
+  Loaded/Unloaded. Coalesced snapshots after navigation and at 250ms/1s/2s list
+  native host children; `suspected-residue` at the final check is a diagnostic
+  hint, not proof of compositor state. XAML opacity is explicitly not animated
+  Composition opacity. Payloads contain IDs and structural metadata, never
+  configuration values or control text. A bounded asynchronous writer reports
+  queue overflow and flushes on close/exit. Reproduce rapid A→B→C selection,
+  wait at least 2 seconds, then inspect this tag before closing Settings.
+  `tests\Verify-DiagnosticLogQueue.ps1` checks ordering, overflow and flush;
+  `tests\Verify-NavigationDiagnostics.ps1` opens an isolated nonactivating
+  test window to check live probes, delayed snapshots and teardown without
+  loading user settings or writing to the user log. The latter needs an
+  interactive Windows desktop (`-BuildOnly` skips its UI run).
 - `TooltipWindow.cs`, `TaskbarInterop.cs` (all P/Invoke), `AppAssets.cs`
   (tray icon only).
 

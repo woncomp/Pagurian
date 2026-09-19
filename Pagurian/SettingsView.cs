@@ -24,6 +24,11 @@ namespace Pagurian;
 // the Shell draft remains alive while the user moves between pages.
 class SettingsView : Component
 {
+    private readonly ShellNavigationDiagnostics _navigationDiagnostics;
+
+    public SettingsView(ShellNavigationDiagnostics navigationDiagnostics) =>
+        _navigationDiagnostics = navigationDiagnostics;
+
     private static readonly ConditionalWeakTable<FrameworkElement, InstantTooltipBinding>
         InstantTooltipBindings = new();
     private static readonly HashSet<InstantTooltipBinding> MountedInstantTooltipBindings = [];
@@ -242,13 +247,32 @@ class SettingsView : Component
 
     private static readonly ShellEditorRoute ModulesRoute = new ShellEditorRoute.Modules();
 
+    private static string DiagnosticRoute(ShellEditorRoute route) => route switch
+    {
+        ShellEditorRoute.Configuration configuration =>
+            ShellNavigationDiagnostics.ConfigurationRoute(configuration.InstanceId),
+        _ => "Modules",
+    };
+
     public override Element Render()
     {
         var (page, setPage) = UseState(SettingsWindow.RequestedPage);
         var shellNavigation = UseNavigation<ShellEditorRoute>(ModulesRoute);
         UseEffect(() =>
         {
-            void OnPageRequested(SettingsPage requested) => setPage(requested);
+            void OnNavigated(NavigationEventArgs<ShellEditorRoute> args) =>
+                _navigationDiagnostics.RouteChanged(
+                    DiagnosticRoute(args.PreviousRoute), DiagnosticRoute(args.Route), args.Mode.ToString());
+            shellNavigation.Navigated += OnNavigated;
+            return () => shellNavigation.Navigated -= OnNavigated;
+        }, shellNavigation);
+        UseEffect(() =>
+        {
+            void OnPageRequested(SettingsPage requested)
+            {
+                _navigationDiagnostics.Record($"page-request source=tray-menu target={requested}");
+                setPage(requested);
+            }
             SettingsWindow.PageRequested += OnPageRequested;
             return () => SettingsWindow.PageRequested -= OnPageRequested;
         }, Array.Empty<object>());
@@ -256,6 +280,9 @@ class SettingsView : Component
         var colorScheme = UseColorScheme();
         var highContrastScheme = UseHighContrastScheme();
         var reduceMotion = UseReducedMotion();
+        UseEffect(() => _navigationDiagnostics.RenderObserved(
+            page, DiagnosticRoute(shellNavigation.CurrentRoute), reduceMotion),
+            page, shellNavigation.CurrentRoute, reduceMotion);
         var (initialFocusRef, requestInitialFocus) = this.UseElementFocus();
         UseEffect(() =>
         {
@@ -300,25 +327,39 @@ class SettingsView : Component
 
         void OpenConfiguration(string instanceId)
         {
+            var from = DiagnosticRoute(shellNavigation.CurrentRoute);
+            var to = ShellNavigationDiagnostics.ConfigurationRoute(instanceId);
             if (shellNavigation.CurrentRoute is ShellEditorRoute.Configuration current)
             {
                 if (current.InstanceId == instanceId)
+                {
+                    _navigationDiagnostics.Request("Replace", from, to, "tray-select", ignored: true);
                     return;
+                }
 
+                _navigationDiagnostics.Request("Replace", from, to, "tray-select");
                 shellNavigation.Replace(new ShellEditorRoute.Configuration(instanceId));
                 return;
             }
 
+            _navigationDiagnostics.Request("Navigate", from, to, "tray-select");
             shellNavigation.Navigate(new ShellEditorRoute.Configuration(instanceId));
         }
 
-        void BackToModules()
+        void BackToModules() => ReturnToModules("back-button");
+
+        void ReturnToModules(string reason)
         {
+            _navigationDiagnostics.Request("Back", DiagnosticRoute(shellNavigation.CurrentRoute), "Modules", reason,
+                ignored: shellNavigation.CurrentRoute is ShellEditorRoute.Modules);
             if (shellNavigation.CurrentRoute is ShellEditorRoute.Modules)
                 return;
 
             if (!shellNavigation.GoBack())
+            {
+                _navigationDiagnostics.Record("back-fallback operation=Reset target=Modules");
                 shellNavigation.Reset(ModulesRoute);
+            }
         }
 
         UseEffect(() =>
@@ -326,7 +367,7 @@ class SettingsView : Component
             if (shellNavigation.CurrentRoute is ShellEditorRoute.Configuration current &&
                 draft.All(entry => entry.Id != current.InstanceId))
             {
-                BackToModules();
+                ReturnToModules("missing-instance");
             }
         }, shellNavigation.CurrentRoute, draft);
 
@@ -709,7 +750,7 @@ class SettingsView : Component
             void Commit()
             {
                 if (removedId != null && selectedId == removedId)
-                    BackToModules();
+                    ReturnToModules("drag-remove");
                 setDraft(next);
                 setDragSession(null);
                 setDirty(true);
@@ -761,7 +802,7 @@ class SettingsView : Component
                 return;
 
             if (selectedId == instanceId)
-                BackToModules();
+                ReturnToModules("remove-instance");
             draftRef.Current = next;
             setDraft(next);
             setDirty(true);
@@ -819,7 +860,7 @@ class SettingsView : Component
         {
             var entries = TrayConfig.Load().ToList();
             if (selectedId != null && entries.All(entry => entry.Id != selectedId))
-                BackToModules();
+                ReturnToModules("revert");
             draftRef.Current = entries;
             setDraft(entries);
             setDirty(false);
@@ -836,7 +877,7 @@ class SettingsView : Component
                 setAppliedDir(HostSettings.ConfigDir);
                 setDirText(HostSettings.ConfigDir);
                 if (selectedId != null && entries.All(entry => entry.Id != selectedId))
-                    BackToModules();
+                    ReturnToModules("config-directory-change");
                 draftRef.Current = entries;
                 setDraft(entries);
                 setDirty(false);
@@ -958,12 +999,12 @@ class SettingsView : Component
             .HelpText("Drop module icons here to add them. The insertion line shows the pending position. Drag existing icons to reorder, or onto the Modules panel to remove.")
             .IsTabStop(true)
             .Ref(initialFocusRef)
-            .OnTapped((_, _) => BackToModules())
+            .OnTapped((_, _) => ReturnToModules("tray-background"))
             .OnKeyDown((_, args) =>
             {
                 if (args.Key is VirtualKey.Enter or VirtualKey.Space)
                 {
-                    BackToModules();
+                    ReturnToModules("tray-keyboard");
                     args.Handled = true;
                 }
             });
@@ -1061,20 +1102,32 @@ class SettingsView : Component
                     .Margin(0, 16, 0, 0));
         }
 
-        Element PanelForRoute(ShellEditorRoute route) => route switch
+        Element PanelForRoute(ShellEditorRoute route)
         {
-            ShellEditorRoute.Configuration configuration =>
-                ConfigurationPanel(configuration.InstanceId),
-            _ => ModulesPanel(),
-        };
+            var content = route switch
+            {
+                ShellEditorRoute.Configuration configuration =>
+                    ConfigurationPanel(configuration.InstanceId),
+                _ => ModulesPanel(),
+            };
+            var displayedRoute = route is ShellEditorRoute.Configuration selected &&
+                draft.All(entry => entry.Id != selected.InstanceId)
+                ? "Modules"
+                : DiagnosticRoute(route);
+            return content
+                .OnMountAdd(element => _navigationDiagnostics.MountPage(element, displayedRoute))
+                .OnUnmountAdd(_navigationDiagnostics.UnmountCallback);
+        }
 
-        var panelBody = NavigationHost(shellNavigation, PanelForRoute) with
+        var panelBody = (NavigationHost(shellNavigation, PanelForRoute) with
         {
             CacheMode = NavigationCacheMode.Disabled,
             Transition = reduceMotion
                 ? NavigationTransition.None
                 : NavigationTransition.Spring(),
-        };
+        })
+            .OnMountAdd(_navigationDiagnostics.MountHostCallback)
+            .OnUnmountAdd(_navigationDiagnostics.UnmountCallback);
 
         var scrollBody = ScrollView(Border(panelBody).Padding(24))
             .HorizontalContentAlignment(HorizontalAlignment.Stretch);
@@ -1289,6 +1342,7 @@ class SettingsView : Component
                     EndTrayDrag();
                     ClearDragSession();
                 }
+                _navigationDiagnostics.Record($"page-request source=navigation-view target={nextPage}");
                 setPage(nextPage);
             },
             PaneDisplayMode = NavigationViewPaneDisplayMode.Left,
