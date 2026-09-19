@@ -14,16 +14,13 @@ using static Microsoft.UI.Reactor.Factories;
 
 namespace Pagurian;
 
-// Full-desktop shell editor. The real tray stays unchanged behind this
-// surface; only Save and exit persists the draft and reconciles live shells.
+// Shell editor hosted in a normal desktop window. The real tray stays
+// unchanged until Save and exit persists and applies the draft.
 class ShellEditorView : Component
 {
     private static readonly ConditionalWeakTable<FrameworkElement, InstantTooltipBinding>
         InstantTooltipBindings = new();
 
-    private const double PanelDesiredWidth = 780;
-    private const double PanelDesiredHeight = 660;
-    private const double PanelScreenMargin = 32;
     private const double StripPadX = 12;
     private const double ChipSize = 40;
     private const double ChipGap = 4;
@@ -77,7 +74,6 @@ class ShellEditorView : Component
 
     public override Element Render()
     {
-        var overlayScale = Math.Max(UseDpi() / 96.0, 0.25);
         var colorScheme = UseColorScheme();
         var highContrastScheme = UseHighContrastScheme();
         var reduceMotion = UseReducedMotion();
@@ -92,31 +88,6 @@ class ShellEditorView : Component
             () => configurationTheme.Apply(colorScheme, highContrastScheme),
             colorScheme,
             highContrastScheme ?? "");
-
-        var (geometry, setGeometry) = UseState(ShellEditorWindow.Geometry);
-        UseEffect(() =>
-        {
-            void OnGeometryChanged() => setGeometry(ShellEditorWindow.Geometry);
-            ShellEditorWindow.GeometryChanged += OnGeometryChanged;
-            return () => ShellEditorWindow.GeometryChanged -= OnGeometryChanged;
-        }, Array.Empty<object>());
-
-        var (_, setSnapshotVersion) = UseState(0);
-        var snapshotTick = UseRef(0);
-        UseEffect(() =>
-        {
-            void OnSnapshotChanged() => setSnapshotVersion(++snapshotTick.Current);
-            ShellEditorWindow.SnapshotChanged += OnSnapshotChanged;
-            return () => ShellEditorWindow.SnapshotChanged -= OnSnapshotChanged;
-        }, Array.Empty<object>());
-
-        var snapshot = ShellEditorWindow.SnapshotFor(
-            geometry.EditorMonitor.DeviceName);
-        var snapshotImage = UseMemo(
-            () => snapshot == null
-                ? null
-                : ShellEditorBackdrop.CreateSnapshotImage(snapshot),
-            snapshot?.Version ?? 0L);
 
         var initialDraft = UseMemo(() => TrayConfig.Load().ToList(), Array.Empty<object>());
         var (draft, setDraft) = UseState(initialDraft);
@@ -144,9 +115,7 @@ class ShellEditorView : Component
                 setPreview(null);
         }
 
-        var targetVisualScale = geometry.TaskbarSurface is { } taskbarSurface
-            ? Math.Max(taskbarSurface.Scale / overlayScale, 0.25)
-            : 1;
+        const double targetVisualScale = 1;
 
         int InsertIndexFor(double x) =>
             Math.Clamp(
@@ -258,9 +227,8 @@ class ShellEditorView : Component
             ShellEditorWindow.CloseWithoutPrompt();
         }
 
-        // The target's design DIPs are scaled into the editor window's DIP
-        // space so it occupies the same physical taskbar pixels as the real
-        // tray, even when the two windows have different per-monitor DPI.
+        // The draft tray uses ordinary window DIPs. It no longer mirrors the
+        // physical taskbar's position or per-monitor scale.
         var chips = new List<Element>();
         for (var i = 0; i <= draft.Count; i++)
         {
@@ -409,7 +377,7 @@ class ShellEditorView : Component
             panelBody = FlexColumn(
                 Subtitle("Modules")
                     .HeadingLevel(AutomationHeadingLevel.Level2),
-                Body("Drag a shell to the taskbar target for exact placement, or click it to append.")
+                Body("Drag a shell to the Tray below for exact placement, or click it to append.")
                     .TextWrapping(TextWrapping.WrapWholeWords)
                     .Foreground(Theme.SecondaryText)
                     .Margin(0, 4, 0, 0),
@@ -444,70 +412,43 @@ class ShellEditorView : Component
                     .Margin(0, 16, 0, 0));
         }
 
-        var scrollBody = ScrollView(Border(panelBody).Padding(20))
-            .HorizontalContentAlignment(HorizontalAlignment.Stretch)
-            .Grid(row: 1, column: 0);
+        var scrollBody = ScrollView(Border(panelBody).Padding(24))
+            .HorizontalContentAlignment(HorizontalAlignment.Stretch);
 
         var header = Grid(
-                [GridSize.Star(), GridSize.Auto],
+                [GridSize.Star(), GridSize.Auto, GridSize.Auto, GridSize.Auto],
                 [GridSize.Auto],
                 [
                     FlexColumn(
                             Title("Edit Shells")
                                 .HeadingLevel(AutomationHeadingLevel.Level1),
-                            Caption("Arrange the icons at the taskbar target, then save and exit.")
+                            Caption("Choose modules and arrange the tray below, then save and exit.")
                                 .Foreground(Theme.SecondaryText)
                                 .Margin(0, 4, 0, 0))
                         .Grid(row: 0, column: 0),
-                    Button("✕", RequestCancel)
-                        .AutomationName("Close Shell editor")
-                        .HelpText("Cancel editing and close")
-                        .MinWidth(36)
+                    Caption(dirty ? "Unsaved changes" : "No changes")
+                        .Foreground(dirty && !highContrast
+                            ? Theme.SystemCaution
+                            : Theme.SecondaryText)
+                        .VAlign(VerticalAlignment.Center)
                         .Grid(row: 0, column: 1),
+                    Button("Cancel", RequestCancel)
+                        .AccessKey("C")
+                        .Margin(16, 0, 0, 0)
+                        .Grid(row: 0, column: 2),
+                    Button("Save and exit", SaveAndExit)
+                        .AccessKey("S")
+                        .ApplyStyle("AccentButtonStyle")
+                        .Margin(8, 0, 0, 0)
+                        .Grid(row: 0, column: 3),
                 ])
-            .Padding(20, 16, 16, 12)
-            .Grid(row: 0, column: 0);
-
-        var footer = Border(
-                Grid(
-                    [GridSize.Star(), GridSize.Auto, GridSize.Auto],
-                    [GridSize.Auto],
-                    [
-                        Caption(dirty ? "Unsaved changes" : "No changes")
-                            .Foreground(dirty && !highContrast
-                                ? Theme.SystemCaution
-                                : Theme.SecondaryText)
-                            .VAlign(VerticalAlignment.Center)
-                            .Grid(row: 0, column: 0),
-                        Button("Cancel", RequestCancel)
-                            .AccessKey("C")
-                            .Grid(row: 0, column: 1),
-                        Button("Save and exit", SaveAndExit)
-                            .AccessKey("S")
-                            .ApplyStyle("AccentButtonStyle")
-                            .Margin(8, 0, 0, 0)
-                            .Grid(row: 0, column: 2),
-                    ]))
-            .Padding(20, 12, 20, 12)
+            .Padding(24, 16, 24, 12)
             .Background(highContrast
                 ? Theme.Ref("SystemColorWindowColorBrush")
                 : Theme.LayerFill)
             .WithBorder(highContrast
                 ? Theme.Ref("SystemColorWindowTextColorBrush")
-                : Theme.DividerStroke, highContrast ? 2 : 1)
-            .Grid(row: 2, column: 0);
-
-        var editorScreen = geometry.EditorMonitor.MonitorRect;
-        var editorWidthDip = editorScreen.Width / overlayScale;
-        var editorHeightDip = editorScreen.Height / overlayScale;
-        var panelWidth = Math.Max(
-            360,
-            Math.Min(PanelDesiredWidth, editorWidthDip - 2 * PanelScreenMargin));
-        var panelHeight = Math.Max(
-            420,
-            Math.Min(PanelDesiredHeight, editorHeightDip - 2 * PanelScreenMargin));
-        var panelLeft = (editorWidthDip - panelWidth) / 2;
-        var panelTop = (editorHeightDip - panelHeight) / 2;
+                : Theme.DividerStroke, highContrast ? 2 : 1);
 
         var panelBackground = panelHot
             ? highContrast ? Theme.Ref("SystemColorWindowColorBrush") : Theme.SystemCriticalBackground
@@ -516,17 +457,12 @@ class ShellEditorView : Component
             ? highContrast ? Theme.Ref("SystemColorHighlightColorBrush") : Theme.SystemCritical
             : cardStroke;
 
-        var panel = (Border(
-                Grid(
-                    [GridSize.Star()],
-                    [GridSize.Auto, GridSize.Star(), GridSize.Auto],
-                    [header, scrollBody, footer])) with { CornerRadius = 12 })
-            .Width(panelWidth)
-            .Height(panelHeight)
+        var panel = (Border(scrollBody) with { CornerRadius = 12 })
             .Background(panelBackground)
             .WithBorder(panelStroke, panelHot || highContrast ? 2 : 1)
             .AutomationName("Shell editor")
             .Landmark(AutomationLandmarkType.Main)
+            .Margin(24, 12, 24, 12)
             .OnDragEnter(args =>
             {
                 if (TryGetPayload(args.Data, out var payload) && payload.InstanceId != null)
@@ -545,30 +481,27 @@ class ShellEditorView : Component
                 ClearPreview();
                 if (TryGetPayload(args.Data, out var payload) && payload.InstanceId != null)
                     RemoveInstance(payload.InstanceId);
-            })
-            .Canvas(panelLeft, panelTop);
+            });
 
-        double targetLeft;
-        double targetTop;
-        if (geometry.TaskbarSurface is { } targetSurface)
-        {
-            var targetRect = targetSurface.Place(targetWidthDesignDip);
-            targetLeft = (targetRect.Left - editorScreen.Left) / overlayScale;
-            targetTop = (targetRect.Top - editorScreen.Top) / overlayScale;
-        }
-        else
-        {
-            targetLeft = 8;
-            targetTop = editorHeightDip - targetHeightDip - 4;
-        }
-        targetLeft = Math.Clamp(
-            targetLeft,
-            0,
-            Math.Max(0, editorWidthDip - targetWidthDip));
-        targetTop = Math.Clamp(
-            targetTop,
-            0,
-            Math.Max(0, editorHeightDip - targetHeightDip));
+        var trayScroller = ScrollView(target)
+            .HorizontalContentAlignment(HorizontalAlignment.Left)
+            .Margin(0, 12, 0, 0);
+        var trayFooter = Border(
+                FlexColumn(
+                    Subtitle("Tray")
+                        .HeadingLevel(AutomationHeadingLevel.Level2),
+                    Body("Drag shells here to add or reorder them. Drag an existing shell back to Modules to remove it.")
+                        .TextWrapping(TextWrapping.WrapWholeWords)
+                        .Foreground(Theme.SecondaryText)
+                        .Margin(0, 4, 0, 0),
+                    trayScroller))
+            .Padding(24, 12, 24, 16)
+            .Background(highContrast
+                ? Theme.Ref("SystemColorWindowColorBrush")
+                : Theme.LayerFill)
+            .WithBorder(highContrast
+                ? Theme.Ref("SystemColorWindowTextColorBrush")
+                : Theme.DividerStroke, highContrast ? 2 : 1);
 
         var discardDialog = ContentDialog(
             "Discard changes?",
@@ -583,15 +516,22 @@ class ShellEditorView : Component
                 setDiscardDialogOpen(false);
                 if (result == ContentDialogResult.Primary)
                     ShellEditorWindow.CloseWithoutPrompt();
+                else
+                    ShellEditorWindow.CancelPendingSettingsOpen();
             },
         };
 
-        Element root = Canvas(
-                target.Canvas(targetLeft, targetTop),
-                panel,
-                discardDialog)
-            .Width(editorWidthDip)
-            .Height(editorHeightDip)
+        Element root = Grid(
+                [GridSize.Star()],
+                [GridSize.Auto, GridSize.Auto, GridSize.Star(), GridSize.Auto],
+                [
+                    TitleBar("Pagurian")
+                        .Grid(row: 0, column: 0),
+                    header.Grid(row: 1, column: 0),
+                    panel.Grid(row: 2, column: 0),
+                    trayFooter.Grid(row: 3, column: 0),
+                    discardDialog.Grid(row: 1, column: 0),
+                ])
             .OnKeyDown((_, args) =>
             {
                 if (args.Key != VirtualKey.Escape || discardDialogOpen)
@@ -599,9 +539,10 @@ class ShellEditorView : Component
 
                 args.Handled = true;
                 RequestCancel();
-            });
+            })
+            .Backdrop(BackdropKind.MicaAlt);
 
-        return ShellEditorBackdrop.Apply(root, snapshotImage, colorScheme);
+        return root;
     }
 
     private static Element TargetChip(

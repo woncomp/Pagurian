@@ -12,7 +12,7 @@ using static Microsoft.UI.Reactor.Factories;
 namespace Pagurian;
 
 // Host-level settings only. Tray membership and per-shell settings live in
-// the dedicated full-desktop ShellEditorView opened from the tray menu.
+// the dedicated ShellEditorView opened from the tray icon or its menu.
 class SettingsView : Component
 {
     public override Element Render()
@@ -109,7 +109,7 @@ class SettingsView : Component
                     FlexColumn(
                         Title("Settings")
                             .HeadingLevel(AutomationHeadingLevel.Level1),
-                        Body("Configure Pagurian host settings. Use Edit Shells from the tray menu to change the taskbar tray.")
+                        Body("Configure Pagurian host settings. Use Edit Shells to change the taskbar tray.")
                             .TextWrapping(TextWrapping.WrapWholeWords)
                             .Foreground(Theme.SecondaryText)
                             .Margin(0, 8, 0, 0),

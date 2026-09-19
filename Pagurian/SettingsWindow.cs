@@ -45,43 +45,18 @@ static class SettingsWindow
         catch { /* the native window may already be gone */ }
     }
 
-    // Preserve an already-open Settings surface while the always-on-top shell
-    // editor owns the desktop. Hiding keeps its unsaved TextBox state mounted.
-    internal static bool HideForShellEditor()
-    {
-        var existing = _window ?? ReactorApp.FindWindow(Key);
-        if (existing == null || !existing.IsVisible)
-            return false;
-
-        existing.Hide();
-        return true;
-    }
-
-    internal static void RestoreAfterShellEditor(bool restore)
-    {
-        if (!restore)
-            return;
-
-        var existing = _window ?? ReactorApp.FindWindow(Key);
-        if (existing == null)
-            return;
-
-        existing.Show();
-        existing.Activate();
-    }
-
     private static WindowSpec CreateSpec() => new()
     {
         Title = "Pagurian Settings",
-        Width = 780,
-        Height = 600,
+        Width = 1600,
+        Height = 900,
         Style = WindowStyle.Default,
         Backdrop = BackdropChoice.Of(BackdropKind.MicaAlt),
         ShowInTaskbar = true,
         ShowInSwitcher = true,
         NoActivate = false,
         IsMinimizable = true,
-        IsMaximizable = false,
+        IsMaximizable = true,
         ResizeMode = WindowResizeMode.CanResize,
         MinWidth = 620,
         MinHeight = 460,

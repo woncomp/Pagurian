@@ -74,7 +74,6 @@ static class TaskbarController
     private static string? _hoverCellKey; // cell under the cursor (null = outside)
     private static bool _pressed;
     private static bool _wasLeftButtonDown; // previous tick's button state, for click-edge detection
-    private static bool _shellEditorActive;
 
     // Tooltip dwell: the tooltip appears only after the cursor rests on a
     // cell for ~400 ms (native tooltip timing).
@@ -105,32 +104,6 @@ static class TaskbarController
     }
 
     public static void Stop() => _timer?.Stop();
-
-    // The shell editor covers the taskbar but pointer polling is global. Pause
-    // tray interaction while it is open so clicks on the editor's target do
-    // not leak through and invoke the real shells underneath.
-    public static void SetShellEditorActive(bool active)
-    {
-        if (_shellEditorActive == active)
-            return;
-
-        _shellEditorActive = active;
-        HideTooltip();
-        CloseBillboard();
-        _tooltipHoverKey = null;
-        _tooltipHoverTicks = 0;
-
-        if (_hoverCellKey != null)
-            TaskbarTrayWindow.HoverBrushFor(_hoverCellKey).Color =
-                TaskbarTrayWindow.HoverOverlayHidden;
-        _hoverCellKey = null;
-        _pressed = false;
-
-        // Seed the edge detector on both transitions. In particular, leaving
-        // the editor while the pointer button is still down must not dispatch
-        // a synthetic click to a shell.
-        _wasLeftButtonDown = TaskbarInterop.IsLeftButtonDown();
-    }
 
     // Keeps the theme and the hovered cell's overlay in sync with the sampled
     // taskbar colors. The theme flip (light/dark from sampled luminance) is
@@ -316,8 +289,7 @@ static class TaskbarController
         EnsureInjected();
         AnchorTrayWindow();
         UpdateBillboardInitialSizing();
-        if (!_shellEditorActive)
-            UpdateInteractions();
+        UpdateInteractions();
     }
 
     private static void EnsureInjected()

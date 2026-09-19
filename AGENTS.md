@@ -35,13 +35,13 @@ by the host project instead.)
 
 A WinUI 3 Fluent-style utility that (1) runs a system-tray icon with a
 native Win32 context menu ("Edit Shells…", "Settings…", and Quit;
-double-click still opens Settings), (2) injects a borderless **Tray** window
+double-click opens Edit Shells), (2) injects a borderless **Tray** window
 into the Windows taskbar (child of `Shell_TrayWnd`) that lays out **Shells**
 horizontally, each shell contributing zero or more **ShellCells**, (3) shows
 **Billboards** (detail panels) above the tray when cells are clicked,
 (4) receives messages for shells via `Pagurian.exe post {shell_id} <cmd>
 [args...]` (the Copilot CLI hooks are the primary caller), and (5) has a
-**Settings window** for host configuration plus a dedicated multi-monitor
+**Settings window** for host configuration plus a dedicated normal desktop
 **Shell editor** for editing tray contents (see `ShellEditorView.cs` below).
 
 Concepts:
@@ -94,8 +94,9 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   `ShutdownPolicy.Explicit`, `PagurianLog.Initialize()`, `ModuleLoader
   .LoadAll()`, `TrayShells.LoadFromConfig(TrayConfig.Load())`,
   `ShellMessageServer.Start()`, then tray icon + tray window + controller.
-  The settings window opens on tray-icon double-click or the tray menu's
-  "Settings…" item; "Edit Shells…" opens the full-desktop editor. Quit
+  The Shell editor opens on tray-icon double-click or the tray menu's
+  "Edit Shells…" item; "Settings…" opens the settings window. The two
+  configuration windows are mutually exclusive. Quit
   happens only via the tray menu:
   `TaskbarController.Stop()` → `ShellMessageServer.Stop()` →
   `ShellEditorWindow.CloseIfOpen()` → `SettingsWindow.CloseIfOpen()` →
@@ -129,25 +130,18 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   `ApplyConfig(entries)` reconciles the live set with a config list without
   restarting unchanged shells (kept by id when the kind still matches),
   reorders to the list order, and rebuilds cells once at the end.
-- `SettingsWindow.cs` / `SettingsView.cs` — the singleton host-settings
-  window: config-directory row (TextBox + folder picker →
+- `SettingsWindow.cs` / `SettingsView.cs` — the singleton 1600×900
+  host-settings window: config-directory row (TextBox + folder picker →
   `HostSettings.SetConfigDir` → config reload → `TrayShells.ApplyConfig`).
-- `ShellEditorWindow.cs` / `ShellEditorView.cs` — one topmost,
-  taskbar/Alt-Tab-hidden surface per physical display. The activated editor
-  surface lives on the display containing the primary `Shell_TrayWnd`; every
-  other display gets a non-activating, hit-testable backdrop surface. On
-  entry, each surface receives a one-shot physical-screen capture that is
-  downsampled and blurred off the UI thread, then displayed as an opaque
-  in-memory bitmap with a light theme scrim. The frozen backgrounds obscure
-  readable desktop content and taskbars without depending on system Acrylic.
-  The catalog and draft target share the primary surface so typed drag stays
-  within one HWND;
-  target coordinates map from the real taskbar anchor through
-  `TaskbarTrayPlacement` into that monitor's local DIPs. Drag or keyboard-add
-  from the module pool, reorder in the target, and remove back to the catalog.
-  Per-instance `ShellConfiguration` is hosted here. All changes stay in a
-  draft; Save and exit does `TrayConfig.Save` then `TrayShells.ApplyConfig`,
-  while cancel/close discards after confirmation. Icons:
+- `ShellEditorWindow.cs` / `ShellEditorView.cs` — the singleton 1600×900
+  normal desktop editor window. The module catalog or per-instance
+  `ShellConfiguration` occupies the scrollable center, while the draft Tray
+  remains fixed at the bottom and scrolls horizontally when needed. Drag or
+  keyboard-add from the module pool, reorder in the Tray, and remove back to
+  the catalog. All changes stay in a draft; Save and exit does
+  `TrayConfig.Save` then `TrayShells.ApplyConfig`, while cancel/close
+  discards after confirmation. Opening the editor closes Settings; requesting
+  Settings closes the editor through the same dirty-draft guard. Icons:
   `[Shell].PreviewIconPath` with `AppAssets.IconPath` fallback.
 - `PostBridge.cs` / `ShellMessageServer.cs` — the `post` pipeline. The bridge
   packs `{id, command, args, payload, receivedAt}` (stdin piped → payload,
@@ -234,10 +228,9 @@ public sealed class MyShell : Shell
   the live taskbar rect (48 DIP thickness ⇒ `taskbar.Height / 48` is the
   taskbar's own DPI scale), never from the window's `DipScale`.
 - **Screen reads block (~1 frame each) — never on the UI thread.** Capture
-  with one `BitBlt`/`StretchBlt` per region on a background thread, throttled
-  when sampling repeatedly, and apply via `UIDispatcher.TryEnqueue`. The Shell
-  editor's one-shot snapshots use a top-down 32-bit DIB and filter the reduced
-  frame off-thread. (History: per-pixel `GetPixel` loops
+  with one `BitBlt` per region on a background thread, throttle repeated
+  sampling, and apply via `UIDispatcher.TryEnqueue`. (History: per-pixel
+  `GetPixel` loops
   on the UI thread once wedged the whole taskbar because the cross-process
   `SetParent` attaches our input queue to Explorer's.)
 - **Taskbar rect**: `FindWindowW("Shell_TrayWnd")` + `GetWindowRect` first

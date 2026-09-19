@@ -32,45 +32,11 @@ static class TaskbarInterop
         public string? szDevice;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct BITMAPINFOHEADER
-    {
-        public uint biSize;
-        public int biWidth;
-        public int biHeight;
-        public ushort biPlanes;
-        public ushort biBitCount;
-        public uint biCompression;
-        public uint biSizeImage;
-        public int biXPelsPerMeter;
-        public int biYPelsPerMeter;
-        public uint biClrUsed;
-        public uint biClrImportant;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct BITMAPINFO
-    {
-        public BITMAPINFOHEADER bmiHeader;
-        public uint bmiColors;
-    }
-
     public readonly record struct DisplayMonitor(
         string DeviceName,
         RECT MonitorRect,
         RECT WorkRect,
         bool IsPrimary);
-
-    public readonly record struct ScreenCapture(
-        int Width,
-        int Height,
-        byte[] Bgra);
-
-    private delegate bool MonitorEnumProc(
-        IntPtr hMonitor,
-        IntPtr hdcMonitor,
-        ref RECT monitorRect,
-        IntPtr data);
 
     public const int GWL_STYLE = -16;
     public const int WS_POPUP = unchecked((int)0x80000000);
@@ -118,13 +84,6 @@ static class TaskbarInterop
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromRect(ref RECT lprc, uint dwFlags);
 
-    [DllImport("user32.dll")]
-    private static extern bool EnumDisplayMonitors(
-        IntPtr hdc,
-        IntPtr clipRect,
-        MonitorEnumProc callback,
-        IntPtr data);
-
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern bool GetMonitorInfoW(IntPtr hMonitor, ref MONITORINFOEX lpmi);
 
@@ -163,33 +122,10 @@ static class TaskbarInterop
         int width, int height, IntPtr hdcSrc, int xSrc, int ySrc, uint rop);
 
     [DllImport("gdi32.dll")]
-    private static extern bool StretchBlt(
-        IntPtr hdcDest,
-        int xDest,
-        int yDest,
-        int widthDest,
-        int heightDest,
-        IntPtr hdcSrc,
-        int xSrc,
-        int ySrc,
-        int widthSrc,
-        int heightSrc,
-        uint rop);
-
-    [DllImport("gdi32.dll")]
     private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
 
     [DllImport("gdi32.dll")]
     private static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int width, int height);
-
-    [DllImport("gdi32.dll")]
-    private static extern IntPtr CreateDIBSection(
-        IntPtr hdc,
-        ref BITMAPINFO bitmapInfo,
-        uint usage,
-        out IntPtr bits,
-        IntPtr section,
-        uint offset);
 
     [DllImport("gdi32.dll")]
     private static extern IntPtr SelectObject(IntPtr hdc, IntPtr h);
@@ -200,127 +136,7 @@ static class TaskbarInterop
     [DllImport("gdi32.dll")]
     private static extern bool DeleteDC(IntPtr hdc);
 
-    [DllImport("gdi32.dll")]
-    private static extern int SetStretchBltMode(IntPtr hdc, int mode);
-
-    [DllImport("gdi32.dll")]
-    private static extern bool SetBrushOrgEx(
-        IntPtr hdc,
-        int x,
-        int y,
-        out POINT previousOrigin);
-
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmFlush();
-
     private const uint SRCCOPY = 0x00CC0020;
-    private const uint CAPTUREBLT = 0x40000000;
-    private const uint BI_RGB = 0;
-    private const uint DIB_RGB_COLORS = 0;
-    private const int HALFTONE = 4;
-    private static readonly IntPtr HGDI_ERROR = new(-1);
-
-    public static bool FlushDesktopComposition()
-    {
-        try { return DwmFlush() >= 0; }
-        catch { return false; }
-    }
-
-    // Captures a physical screen rectangle directly into a smaller, top-down
-    // 32-bit DIB. Downsampling in StretchBlt avoids allocating a full-size
-    // frame for the Shell editor's deliberately blurred snapshot.
-    public static ScreenCapture? CaptureScreenRegionScaled(
-        RECT source,
-        int downsampleFactor)
-    {
-        if (source.Width <= 0 || source.Height <= 0 || downsampleFactor <= 0)
-            return null;
-
-        var width = Math.Max(1, (source.Width + downsampleFactor - 1) / downsampleFactor);
-        var height = Math.Max(1, (source.Height + downsampleFactor - 1) / downsampleFactor);
-        var screen = GetDC(IntPtr.Zero);
-        if (screen == IntPtr.Zero)
-            return null;
-
-        IntPtr memory = IntPtr.Zero;
-        IntPtr bitmap = IntPtr.Zero;
-        IntPtr previous = IntPtr.Zero;
-        try
-        {
-            memory = CreateCompatibleDC(screen);
-            if (memory == IntPtr.Zero)
-                return null;
-
-            var bitmapInfo = new BITMAPINFO
-            {
-                bmiHeader = new BITMAPINFOHEADER
-                {
-                    biSize = (uint)Marshal.SizeOf<BITMAPINFOHEADER>(),
-                    biWidth = width,
-                    biHeight = -height,
-                    biPlanes = 1,
-                    biBitCount = 32,
-                    biCompression = BI_RGB,
-                    biSizeImage = checked((uint)(width * height * 4)),
-                },
-            };
-
-            bitmap = CreateDIBSection(
-                screen,
-                ref bitmapInfo,
-                DIB_RGB_COLORS,
-                out var bits,
-                IntPtr.Zero,
-                0);
-            if (bitmap == IntPtr.Zero || bits == IntPtr.Zero)
-                return null;
-
-            previous = SelectObject(memory, bitmap);
-            if (previous == IntPtr.Zero || previous == HGDI_ERROR)
-            {
-                previous = IntPtr.Zero;
-                return null;
-            }
-
-            SetStretchBltMode(memory, HALFTONE);
-            SetBrushOrgEx(memory, 0, 0, out _);
-            if (!StretchBlt(
-                    memory,
-                    0,
-                    0,
-                    width,
-                    height,
-                    screen,
-                    source.Left,
-                    source.Top,
-                    source.Width,
-                    source.Height,
-                    SRCCOPY | CAPTUREBLT))
-            {
-                return null;
-            }
-
-            var bgra = new byte[checked(width * height * 4)];
-            Marshal.Copy(bits, bgra, 0, bgra.Length);
-            for (var i = 3; i < bgra.Length; i += 4)
-                bgra[i] = 255;
-            return new ScreenCapture(width, height, bgra);
-        }
-        catch (OverflowException)
-        {
-            return null;
-        }
-        finally
-        {
-            if (previous != IntPtr.Zero && memory != IntPtr.Zero)
-                SelectObject(memory, previous);
-            if (bitmap != IntPtr.Zero)
-                DeleteObject(bitmap);
-            if (memory != IntPtr.Zero)
-                DeleteDC(memory);
-            ReleaseDC(IntPtr.Zero, screen);
-        }
-    }
 
     // Captures a physical-pixel screen region as RGBA bytes (row-major, top-down)
     // with a single BitBlt into a memory DC.
@@ -588,42 +404,6 @@ static class TaskbarInterop
 
     public static POINT GetCursorPosition() =>
         GetCursorPos(out var p) ? p : default;
-
-    // Enumerates every active physical display in screen coordinates. Device
-    // names (for example \\.\DISPLAY1) remain stable while rectangles move,
-    // making them suitable keys for the Shell editor's overlay windows.
-    public static bool TryGetDisplayMonitors(out DisplayMonitor[] monitors)
-    {
-        var found = new List<DisplayMonitor>();
-        var complete = true;
-        MonitorEnumProc callback = (
-            IntPtr monitor,
-            IntPtr monitorDc,
-            ref RECT monitorRect,
-            IntPtr data) =>
-        {
-            if (TryReadDisplayMonitor(monitor, out var display))
-                found.Add(display);
-            else
-                complete = false;
-            return true;
-        };
-
-        var enumerated = EnumDisplayMonitors(
-            IntPtr.Zero,
-            IntPtr.Zero,
-            callback,
-            IntPtr.Zero);
-        GC.KeepAlive(callback);
-
-        monitors = found
-            .OrderByDescending(display => display.IsPrimary)
-            .ThenBy(display => display.MonitorRect.Top)
-            .ThenBy(display => display.MonitorRect.Left)
-            .ThenBy(display => display.DeviceName, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        return enumerated && complete && monitors.Length > 0;
-    }
 
     // Resolves the display containing (or nearest to) a physical screen rect.
     public static bool TryGetDisplayMonitor(in RECT screenRect, out DisplayMonitor display)

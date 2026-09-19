@@ -40,7 +40,7 @@ ReactorApp.Run(_ =>
 
     TaskbarController.Start(trayWindow);
 
-    tray.DoubleClick += (_, _) => SettingsWindow.OpenOrActivate();
+    tray.DoubleClick += (_, _) => ShellEditorWindow.OpenOrActivate();
 
     tray.RightClick += (_, _) =>
     {
@@ -52,7 +52,7 @@ ReactorApp.Run(_ =>
         }
         if (cmd == TaskbarInterop.SettingsCommandId)
         {
-            SettingsWindow.OpenOrActivate();
+            ShellEditorWindow.OpenSettingsOrActivate();
             return;
         }
         if (cmd != TaskbarInterop.QuitCommandId)
