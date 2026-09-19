@@ -3,44 +3,73 @@ using Microsoft.UI.Reactor.Core;
 
 namespace Pagurian;
 
-// Owns the singleton settings window: opened from the tray icon's
-// double-click or its context menu, re-activated when already open, and
-// closed as part of the quit sequence so the view never observes torn-down
-// module state.
+internal enum SettingsPage
+{
+    Shells,
+    General,
+}
+
+// Owns the singleton paged settings window. Callers choose the page to show;
+// repeated requests navigate and activate the existing window.
 static class SettingsWindow
 {
     private static readonly WindowKey Key = WindowKey.Of("pagurian-settings");
     private static ReactorWindow? _window;
+    private static SettingsPage _requestedPage = SettingsPage.General;
+    private static bool _allowClose;
 
-    // For HWND-needing dialogs (the folder picker) owned by this window.
     internal static Microsoft.UI.WindowId? AppWindowId => _window?.AppWindow.Id;
+    internal static SettingsPage RequestedPage => _requestedPage;
+    internal static bool AllowClose => _allowClose;
+    internal static event Action<SettingsPage>? PageRequested;
 
-    public static void OpenOrActivate()
+    public static void OpenOrActivate(SettingsPage page = SettingsPage.General)
     {
+        _requestedPage = page;
         var existing = _window ?? ReactorApp.FindWindow(Key);
         if (existing != null)
         {
+            _window = existing;
+            PageRequested?.Invoke(page);
             existing.Activate();
             return;
         }
 
+        _allowClose = false;
         var window = ReactorApp.OpenWindow(CreateSpec(), () => new SettingsView());
+        _window = window;
         window.Closed += (_, _) =>
         {
-            if (ReferenceEquals(_window, window))
-                _window = null;
+            if (!ReferenceEquals(_window, window))
+                return;
+
+            _window = null;
+            _allowClose = false;
+            PagurianLog.Host("settings: window closed");
         };
-        _window = window;
         window.Show();
-        PagurianLog.Host("settings: window opened");
+        window.Activate();
+        PagurianLog.Host($"settings: window opened page={page}");
+    }
+
+    internal static void RequestClose() => _window?.Close();
+
+    // Used after an explicit discard confirmation. Queueing avoids closing
+    // the native window from inside ContentDialog teardown.
+    internal static void CloseWithoutPrompt()
+    {
+        _allowClose = true;
+        ReactorApp.UIDispatcher?.TryEnqueue(() => _window?.Close());
     }
 
     public static void CloseIfOpen()
     {
+        _allowClose = true;
         var existing = _window ?? ReactorApp.FindWindow(Key);
         _window = null;
         if (existing == null)
             return;
+
         try { existing.Close(); }
         catch { /* the native window may already be gone */ }
     }
@@ -58,8 +87,8 @@ static class SettingsWindow
         IsMinimizable = true,
         IsMaximizable = true,
         ResizeMode = WindowResizeMode.CanResize,
-        MinWidth = 620,
-        MinHeight = 460,
+        MinWidth = 800,
+        MinHeight = 600,
         Level = WindowLevel.Normal,
         StartPosition = WindowStartPosition.CenterOnPrimary,
         Key = Key,

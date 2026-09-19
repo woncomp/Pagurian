@@ -41,8 +41,8 @@ horizontally, each shell contributing zero or more **ShellCells**, (3) shows
 **Billboards** (detail panels) above the tray when cells are clicked,
 (4) receives messages for shells via `Pagurian.exe post {shell_id} <cmd>
 [args...]` (the Copilot CLI hooks are the primary caller), and (5) has a
-**Settings window** for host configuration plus a dedicated normal desktop
-**Shell editor** for editing tray contents (see `ShellEditorView.cs` below).
+single paged **Settings window** for both host configuration and Shell
+editing.
 
 Concepts:
 
@@ -94,12 +94,12 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   `ShutdownPolicy.Explicit`, `PagurianLog.Initialize()`, `ModuleLoader
   .LoadAll()`, `TrayShells.LoadFromConfig(TrayConfig.Load())`,
   `ShellMessageServer.Start()`, then tray icon + tray window + controller.
-  The Shell editor opens on tray-icon double-click or the tray menu's
-  "Edit Shells…" item; "Settings…" opens the settings window. The two
-  configuration windows are mutually exclusive. Quit
+  The Settings window opens on the Shells page from tray-icon double-click or
+  the tray menu's "Edit Shells…" item; "Settings…" opens the same window on
+  its General page. Quit
   happens only via the tray menu:
   `TaskbarController.Stop()` → `ShellMessageServer.Stop()` →
-  `ShellEditorWindow.CloseIfOpen()` → `SettingsWindow.CloseIfOpen()` →
+  `SettingsWindow.CloseIfOpen()` →
   `TrayShells.ShutdownAll()` →
   `ModuleLoader.ShutdownAll()` → `tray.Close()` → `ReactorApp.Exit(0)` →
   `Environment.Exit(0)` (the last call is required).
@@ -131,17 +131,16 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   restarting unchanged shells (kept by id when the kind still matches),
   reorders to the list order, and rebuilds cells once at the end.
 - `SettingsWindow.cs` / `SettingsView.cs` — the singleton 1600×900
-  host-settings window: config-directory row (TextBox + folder picker →
+  Settings window and its `NavigationView` root. The General page owns the
+  config-directory row (TextBox + folder picker →
   `HostSettings.SetConfigDir` → config reload → `TrayShells.ApplyConfig`).
-- `ShellEditorWindow.cs` / `ShellEditorView.cs` — the singleton 1600×900
-  normal desktop editor window. The module catalog or per-instance
-  `ShellConfiguration` occupies the scrollable center, while the draft Tray
-  remains fixed at the bottom and scrolls horizontally when needed. Drag or
-  keyboard-add from the module pool, reorder in the Tray, and remove back to
-  the catalog. All changes stay in a draft; Save and exit does
-  `TrayConfig.Save` then `TrayShells.ApplyConfig`, while cancel/close
-  discards after confirmation. Opening the editor closes Settings; requesting
-  Settings closes the editor through the same dirty-draft guard. Icons:
+  The Shells page keeps the module catalog or per-instance
+  `ShellConfiguration` in the scrollable center, with the draft Tray fixed
+  at the bottom and horizontally scrollable. Drag or keyboard-add from the
+  module pool, reorder in the Tray, and remove back to the catalog. The draft
+  survives page switches; Save does `TrayConfig.Save` then
+  `TrayShells.ApplyConfig`, Revert reloads it, and closing the window
+  discards only after confirmation. Icons:
   `[Shell].PreviewIconPath` with `AppAssets.IconPath` fallback.
 - `PostBridge.cs` / `ShellMessageServer.cs` — the `post` pipeline. The bridge
   packs `{id, command, args, payload, receivedAt}` (stdin piped → payload,

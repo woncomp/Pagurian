@@ -40,19 +40,19 @@ ReactorApp.Run(_ =>
 
     TaskbarController.Start(trayWindow);
 
-    tray.DoubleClick += (_, _) => ShellEditorWindow.OpenOrActivate();
+    tray.DoubleClick += (_, _) => SettingsWindow.OpenOrActivate(SettingsPage.Shells);
 
     tray.RightClick += (_, _) =>
     {
         var cmd = TaskbarInterop.ShowTrayMenu(TaskbarController.TrayWindowHwnd());
         if (cmd == TaskbarInterop.EditShellsCommandId)
         {
-            ShellEditorWindow.OpenOrActivate();
+            SettingsWindow.OpenOrActivate(SettingsPage.Shells);
             return;
         }
         if (cmd == TaskbarInterop.SettingsCommandId)
         {
-            ShellEditorWindow.OpenSettingsOrActivate();
+            SettingsWindow.OpenOrActivate(SettingsPage.General);
             return;
         }
         if (cmd != TaskbarInterop.QuitCommandId)
@@ -63,7 +63,6 @@ ReactorApp.Run(_ =>
         // the WinUI unwind has been kicked off.
         TaskbarController.Stop();
         ShellMessageServer.Stop();
-        ShellEditorWindow.CloseIfOpen();
         SettingsWindow.CloseIfOpen();
         TrayShells.ShutdownAll();
         ModuleLoader.ShutdownAll();
