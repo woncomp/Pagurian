@@ -349,6 +349,17 @@ class SettingsView : Component
         void BeginTrayDrag(string instanceId)
         {
             activeTrayDragRef.Current = instanceId;
+            var payload = ShellDragPayload.ForInstance(instanceId);
+            var sourceIndex = SourceIndexFor(payload, draftRef.Current);
+            if (sourceIndex >= 0)
+            {
+                // Start in the no-op position so the source stays visible until
+                // the pointer actually crosses an insertion boundary.
+                SetDragSessionState(new ShellDragSession(
+                    payload,
+                    ShellDropZone.Tray,
+                    sourceIndex));
+            }
             var queued = Microsoft.UI.Dispatching.DispatcherQueue
                 .GetForCurrentThread()
                 .TryEnqueue(() =>
@@ -378,6 +389,20 @@ class SettingsView : Component
                     return index;
             }
             return -1;
+        }
+
+        bool IsOriginalTrayPosition(
+            ShellDragSession? session,
+            IReadOnlyList<TrayConfig.Entry> entries)
+        {
+            if (session is not { Zone: ShellDropZone.Tray } ||
+                session.Payload.InstanceId == null)
+            {
+                return false;
+            }
+
+            var sourceIndex = SourceIndexFor(session.Payload, entries);
+            return sourceIndex >= 0 && session.CandidateIndex == sourceIndex;
         }
 
         int CandidateIndexFor(
@@ -787,9 +812,12 @@ class SettingsView : Component
                 setDirText(path);
         }
 
-        // Drag hover never projects a new ordering. The original draft layout
-        // remains stable; an active Tray source becomes transparent while a
-        // non-layout insertion marker is overlaid between the remaining icons.
+        // Drag hover never projects a new ordering. At the no-op insertion
+        // position the source remains visible at half opacity; after crossing
+        // another boundary it becomes transparent and a non-layout insertion
+        // marker is overlaid.
+        var trayDragAtOriginalPosition =
+            IsOriginalTrayPosition(dragSession, draft);
         var chips = draft
             .Select((entry, index) => TargetChip(
                 entry,
@@ -807,7 +835,9 @@ class SettingsView : Component
                 highContrast,
                 reduceMotion,
                 targetVisualScale,
-                activeTrayDragId == entry.Id))
+                activeTrayDragId != entry.Id
+                    ? 1
+                    : trayDragAtOriginalPosition ? 0.5 : 0))
             .ToArray();
 
         Element trayIcons = chips.Length == 0
@@ -819,7 +849,8 @@ class SettingsView : Component
                 .VAlign(VerticalAlignment.Center);
 
         Element targetContent = trayIcons;
-        if (dragSession is { Zone: ShellDropZone.Tray } trayDrag)
+        if (dragSession is { Zone: ShellDropZone.Tray } trayDrag &&
+            !IsOriginalTrayPosition(trayDrag, draft))
         {
             var insertionIndex = Math.Clamp(
                 trayDrag.CandidateIndex,
@@ -1234,7 +1265,7 @@ class SettingsView : Component
         bool highContrast,
         bool reduceMotion,
         double scale,
-        bool hidden)
+        double opacity)
     {
         var known = ModuleLoader.TryGetKind(entry.ShellType, out _);
         var name = NameFor(entry.ShellType);
@@ -1299,8 +1330,10 @@ class SettingsView : Component
 
         var tooltip = $"{tip}\nDrag to reorder, or drop onto the Modules panel to remove.";
         Element chip = WithInstantTooltip(chipBase, tooltip);
-        if (hidden)
+        if (opacity <= 0)
             chip = chip.Opacity(0).AccessibilityHidden();
+        else if (opacity < 1)
+            chip = chip.Opacity(opacity);
         return chip.WithKey(entry.Id);
     }
 
