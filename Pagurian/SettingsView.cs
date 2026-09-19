@@ -245,7 +245,6 @@ class SettingsView : Component
 
         var colorScheme = UseColorScheme();
         var highContrastScheme = UseHighContrastScheme();
-        var reduceMotion = UseReducedMotion();
         var (initialFocusRef, requestInitialFocus) = this.UseElementFocus();
         UseEffect(() =>
         {
@@ -670,10 +669,10 @@ class SettingsView : Component
                     setSelectedId(null);
             }
 
-            if (reduceMotion)
-                Commit();
-            else
-                Animations.Animate(AnimationKind.Spring, Commit);
+            // StartDragAsync still owns the dragged element while OnDrop runs.
+            // A keyed Spring move would claim that same Composition Visual and
+            // can leave stale offsets or opacity behind, so commit directly.
+            Commit();
         }
 
         autoScrollTickRef.Current = () =>
