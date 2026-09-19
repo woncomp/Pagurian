@@ -5,17 +5,15 @@ using Pagurian.Sdk;
 
 namespace Pagurian;
 
-// Theme service for module configuration views hosted inside Settings. Unlike
-// ThemeService (which deliberately follows sampled taskbar pixels), this one
-// follows the effective Windows theme of the settings surface, including High
-// Contrast. This keeps third-party configuration views on the same visual
-// surface as the host without changing the public SDK shape.
-sealed class SettingsThemeService : IThemeService
+// Theme service for module-owned ShellConfiguration views. Unlike the live
+// tray theme, it follows the effective Windows theme of the editor surface,
+// including High Contrast.
+sealed class ConfigurationThemeService : IThemeService
 {
     private ColorScheme _scheme;
     private string? _highContrastScheme;
 
-    public SettingsThemeService(ColorScheme scheme, string? highContrastScheme)
+    public ConfigurationThemeService(ColorScheme scheme, string? highContrastScheme)
     {
         _scheme = scheme;
         _highContrastScheme = highContrastScheme;

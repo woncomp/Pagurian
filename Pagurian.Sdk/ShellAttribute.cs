@@ -16,7 +16,7 @@ public class ShellAttribute : Attribute
     public string DisplayName { get; init; } = "";
 
     // Optional module-owned Reactor component shown when this shell kind is
-    // selected in the host Settings window. The loader validates that the
+    // selected in the host Shell editor. The loader validates that the
     // type is a concrete ShellConfiguration subclass.
     public Type? ConfigurationView { get; init; }
 

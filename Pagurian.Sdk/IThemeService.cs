@@ -4,7 +4,7 @@ namespace Pagurian.Sdk;
 
 // The host-derived theme for the surface currently rendering module UI.
 // Shells, cells, and billboards receive the taskbar-derived theme; shell
-// configuration views receive the Settings window's effective Windows theme.
+// configuration views receive their editor's effective Windows theme.
 public interface IThemeService
 {
     // True when the current host surface is dark.

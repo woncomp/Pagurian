@@ -45,6 +45,11 @@ ReactorApp.Run(_ =>
     tray.RightClick += (_, _) =>
     {
         var cmd = TaskbarInterop.ShowTrayMenu(TaskbarController.TrayWindowHwnd());
+        if (cmd == TaskbarInterop.EditShellsCommandId)
+        {
+            ShellEditorWindow.OpenOrActivate();
+            return;
+        }
         if (cmd == TaskbarInterop.SettingsCommandId)
         {
             SettingsWindow.OpenOrActivate();
@@ -58,6 +63,7 @@ ReactorApp.Run(_ =>
         // the WinUI unwind has been kicked off.
         TaskbarController.Stop();
         ShellMessageServer.Stop();
+        ShellEditorWindow.CloseIfOpen();
         SettingsWindow.CloseIfOpen();
         TrayShells.ShutdownAll();
         ModuleLoader.ShutdownAll();

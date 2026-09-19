@@ -25,7 +25,15 @@ static class TaskbarInterop
     public const int WS_CHILD = 0x40000000;
     public const uint SWP_NOACTIVATE = 0x0010;
     public static readonly IntPtr HWND_TOP = IntPtr.Zero;
+    public static readonly IntPtr HWND_TOPMOST = new(-1);
     public const int GA_PARENT = 1;
+
+    private const int SM_CXSCREEN = 0;
+    private const int SM_CYSCREEN = 1;
+    private const int SM_XVIRTUALSCREEN = 76;
+    private const int SM_YVIRTUALSCREEN = 77;
+    private const int SM_CXVIRTUALSCREEN = 78;
+    private const int SM_CYVIRTUALSCREEN = 79;
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr FindWindowW(string? lpClassName, string? lpWindowName);
@@ -49,6 +57,9 @@ static class TaskbarInterop
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
         int X, int Y, int cx, int cy, uint uFlags);
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int nIndex);
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
     private static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
@@ -216,6 +227,7 @@ static class TaskbarInterop
 
     public const int QuitCommandId = 1;
     public const int SettingsCommandId = 2;
+    public const int EditShellsCommandId = 3;
 
     private const uint MF_STRING = 0x0000;
     private const uint MF_SEPARATOR = 0x0800;
@@ -242,7 +254,7 @@ static class TaskbarInterop
     [DllImport("user32.dll")]
     private static extern bool PostMessageW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
-    // Shows a regular Win32 context menu ("Settings…", separator, "Quit") at
+    // Shows the regular Win32 context menu at
     // the cursor and returns the selected command id, or 0 when the menu was
     // dismissed. Blocks while the menu is open, like every classic tray app.
     public static int ShowTrayMenu(IntPtr owner)
@@ -253,6 +265,7 @@ static class TaskbarInterop
             return 0;
         try
         {
+            AppendMenuW(menu, MF_STRING, (IntPtr)EditShellsCommandId, "Edit Shells…");
             AppendMenuW(menu, MF_STRING, (IntPtr)SettingsCommandId, "Settings…");
             AppendMenuW(menu, MF_SEPARATOR, IntPtr.Zero, null!);
             AppendMenuW(menu, MF_STRING, (IntPtr)QuitCommandId, "Quit");
@@ -365,6 +378,42 @@ static class TaskbarInterop
 
     public static POINT GetCursorPosition() =>
         GetCursorPos(out var p) ? p : default;
+
+    // Physical-pixel rectangles for the whole virtual desktop and the
+    // primary display. Secondary displays may extend the virtual desktop
+    // into negative coordinates; the primary display starts at (0, 0).
+    public static bool TryGetDesktopRects(out RECT virtualScreen, out RECT primaryScreen)
+    {
+        var virtualWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        var virtualHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        var primaryWidth = GetSystemMetrics(SM_CXSCREEN);
+        var primaryHeight = GetSystemMetrics(SM_CYSCREEN);
+        if (virtualWidth <= 0 || virtualHeight <= 0 ||
+            primaryWidth <= 0 || primaryHeight <= 0)
+        {
+            virtualScreen = default;
+            primaryScreen = default;
+            return false;
+        }
+
+        var virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        var virtualTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        virtualScreen = new RECT
+        {
+            Left = virtualLeft,
+            Top = virtualTop,
+            Right = virtualLeft + virtualWidth,
+            Bottom = virtualTop + virtualHeight,
+        };
+        primaryScreen = new RECT
+        {
+            Left = 0,
+            Top = 0,
+            Right = primaryWidth,
+            Bottom = primaryHeight,
+        };
+        return true;
+    }
 
     public static void ShowMessage(string text, string caption) =>
         MessageBoxW(IntPtr.Zero, text, caption, 0x00000040); // MB_ICONINFORMATION

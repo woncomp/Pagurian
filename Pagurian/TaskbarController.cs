@@ -61,6 +61,7 @@ static class TaskbarController
     private static string? _hoverCellKey; // cell under the cursor (null = outside)
     private static bool _pressed;
     private static bool _wasLeftButtonDown; // previous tick's button state, for click-edge detection
+    private static bool _shellEditorActive;
 
     // Tooltip dwell: the tooltip appears only after the cursor rests on a
     // cell for ~400 ms (native tooltip timing).
@@ -91,6 +92,32 @@ static class TaskbarController
     }
 
     public static void Stop() => _timer?.Stop();
+
+    // The shell editor covers the taskbar but pointer polling is global. Pause
+    // tray interaction while it is open so clicks on the editor's target do
+    // not leak through and invoke the real shells underneath.
+    public static void SetShellEditorActive(bool active)
+    {
+        if (_shellEditorActive == active)
+            return;
+
+        _shellEditorActive = active;
+        HideTooltip();
+        CloseBillboard();
+        _tooltipHoverKey = null;
+        _tooltipHoverTicks = 0;
+
+        if (_hoverCellKey != null)
+            TaskbarTrayWindow.HoverBrushFor(_hoverCellKey).Color =
+                TaskbarTrayWindow.HoverOverlayHidden;
+        _hoverCellKey = null;
+        _pressed = false;
+
+        // Seed the edge detector on both transitions. In particular, leaving
+        // the editor while the pointer button is still down must not dispatch
+        // a synthetic click to a shell.
+        _wasLeftButtonDown = TaskbarInterop.IsLeftButtonDown();
+    }
 
     // Keeps the theme and the hovered cell's overlay in sync with the sampled
     // taskbar colors. The theme flip (light/dark from sampled luminance) is
@@ -275,7 +302,8 @@ static class TaskbarController
 
         EnsureInjected();
         AnchorTrayWindow();
-        UpdateInteractions();
+        if (!_shellEditorActive)
+            UpdateInteractions();
     }
 
     private static void EnsureInjected()
@@ -357,10 +385,11 @@ static class TaskbarController
 
     private static void AnchorTrayWindow()
     {
-        if (!TaskbarInterop.TryGetTaskbarContentRect(out var taskbar))
+        if (!TaskbarTrayPlacement.TryGetSurface(out var surface))
             return;
-        if (!TaskbarInterop.TryGetTaskbarRect(out var taskbarParent))
-            return;
+
+        var taskbar = surface.ContentRect;
+        var taskbarParent = surface.ParentRect;
 
         // Ignore transient bogus rects (display topology changes, Explorer
         // restarts): keep the last good anchor instead of jumping off-taskbar.
@@ -373,44 +402,16 @@ static class TaskbarController
         // and size the tray straight from the taskbar rect, minus a small
         // vertical inset: winH < taskbar.Height always, so the tray can never
         // stick out of the taskbar, whatever DPI it believes it is on.
-        var horizontal = taskbar.Width >= taskbar.Height;
-        var scale = (horizontal ? taskbar.Height : taskbar.Width) / TaskbarTrayWindow.WindowHeightDip;
+        var scale = surface.Scale;
         var windowScale = ScaleOf(_trayWindow!);
         TaskbarTrayWindow.SetContentScale(scale / windowScale);
         var totalWidthDip = TaskbarTrayLayout.TotalWidthDip;
         TaskbarTrayLayout.ReportMeasuredWidth(totalWidthDip);
-        // ≥1 px even before the first layout pass (cells read 0 wide until
-        // then): never hand SetWindowPos a 0-sized window.
-        var winW = Math.Max(totalWidthDip * scale, 1);
-        var winH = (TaskbarTrayWindow.WindowHeightDip - 2 * TaskbarTrayWindow.WindowInsetYDip) * scale;
-
-        double xPx, yPx;
-        if (horizontal)
-        {
-            // Horizontal taskbar: hug its left edge, centered vertically
-            // (2 DIP clear of the top/bottom edges via WindowInsetYDip).
-            xPx = taskbar.Left + 8 * scale;
-            yPx = taskbar.Top + (taskbar.Height - winH) / 2;
-        }
-        else
-        {
-            // Vertical taskbar: hug its bottom edge, centered horizontally.
-            xPx = taskbar.Left + (taskbar.Width - winW) / 2;
-            yPx = taskbar.Bottom - winH - 8 * scale;
-        }
-
-        // Belt and braces: clamp inside the taskbar so a stale rect or DPI
-        // mismatch can never leave the tray covering the taskbar's edge.
-        xPx = Math.Clamp(xPx, taskbar.Left, Math.Max(taskbar.Left, taskbar.Right - winW));
-        yPx = Math.Clamp(yPx, taskbar.Top, Math.Max(taskbar.Top, taskbar.Bottom - winH));
-
-        _trayRectPx = new TaskbarInterop.RECT
-        {
-            Left = (int)xPx,
-            Top = (int)yPx,
-            Right = (int)(xPx + winW),
-            Bottom = (int)(yPx + winH),
-        };
+        _trayRectPx = surface.Place(totalWidthDip);
+        var xPx = (double)_trayRectPx.Left;
+        var yPx = (double)_trayRectPx.Top;
+        var winW = (double)_trayRectPx.Width;
+        var winH = (double)_trayRectPx.Height;
 
         // Per-cell hit-test rects, left to right in the layout's order (the
         // same order the window renders them).

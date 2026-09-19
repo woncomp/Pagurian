@@ -16,7 +16,7 @@ namespace Pagurian;
 // source of tray membership. The file lives in the configured config folder
 // (HostSettings.ConfigDir; default %LOCALAPPDATA%\Pagurian). A missing file
 // is seeded with just the Hello shell; an existing file is only ever
-// modified through Save (the settings UI), never on load.
+// modified through Save (the Shell editor), never on load.
 static class TrayConfig
 {
     public sealed record Entry(string ShellType, string Id, JsonElement? Settings);
@@ -86,7 +86,7 @@ static class TrayConfig
 
     // Persists the tray entries (config folder created on demand). Writes to
     // a temp file first, then atomically replaces the target. Throws on
-    // failure (after logging) so the settings UI can surface the error.
+    // failure (after logging) so the Shell editor can surface the error.
     public static void Save(IReadOnlyList<Entry> entries)
     {
         try

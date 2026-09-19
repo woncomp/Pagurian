@@ -34,15 +34,15 @@ by the host project instead.)
 ## What this app is
 
 A WinUI 3 Fluent-style utility that (1) runs a system-tray icon with a
-native Win32 context menu ("Settings…" + Quit; double-click also opens
-Settings), (2) injects a borderless **Tray** window
+native Win32 context menu ("Edit Shells…", "Settings…", and Quit;
+double-click still opens Settings), (2) injects a borderless **Tray** window
 into the Windows taskbar (child of `Shell_TrayWnd`) that lays out **Shells**
 horizontally, each shell contributing zero or more **ShellCells**, (3) shows
 **Billboards** (detail panels) above the tray when cells are clicked,
 (4) receives messages for shells via `Pagurian.exe post {shell_id} <cmd>
 [args...]` (the Copilot CLI hooks are the primary caller), and (5) has a
-**Settings window** for picking the configuration directory and editing the
-tray contents by drag & drop (see `SettingsView.cs` below).
+**Settings window** for host configuration plus a dedicated multi-monitor
+**Shell editor** for editing tray contents (see `ShellEditorView.cs` below).
 
 Concepts:
 
@@ -95,9 +95,11 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   .LoadAll()`, `TrayShells.LoadFromConfig(TrayConfig.Load())`,
   `ShellMessageServer.Start()`, then tray icon + tray window + controller.
   The settings window opens on tray-icon double-click or the tray menu's
-  "Settings…" item. Quit happens only via the tray menu:
+  "Settings…" item; "Edit Shells…" opens the full-desktop editor. Quit
+  happens only via the tray menu:
   `TaskbarController.Stop()` → `ShellMessageServer.Stop()` →
-  `SettingsWindow.CloseIfOpen()` → `TrayShells.ShutdownAll()` →
+  `ShellEditorWindow.CloseIfOpen()` → `SettingsWindow.CloseIfOpen()` →
+  `TrayShells.ShutdownAll()` →
   `ModuleLoader.ShutdownAll()` → `tray.Close()` → `ReactorApp.Exit(0)` →
   `Environment.Exit(0)` (the last call is required).
 - `ModuleLoader.cs` / `ModuleLoadContext.cs` — folders-only bundle discovery,
@@ -117,8 +119,8 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   and skipped. The same kind twice = two instances. `settings` passes through
   to `Shell.Settings` verbatim (reserved). A missing file is seeded with only
   the Hello shell and a random id; an existing file is only ever modified
-  through `Save(entries)` (temp file + atomic move, called by the settings
-  UI), and the host never auto-adds discovered shells. `NextId(taken)`
+  through `Save(entries)` (temp file + atomic move, called by the Shell
+  editor), and the host never auto-adds discovered shells. `NextId(taken)`
   allocates a fresh 4-digit id.
 - `TrayShells.cs` — the ordered shell registry + flattened cell list.
   `Shell.AddCell/RemoveCell` call back through an internal channel; every
@@ -127,13 +129,18 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   `ApplyConfig(entries)` reconciles the live set with a config list without
   restarting unchanged shells (kept by id when the kind still matches),
   reorders to the list order, and rebuilds cells once at the end.
-- `SettingsWindow.cs` / `SettingsView.cs` — the settings window (singleton,
-  `OpenOrActivate()`): config-directory row (TextBox + folder picker →
-  `HostSettings.SetConfigDir` → config reload → `TrayShells.ApplyConfig`)
-  and the tray editor: a drawn mock strip of the tray plus a wrapping module
-  pool, drag from the pool to add / drag within the strip to reorder / drag
-  back to the pool to remove. All edits are a draft; Save does
-  `TrayConfig.Save` + `TrayShells.ApplyConfig`, Revert/close discards.
+- `SettingsWindow.cs` / `SettingsView.cs` — the singleton host-settings
+  window: config-directory row (TextBox + folder picker →
+  `HostSettings.SetConfigDir` → config reload → `TrayShells.ApplyConfig`).
+- `ShellEditorWindow.cs` / `ShellEditorView.cs` — the singleton activated,
+  topmost, taskbar/Alt-Tab-hidden editor spanning the physical virtual desktop.
+  Desktop Acrylic plus a scrim obscures existing windows and taskbars; the
+  catalog is centered on the primary display and the draft target is mapped to
+  the real primary-taskbar tray anchor through `TaskbarTrayPlacement`. Drag or
+  keyboard-add from the module pool, reorder in the target, and remove back to
+  the catalog. Per-instance `ShellConfiguration` is hosted here. All changes
+  stay in a draft; Save and exit does `TrayConfig.Save` then
+  `TrayShells.ApplyConfig`, while cancel/close discards after confirmation.
   Icons: `[Shell].PreviewIconPath` with `AppAssets.IconPath` fallback.
 - `PostBridge.cs` / `ShellMessageServer.cs` — the `post` pipeline. The bridge
   packs `{id, command, args, payload, receivedAt}` (stdin piped → payload,
@@ -176,7 +183,7 @@ public sealed class MyModule : PagurianModule { public override void Startup()/S
 
 [Shell(DisplayName = "...")]                    // per Shell subclass; kind id = type FullName
                                                 // optional PreviewIcon = "Assets/foo.png" feeds the
-                                                // settings UI (fallback: the Pagurian app icon)
+                                                // Shell editor (fallback: the Pagurian app icon)
 public sealed class MyShell : Shell
 {
     public override void Startup() =>
@@ -235,8 +242,8 @@ public sealed class MyShell : Shell
 - **Theme comes from sampled taskbar pixels**, not app theme APIs.
 - **Message boxes**: Win32 `MessageBoxW` (`MessageBoxes.Show` in the Sdk).
 - **Tray menu is a native Win32 popup menu** (`TaskbarInterop.ShowTrayMenu`,
-  blocks the UI thread until selection; returns `SettingsCommandId` or
-  `QuitCommandId`, dispatched by the caller in Program.cs).
+  blocks the UI thread until selection; returns `EditShellsCommandId`,
+  `SettingsCommandId`, or `QuitCommandId`, dispatched by Program.cs).
 - **Fluent modifiers need `using Microsoft.UI.Reactor;`** — the pooled
   element extensions (`ElementExtensions`, `GridSize`, …) live in that
   namespace inside Reactor.dll; `Microsoft.UI.Reactor.Core` alone gives you

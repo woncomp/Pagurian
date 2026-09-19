@@ -21,7 +21,7 @@ static class TrayShells
 
     public static IReadOnlyList<ShellCellHandle> Cells => _cells;
 
-    // The live shell instances in tray order (the settings UI diffs its
+    // The live shell instances in tray order (the Shell editor diffs its
     // draft against this list via ApplyConfig).
     public static IReadOnlyList<Shell> Shells => _shells;
 
