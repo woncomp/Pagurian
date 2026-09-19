@@ -317,11 +317,6 @@ class SettingsView : Component
         if (!reduceMotion && chips.Count > 0)
             targetContent = targetContent.SpringLayoutAnimation();
 
-        var targetSlots = draft.Count + (preview == null ? 0 : 1);
-        var targetWidthDesignDip = Math.Max(
-            EmptyTargetWidth,
-            2 * StripPadX + targetSlots * ChipSize + Math.Max(0, targetSlots - 1) * ChipGap);
-        var targetWidthDip = targetWidthDesignDip * targetVisualScale;
         var targetHeightDip = TaskbarTrayWindow.ContentHeightDip * targetVisualScale;
 
         var targetFill = stripHot
@@ -342,7 +337,7 @@ class SettingsView : Component
             2 * targetVisualScale - targetBorderThickness);
 
         var target = (Border(targetContent) with { CornerRadius = 4 * targetVisualScale })
-            .Width(targetWidthDip)
+            .MinWidth(EmptyTargetWidth * targetVisualScale)
             .Height(targetHeightDip)
             .Padding(targetPaddingX, targetPaddingY,
                 targetPaddingX, targetPaddingY)
@@ -418,6 +413,8 @@ class SettingsView : Component
             : (FlexRow(moduleCards) with
             {
                 Wrap = FlexWrap.Wrap,
+                AlignItems = FlexAlign.FlexStart,
+                AlignContent = FlexAlign.FlexStart,
                 RowGap = 12,
                 ColumnGap = 12,
             });
@@ -870,7 +867,7 @@ class SettingsView : Component
                     : ShortName(kindId);
                 return (Element)Button(
                         Grid(
-                            [GridSize.Auto, GridSize.Star()],
+                            [GridSize.Auto, GridSize.Auto],
                             [GridSize.Auto],
                             [
                                 Image(kind.PreviewIconPath ?? AppAssets.IconPath)
@@ -889,9 +886,8 @@ class SettingsView : Component
                                     .Grid(row: 0, column: 1),
                             ]),
                         () => onAddKind(kindId))
-                    .MinWidth(224)
                     .Padding(12)
-                    .HorizontalContentAlignment(HorizontalAlignment.Stretch)
+                    .HAlign(HorizontalAlignment.Left)
                     .AutomationName($"Add {name} to tray")
                     .PositionInSet(index + 1, kinds.Count)
                     .OnDragStart(
@@ -902,16 +898,22 @@ class SettingsView : Component
             })
             .ToArray();
 
-        return Border(
-                FlexColumn(
-                    BodyStrong(module.DisplayName.Length > 0
+        var shellTiles = HStack(8, tiles)
+            .HAlign(HorizontalAlignment.Left);
+
+        var moduleContent = VStack(
+                BodyStrong(module.DisplayName.Length > 0
                         ? module.DisplayName
-                        : ShortName(module.Id)),
-                    VStack(8, tiles)
-                        .Margin(0, 12, 0, 0)))
-            .MinWidth(256)
+                        : ShortName(module.Id))
+                    .HAlign(HorizontalAlignment.Left),
+                shellTiles.Margin(0, 12, 0, 0))
+            .HAlign(HorizontalAlignment.Left);
+
+        return Border(
+                moduleContent)
             .Padding(16)
             .CornerRadius(8)
+            .HAlign(HorizontalAlignment.Left)
             .Background(highContrast
                 ? Theme.Ref("SystemColorWindowColorBrush")
                 : Theme.SubtleFill)
@@ -920,6 +922,7 @@ class SettingsView : Component
                     ? Theme.Ref("SystemColorWindowTextColorBrush")
                     : Theme.CardStroke,
                 highContrast ? 2 : 1)
+            .Flex(grow: 0, shrink: 1, alignSelf: FlexAlign.FlexStart)
             .WithKey(module.Id);
     }
 
