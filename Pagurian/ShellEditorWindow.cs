@@ -12,16 +12,29 @@ internal sealed record ShellEditorGeometry(
     TaskbarTrayPlacement.Surface? TaskbarSurface);
 
 // Owns one activated editor window on the display containing Shell_TrayWnd
-// plus one non-activating blocker per other display. The catalog and target
-// remain in the same HWND, so typed drag payloads never cross windows.
+// plus one non-activating blocker per other display. Each window paints an
+// opaque, blurred snapshot captured immediately before the session opens.
 static class ShellEditorWindow
 {
+    private sealed record InitialSnapshotBatch(
+        IReadOnlyList<string> DeviceNames,
+        IReadOnlyDictionary<string, ShellEditorSnapshot> Snapshots);
+
     private static readonly WindowKey MainKey = WindowKey.Of("pagurian-shell-editor");
     private static readonly Dictionary<string, ReactorWindow> BackdropWindows =
+        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, ShellEditorSnapshot> Snapshots =
+        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly HashSet<string> CapturedMonitorDevices =
+        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly HashSet<string> SnapshotCaptures =
         new(StringComparer.OrdinalIgnoreCase);
 
     private static ReactorWindow? _window;
     private static DispatcherQueueTimer? _geometryTimer;
+    private static CancellationTokenSource? _sessionCancellation;
+    private static int _sessionGeneration;
+    private static bool _opening;
     private static bool _allowClose;
     private static bool _restoreSettingsOnClose;
     private static bool _endingSession;
@@ -35,6 +48,13 @@ static class ShellEditorWindow
     internal static ShellEditorGeometry Geometry => _geometry;
     internal static bool AllowClose => _allowClose;
     internal static event Action? GeometryChanged;
+    internal static event Action? SnapshotChanged;
+
+    internal static ShellEditorSnapshot? SnapshotFor(string? deviceName) =>
+        !string.IsNullOrWhiteSpace(deviceName) &&
+        Snapshots.TryGetValue(deviceName, out var snapshot)
+            ? snapshot
+            : null;
 
     public static void OpenOrActivate()
     {
@@ -44,6 +64,8 @@ static class ShellEditorWindow
             existing.Activate();
             return;
         }
+        if (_opening)
+            return;
 
         if (!TryReadGeometry(out _geometry))
         {
@@ -53,47 +75,26 @@ static class ShellEditorWindow
             return;
         }
 
-        _allowClose = false;
-        _topologyFailureReported = false;
-        _restoreSettingsOnClose = SettingsWindow.HideForShellEditor();
-        ReactorWindow? openedWindow = null;
-
         try
         {
-            var window = ReactorApp.OpenWindow(
-                CreateSpec(MainKey, "Pagurian Shell Editor", noActivate: false),
-                () => new ShellEditorView());
-            openedWindow = window;
-            _window = window;
-            window.Closed += (_, _) => OnMainWindowClosed(window);
-            window.DpiChanged += (_, _) =>
-            {
-                GeometryChanged?.Invoke();
-                RefreshGeometry();
-            };
-
-            foreach (var monitor in SecondaryMonitors(_geometry))
-                CreateBackdropWindow(monitor, show: false);
-
-            ApplyMonitorBounds(window, _geometry.EditorMonitor.MonitorRect);
+            _allowClose = false;
+            _topologyFailureReported = false;
+            _opening = true;
+            _restoreSettingsOnClose = SettingsWindow.HideForShellEditor();
             TaskbarController.SetShellEditorActive(true);
-            StartGeometryTimer();
 
-            foreach (var backdrop in BackdropWindows.Values)
-                backdrop.Show();
-            window.Show();
-            window.Activate();
+            _sessionCancellation?.Dispose();
+            _sessionCancellation = new CancellationTokenSource();
+            var generation = ++_sessionGeneration;
+            if (!TaskbarInterop.FlushDesktopComposition())
+                PagurianLog.HostError("shell editor: DwmFlush failed before desktop capture");
 
-            var rect = _geometry.EditorMonitor.MonitorRect;
-            PagurianLog.Host(
-                $"shell editor: opened {_geometry.Monitors.Count} per-monitor surfaces; " +
-                $"interactive={_geometry.EditorMonitor.DeviceName} " +
-                $"({rect.Left},{rect.Top})-({rect.Right},{rect.Bottom})");
+            BeginInitialCapture(generation, _geometry, _sessionCancellation.Token);
         }
         catch (Exception ex)
         {
-            FinishSession(openedWindow, restoreSettings: true);
-            PagurianLog.HostError("shell editor: failed to open", ex);
+            PagurianLog.HostError("shell editor: failed to start desktop capture", ex);
+            FinishSession(_window, restoreSettings: true);
             TaskbarInterop.ShowMessage(
                 $"Pagurian could not open the Shell editor.\n\n{ex.Message}",
                 "Edit Shells");
@@ -109,7 +110,7 @@ static class ShellEditorWindow
         _allowClose = true;
         ReactorApp.UIDispatcher?.TryEnqueue(() =>
         {
-            if (_window != null || BackdropWindows.Count > 0)
+            if (_opening || _window != null || BackdropWindows.Count > 0)
                 FinishSession(_window, restoreSettings: true);
         });
     }
@@ -123,6 +124,179 @@ static class ShellEditorWindow
         FinishSession(_window, restoreSettings: false);
     }
 
+    private static void BeginInitialCapture(
+        int generation,
+        ShellEditorGeometry geometry,
+        CancellationToken cancellationToken)
+    {
+        _ = CaptureInitialAsync(generation, geometry, cancellationToken);
+    }
+
+    private static async Task CaptureInitialAsync(
+        int generation,
+        ShellEditorGeometry geometry,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var batch = await Task.Run(
+                    () => CaptureInitialBatch(geometry.Monitors, cancellationToken),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            await RunOnUiAsync(() => CompleteInitialCapture(
+                    generation,
+                    batch,
+                    cancellationToken))
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Session shutdown invalidates this opening attempt.
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                await RunOnUiAsync(() => FailOpening(generation, ex))
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                // The UI dispatcher can disappear during process shutdown.
+            }
+        }
+    }
+
+    private static InitialSnapshotBatch CaptureInitialBatch(
+        IReadOnlyList<TaskbarInterop.DisplayMonitor> monitors,
+        CancellationToken cancellationToken)
+    {
+        var snapshots = new Dictionary<string, ShellEditorSnapshot>(
+            StringComparer.OrdinalIgnoreCase);
+        var devices = new List<string>(monitors.Count);
+
+        foreach (var monitor in monitors)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            devices.Add(monitor.DeviceName);
+            try
+            {
+                var frame = ShellEditorSnapshotService.Capture(monitor);
+                if (frame == null)
+                {
+                    PagurianLog.HostError(
+                        $"shell editor: desktop capture failed for {monitor.DeviceName}; using solid fallback");
+                    continue;
+                }
+
+                snapshots[monitor.DeviceName] = ShellEditorSnapshotService.Blur(
+                    monitor.DeviceName,
+                    frame.Value,
+                    cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                PagurianLog.HostError(
+                    $"shell editor: desktop snapshot failed for {monitor.DeviceName}; using solid fallback",
+                    ex);
+            }
+        }
+
+        return new InitialSnapshotBatch(devices, snapshots);
+    }
+
+    private static void CompleteInitialCapture(
+        int generation,
+        InitialSnapshotBatch batch,
+        CancellationToken cancellationToken)
+    {
+        if (!IsCurrentSession(generation) || cancellationToken.IsCancellationRequested)
+            return;
+
+        if (!TryReadGeometry(out var current))
+        {
+            FailOpening(
+                generation,
+                new InvalidOperationException("Could not re-read the display layout after capture."));
+            return;
+        }
+
+        // If a device was added or removed while the initial snapshots were
+        // being prepared, restart before showing any window. Rect/DPI changes
+        // for the same devices reuse and stretch the just-captured frame.
+        if (!SameDeviceSet(batch.DeviceNames, current.Monitors))
+        {
+            _geometry = current;
+            BeginInitialCapture(generation, current, cancellationToken);
+            return;
+        }
+
+        _geometry = current;
+        Snapshots.Clear();
+        foreach (var (deviceName, snapshot) in batch.Snapshots)
+            Snapshots[deviceName] = snapshot;
+        CapturedMonitorDevices.Clear();
+        foreach (var monitor in current.Monitors)
+            CapturedMonitorDevices.Add(monitor.DeviceName);
+
+        try
+        {
+            OpenWindows();
+            _opening = false;
+        }
+        catch (Exception ex)
+        {
+            FailOpening(generation, ex);
+        }
+    }
+
+    private static void OpenWindows()
+    {
+        var window = ReactorApp.OpenWindow(
+            CreateSpec(MainKey, "Pagurian Shell Editor", noActivate: false),
+            () => new ShellEditorView());
+        _window = window;
+        window.Closed += (_, _) => OnMainWindowClosed(window);
+        window.DpiChanged += (_, _) =>
+        {
+            GeometryChanged?.Invoke();
+            RefreshGeometry();
+        };
+
+        foreach (var monitor in SecondaryMonitors(_geometry))
+            CreateBackdropWindow(monitor, show: false);
+
+        ApplyMonitorBounds(window, _geometry.EditorMonitor.MonitorRect);
+        StartGeometryTimer();
+
+        foreach (var backdrop in BackdropWindows.Values)
+            backdrop.Show();
+        window.Show();
+        window.Activate();
+
+        var rect = _geometry.EditorMonitor.MonitorRect;
+        PagurianLog.Host(
+            $"shell editor: opened {_geometry.Monitors.Count} static snapshot surfaces; " +
+            $"interactive={_geometry.EditorMonitor.DeviceName} " +
+            $"({rect.Left},{rect.Top})-({rect.Right},{rect.Bottom})");
+    }
+
+    private static void FailOpening(int generation, Exception ex)
+    {
+        if (!IsCurrentSession(generation))
+            return;
+
+        PagurianLog.HostError("shell editor: failed to open", ex);
+        FinishSession(_window, restoreSettings: true);
+        TaskbarInterop.ShowMessage(
+            $"Pagurian could not open the Shell editor.\n\n{ex.Message}",
+            "Edit Shells");
+    }
+
     private static WindowSpec CreateSpec(
         WindowKey key,
         string title,
@@ -133,9 +307,7 @@ static class ShellEditorWindow
         Height = 1,
         Style = WindowStyle.None,
         CornerStyle = WindowCornerStyle.Square,
-        Backdrop = BackdropChoice.Of(ShellEditorBackdrop.DesktopAcrylicSupported
-            ? BackdropKind.DesktopAcrylic
-            : BackdropKind.None),
+        Backdrop = BackdropChoice.Of(BackdropKind.None),
         ShowInTaskbar = false,
         ShowInSwitcher = false,
         NoActivate = noActivate,
@@ -169,7 +341,7 @@ static class ShellEditorWindow
                     WindowKey.Of($"pagurian-shell-editor-backdrop:{monitor.DeviceName}"),
                     "Pagurian Shell Editor Backdrop",
                     noActivate: true),
-                () => new ShellEditorBackdropView());
+                () => new ShellEditorBackdropView(monitor.DeviceName));
             window.Closed += (_, _) => OnBackdropWindowClosed(monitor.DeviceName, window);
             ApplyMonitorBounds(window, monitor.MonitorRect);
             BackdropWindows.Add(monitor.DeviceName, window);
@@ -214,37 +386,19 @@ static class ShellEditorWindow
                 throw new InvalidOperationException(
                     "Could not enumerate the updated display layout.");
 
-            var desiredSecondary = SecondaryMonitors(next)
-                .ToDictionary(
-                    monitor => monitor.DeviceName,
-                    StringComparer.OrdinalIgnoreCase);
-
-            // Create the old-main-display blocker before moving the editor to
-            // a newly selected main display, so no existing screen is exposed.
-            foreach (var (deviceName, monitor) in desiredSecondary)
+            var waitingForCapture = false;
+            foreach (var monitor in next.Monitors)
             {
-                if (BackdropWindows.TryGetValue(deviceName, out var existing))
-                    ApplyMonitorBounds(existing, monitor.MonitorRect);
-                else
-                    CreateBackdropWindow(monitor, show: true);
+                if (CapturedMonitorDevices.Contains(monitor.DeviceName))
+                    continue;
+
+                waitingForCapture = true;
+                BeginAddedMonitorCapture(monitor);
             }
+            if (waitingForCapture)
+                return;
 
-            var geometryChanged = !SameGeometry(_geometry, next);
-            _geometry = next;
-            ApplyMonitorBounds(mainWindow, next.EditorMonitor.MonitorRect);
-
-            foreach (var deviceName in BackdropWindows.Keys
-                         .Where(deviceName => !desiredSecondary.ContainsKey(deviceName))
-                         .ToArray())
-            {
-                var obsolete = BackdropWindows[deviceName];
-                BackdropWindows.Remove(deviceName);
-                try { obsolete.Close(); }
-                catch { /* a removed display may already have destroyed it */ }
-            }
-
-            if (geometryChanged)
-                GeometryChanged?.Invoke();
+            ReconcileGeometry(mainWindow, next);
             _topologyFailureReported = false;
         }
         catch (Exception ex)
@@ -264,6 +418,205 @@ static class ShellEditorWindow
         {
             _refreshingGeometry = false;
         }
+    }
+
+    private static void BeginAddedMonitorCapture(
+        TaskbarInterop.DisplayMonitor monitor)
+    {
+        if (!SnapshotCaptures.Add(monitor.DeviceName) ||
+            _sessionCancellation == null)
+        {
+            return;
+        }
+
+        var generation = _sessionGeneration;
+        _ = CaptureAddedMonitorAsync(
+            generation,
+            monitor,
+            _sessionCancellation.Token);
+    }
+
+    private static async Task CaptureAddedMonitorAsync(
+        int generation,
+        TaskbarInterop.DisplayMonitor monitor,
+        CancellationToken cancellationToken)
+    {
+        ShellEditorCapturedFrame? frame = null;
+        Exception? captureError = null;
+        try
+        {
+            frame = await Task.Run(
+                    () => ShellEditorSnapshotService.Capture(monitor),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            captureError = ex;
+        }
+
+        try
+        {
+            await RunOnUiAsync(() => CompleteAddedMonitorCapture(
+                    generation,
+                    monitor,
+                    frame,
+                    captureError,
+                    cancellationToken))
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            // The dispatcher can disappear during process shutdown.
+        }
+    }
+
+    private static void CompleteAddedMonitorCapture(
+        int generation,
+        TaskbarInterop.DisplayMonitor capturedMonitor,
+        ShellEditorCapturedFrame? frame,
+        Exception? captureError,
+        CancellationToken cancellationToken)
+    {
+        if (!IsCurrentSession(generation) || cancellationToken.IsCancellationRequested)
+            return;
+
+        SnapshotCaptures.Remove(capturedMonitor.DeviceName);
+        if (!TryReadGeometry(out var current))
+        {
+            RefreshGeometry();
+            return;
+        }
+
+        var actualMonitor = current.Monitors.FirstOrDefault(monitor =>
+            string.Equals(
+                monitor.DeviceName,
+                capturedMonitor.DeviceName,
+                StringComparison.OrdinalIgnoreCase));
+        if (string.IsNullOrWhiteSpace(actualMonitor.DeviceName))
+            return;
+
+        if (!actualMonitor.MonitorRect.Equals(capturedMonitor.MonitorRect))
+        {
+            RefreshGeometry();
+            return;
+        }
+
+        CapturedMonitorDevices.Add(capturedMonitor.DeviceName);
+        if (frame == null)
+        {
+            PagurianLog.HostError(
+                $"shell editor: desktop capture failed for {capturedMonitor.DeviceName}; using solid fallback",
+                captureError);
+        }
+
+        // Capturing happened before this display received a Pagurian window.
+        // It can now be covered immediately by a solid fallback while the
+        // captured pixels are filtered on the worker thread.
+        RefreshGeometry();
+        if (frame != null)
+            _ = BlurAddedMonitorAsync(
+                generation,
+                capturedMonitor.DeviceName,
+                frame.Value,
+                cancellationToken);
+    }
+
+    private static async Task BlurAddedMonitorAsync(
+        int generation,
+        string deviceName,
+        ShellEditorCapturedFrame frame,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var snapshot = await Task.Run(
+                    () => ShellEditorSnapshotService.Blur(
+                        deviceName,
+                        frame,
+                        cancellationToken),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            await RunOnUiAsync(() =>
+            {
+                if (!IsCurrentSession(generation) ||
+                    cancellationToken.IsCancellationRequested ||
+                    !CapturedMonitorDevices.Contains(deviceName) ||
+                    !_geometry.Monitors.Any(monitor => string.Equals(
+                        monitor.DeviceName,
+                        deviceName,
+                        StringComparison.OrdinalIgnoreCase)))
+                {
+                    return;
+                }
+
+                Snapshots[deviceName] = snapshot;
+                SnapshotChanged?.Invoke();
+            }).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Session shutdown invalidates this background filter.
+        }
+        catch (Exception ex)
+        {
+            PagurianLog.HostError(
+                $"shell editor: desktop blur failed for {deviceName}; keeping solid fallback",
+                ex);
+        }
+    }
+
+    private static void ReconcileGeometry(
+        ReactorWindow mainWindow,
+        ShellEditorGeometry next)
+    {
+        var desiredSecondary = SecondaryMonitors(next)
+            .ToDictionary(
+                monitor => monitor.DeviceName,
+                StringComparer.OrdinalIgnoreCase);
+
+        // Create the old-main-display blocker before moving the editor to a
+        // newly selected main display, so no existing screen is exposed.
+        foreach (var (deviceName, monitor) in desiredSecondary)
+        {
+            if (BackdropWindows.TryGetValue(deviceName, out var existing))
+                ApplyMonitorBounds(existing, monitor.MonitorRect);
+            else
+                CreateBackdropWindow(monitor, show: true);
+        }
+
+        var geometryChanged = !SameGeometry(_geometry, next);
+        _geometry = next;
+        ApplyMonitorBounds(mainWindow, next.EditorMonitor.MonitorRect);
+
+        foreach (var deviceName in BackdropWindows.Keys
+                     .Where(deviceName => !desiredSecondary.ContainsKey(deviceName))
+                     .ToArray())
+        {
+            var obsolete = BackdropWindows[deviceName];
+            BackdropWindows.Remove(deviceName);
+            try { obsolete.Close(); }
+            catch { /* a removed display may already have destroyed it */ }
+        }
+
+        var activeDevices = next.Monitors
+            .Select(monitor => monitor.DeviceName)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var deviceName in Snapshots.Keys
+                     .Where(deviceName => !activeDevices.Contains(deviceName))
+                     .ToArray())
+        {
+            Snapshots.Remove(deviceName);
+        }
+        CapturedMonitorDevices.RemoveWhere(deviceName =>
+            !activeDevices.Contains(deviceName));
+
+        if (geometryChanged)
+            GeometryChanged?.Invoke();
     }
 
     private static bool TryReadGeometry(out ShellEditorGeometry geometry)
@@ -311,6 +664,17 @@ static class ShellEditorWindow
 
         geometry = new ShellEditorGeometry(editorMonitor, monitors, taskbarSurface);
         return true;
+    }
+
+    private static bool SameDeviceSet(
+        IReadOnlyList<string> capturedDevices,
+        IReadOnlyList<TaskbarInterop.DisplayMonitor> currentMonitors)
+    {
+        if (capturedDevices.Count != currentMonitors.Count)
+            return false;
+
+        var devices = capturedDevices.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return currentMonitors.All(monitor => devices.Contains(monitor.DeviceName));
     }
 
     private static bool SameGeometry(
@@ -395,10 +759,21 @@ static class ShellEditorWindow
         _endingSession = true;
         try
         {
+            ++_sessionGeneration;
+            var cancellation = _sessionCancellation;
+            _sessionCancellation = null;
+            try { cancellation?.Cancel(); }
+            catch { /* cancellation is best effort during shutdown */ }
+            cancellation?.Dispose();
+
             _geometryTimer?.Stop();
             _geometryTimer = null;
             _window = null;
+            _opening = false;
             _allowClose = true;
+            SnapshotCaptures.Clear();
+            CapturedMonitorDevices.Clear();
+            Snapshots.Clear();
 
             var backdrops = BackdropWindows.Values.ToArray();
             BackdropWindows.Clear();
@@ -418,7 +793,7 @@ static class ShellEditorWindow
             var shouldRestoreSettings = restoreSettings && _restoreSettingsOnClose;
             _restoreSettingsOnClose = false;
             SettingsWindow.RestoreAfterShellEditor(shouldRestoreSettings);
-            PagurianLog.Host("shell editor: closed all per-monitor surfaces");
+            PagurianLog.Host("shell editor: closed all static snapshot surfaces");
         }
         finally
         {
@@ -426,5 +801,43 @@ static class ShellEditorWindow
             _topologyFailureReported = false;
             _endingSession = false;
         }
+    }
+
+    private static bool IsCurrentSession(int generation) =>
+        generation == _sessionGeneration && _sessionCancellation != null;
+
+    private static Task RunOnUiAsync(Action action)
+    {
+        var dispatcher = ReactorApp.UIDispatcher;
+        if (dispatcher == null)
+            return Task.FromException(
+                new InvalidOperationException("The UI dispatcher is unavailable."));
+
+        if (dispatcher.HasThreadAccess)
+        {
+            action();
+            return Task.CompletedTask;
+        }
+
+        var completion = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!dispatcher.TryEnqueue(() =>
+            {
+                try
+                {
+                    action();
+                    completion.TrySetResult(true);
+                }
+                catch (Exception ex)
+                {
+                    completion.TrySetException(ex);
+                }
+            }))
+        {
+            completion.TrySetException(
+                new InvalidOperationException("Could not enqueue work on the UI dispatcher."));
+        }
+
+        return completion.Task;
     }
 }

@@ -135,9 +135,13 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
 - `ShellEditorWindow.cs` / `ShellEditorView.cs` — one topmost,
   taskbar/Alt-Tab-hidden surface per physical display. The activated editor
   surface lives on the display containing the primary `Shell_TrayWnd`; every
-  other display gets a non-activating, hit-testable backdrop surface. Desktop
-  Acrylic plus a scrim obscures existing windows and taskbars. The catalog and
-  draft target share the primary surface so typed drag stays within one HWND;
+  other display gets a non-activating, hit-testable backdrop surface. On
+  entry, each surface receives a one-shot physical-screen capture that is
+  downsampled and blurred off the UI thread, then displayed as an opaque
+  in-memory bitmap with a light theme scrim. The frozen backgrounds obscure
+  readable desktop content and taskbars without depending on system Acrylic.
+  The catalog and draft target share the primary surface so typed drag stays
+  within one HWND;
   target coordinates map from the real taskbar anchor through
   `TaskbarTrayPlacement` into that monitor's local DIPs. Drag or keyboard-add
   from the module pool, reorder in the target, and remove back to the catalog.
@@ -230,8 +234,10 @@ public sealed class MyShell : Shell
   the live taskbar rect (48 DIP thickness ⇒ `taskbar.Height / 48` is the
   taskbar's own DPI scale), never from the window's `DipScale`.
 - **Screen reads block (~1 frame each) — never on the UI thread.** Capture
-  with one `BitBlt` per region on a background thread, throttled (250 ms),
-  apply via `UIDispatcher.TryEnqueue`. (History: per-pixel `GetPixel` loops
+  with one `BitBlt`/`StretchBlt` per region on a background thread, throttled
+  when sampling repeatedly, and apply via `UIDispatcher.TryEnqueue`. The Shell
+  editor's one-shot snapshots use a top-down 32-bit DIB and filter the reduced
+  frame off-thread. (History: per-pixel `GetPixel` loops
   on the UI thread once wedged the whole taskbar because the cross-process
   `SetParent` attaches our input queue to Explorer's.)
 - **Taskbar rect**: `FindWindowW("Shell_TrayWnd")` + `GetWindowRect` first

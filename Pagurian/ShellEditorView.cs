@@ -84,9 +84,6 @@ class ShellEditorView : Component
         var (initialFocusRef, requestInitialFocus) = this.UseElementFocus();
         UseEffect(requestInitialFocus, Array.Empty<object>());
         var highContrast = colorScheme == ColorScheme.HighContrast;
-        var advancedEffects = UseMemo(
-            ShellEditorBackdrop.AdvancedEffectsEnabled,
-            Array.Empty<object>());
 
         var configurationTheme = UseMemo(
             () => new ConfigurationThemeService(colorScheme, highContrastScheme),
@@ -103,6 +100,23 @@ class ShellEditorView : Component
             ShellEditorWindow.GeometryChanged += OnGeometryChanged;
             return () => ShellEditorWindow.GeometryChanged -= OnGeometryChanged;
         }, Array.Empty<object>());
+
+        var (_, setSnapshotVersion) = UseState(0);
+        var snapshotTick = UseRef(0);
+        UseEffect(() =>
+        {
+            void OnSnapshotChanged() => setSnapshotVersion(++snapshotTick.Current);
+            ShellEditorWindow.SnapshotChanged += OnSnapshotChanged;
+            return () => ShellEditorWindow.SnapshotChanged -= OnSnapshotChanged;
+        }, Array.Empty<object>());
+
+        var snapshot = ShellEditorWindow.SnapshotFor(
+            geometry.EditorMonitor.DeviceName);
+        var snapshotImage = UseMemo(
+            () => snapshot == null
+                ? null
+                : ShellEditorBackdrop.CreateSnapshotImage(snapshot),
+            snapshot?.Version ?? 0L);
 
         var initialDraft = UseMemo(() => TrayConfig.Load().ToList(), Array.Empty<object>());
         var (draft, setDraft) = UseState(initialDraft);
@@ -587,7 +601,7 @@ class ShellEditorView : Component
                 RequestCancel();
             });
 
-        return ShellEditorBackdrop.Apply(root, colorScheme, advancedEffects);
+        return ShellEditorBackdrop.Apply(root, snapshotImage, colorScheme);
     }
 
     private static Element TargetChip(
