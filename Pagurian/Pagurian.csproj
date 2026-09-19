@@ -8,7 +8,7 @@
     <Platforms>x64;ARM64</Platforms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <ApplicationIcon>Assets\Bokehlicia-Captiva-Atom.ico</ApplicationIcon>
+    <ApplicationIcon>Assets\Pagurian-256.ico</ApplicationIcon>
     <RootNamespace>Pagurian</RootNamespace>
   </PropertyGroup>
 
@@ -22,6 +22,9 @@
 
   <ItemGroup>
     <Content Include="Assets\Bokehlicia-Captiva-Atom.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Assets\Pagurian-256.ico;Assets\Pagurian-256.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>

@@ -29,7 +29,7 @@ ReactorApp.Run(_ =>
     ShellMessageServer.Start();
 
     var tray = ReactorApp.OpenTrayIcon(new TrayIconSpec(
-        Icon: WindowIcon.FromPath(AppAssets.IconPath),
+        Icon: WindowIcon.FromPath(AppAssets.TrayIconPath),
         Tooltip: "Pagurian",
         Key: WindowKey.Of("pagurian-tray"),
         IsVisible: true));
