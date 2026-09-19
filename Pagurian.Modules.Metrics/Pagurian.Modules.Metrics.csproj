@@ -21,15 +21,22 @@
     <ProjectReference Include="..\Pagurian.Sdk\Pagurian.Sdk.csproj" Private="false" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="Assets\cpu.png;Assets\mem.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
   <!-- Deploy a folder bundle into the development host output. -->
   <Target Name="DeployToHostModules" AfterTargets="Build">
     <PropertyGroup>
       <HostModulesRoot>$(MSBuildThisFileDirectory)..\Pagurian\bin\$(Platform)\$(Configuration)\$(TargetFramework)\modules\</HostModulesRoot>
       <HostModulesDir>$(HostModulesRoot)$(AssemblyName)\</HostModulesDir>
     </PropertyGroup>
-    <MakeDir Directories="$(HostModulesDir)" />
+    <MakeDir Directories="$(HostModulesDir);$(HostModulesDir)Assets" />
     <Copy SourceFiles="$(TargetPath);$(ProjectDepsFilePath)" DestinationFolder="$(HostModulesDir)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(TargetDir)$(AssemblyName).pdb" DestinationFolder="$(HostModulesDir)" SkipUnchangedFiles="true" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
+    <Copy SourceFiles="@(Content)" DestinationFolder="$(HostModulesDir)Assets" SkipUnchangedFiles="true" />
     <Delete Files="$(HostModulesRoot)$(AssemblyName).dll" />
   </Target>
 </Project>

@@ -2,7 +2,10 @@ using Pagurian.Sdk;
 
 namespace Pagurian.Modules.Metrics;
 
-[Shell(DisplayName = "CPU Load", ConfigurationView = typeof(CpuConfiguration))]
+[Shell(
+    DisplayName = "CPU Load",
+    PreviewIcon = "Assets/cpu.png",
+    ConfigurationView = typeof(CpuConfiguration))]
 public sealed class CpuShell : Shell
 {
     public override void Startup()

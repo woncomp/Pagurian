@@ -2,7 +2,10 @@ using Pagurian.Sdk;
 
 namespace Pagurian.Modules.Metrics;
 
-[Shell(DisplayName = "Memory Load", ConfigurationView = typeof(MemConfiguration))]
+[Shell(
+    DisplayName = "Memory Load",
+    PreviewIcon = "Assets/mem.png",
+    ConfigurationView = typeof(MemConfiguration))]
 public sealed class MemShell : Shell
 {
     public override void Startup()
