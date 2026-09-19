@@ -20,6 +20,15 @@ static class TaskbarInterop
         public int X, Y;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MONITORINFO
+    {
+        public uint cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public uint dwFlags;
+    }
+
     public const int GWL_STYLE = -16;
     public const int WS_POPUP = unchecked((int)0x80000000);
     public const int WS_CHILD = 0x40000000;
@@ -34,6 +43,7 @@ static class TaskbarInterop
     private const int SM_YVIRTUALSCREEN = 77;
     private const int SM_CXVIRTUALSCREEN = 78;
     private const int SM_CYVIRTUALSCREEN = 79;
+    private const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr FindWindowW(string? lpClassName, string? lpWindowName);
@@ -60,6 +70,12 @@ static class TaskbarInterop
 
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int nIndex);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromRect(ref RECT lprc, uint dwFlags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool GetMonitorInfoW(IntPtr hMonitor, ref MONITORINFO lpmi);
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
     private static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
@@ -378,6 +394,30 @@ static class TaskbarInterop
 
     public static POINT GetCursorPosition() =>
         GetCursorPos(out var p) ? p : default;
+
+    // Returns the physical-pixel work area of the monitor nearest a physical
+    // screen rectangle. Unlike the virtual-desktop metrics below, rcWork
+    // excludes that monitor's taskbar and respects secondary monitors with
+    // negative coordinates.
+    public static bool TryGetMonitorWorkArea(in RECT screenRect, out RECT workArea)
+    {
+        var rect = screenRect;
+        var monitor = MonitorFromRect(ref rect, MONITOR_DEFAULTTONEAREST);
+        if (monitor != IntPtr.Zero)
+        {
+            var info = new MONITORINFO { cbSize = (uint)Marshal.SizeOf<MONITORINFO>() };
+            if (GetMonitorInfoW(monitor, ref info) &&
+                info.rcWork.Right > info.rcWork.Left &&
+                info.rcWork.Bottom > info.rcWork.Top)
+            {
+                workArea = info.rcWork;
+                return true;
+            }
+        }
+
+        workArea = default;
+        return false;
+    }
 
     // Physical-pixel rectangles for the whole virtual desktop and the
     // primary display. Secondary displays may extend the virtual desktop

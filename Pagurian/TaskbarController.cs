@@ -45,6 +45,19 @@ static class TaskbarController
     private static ReactorWindow? _tooltipWindow;
     private static int _billboardCount; // unique WindowKey per opened billboard
 
+    // A billboard starts in SizeToContent.Height mode. Once a post-mount
+    // SizeChanged is observed, the next controller tick locks it to Manual so
+    // later live-data/tree changes scroll inside the panel rather than moving
+    // its outer frame. Deferring the lock avoids treating a Show/DPI resize as
+    // content layout. Some content settles without raising SizeChanged, so the
+    // existing 50 ms tick supplies a two-tick fallback.
+    private const int BillboardAutoSizeFallbackTicks = 2;
+    private const double BillboardGapDip = 6;
+    private static bool _billboardAwaitingInitialSize;
+    private static int _billboardAutoSizeTicksRemaining;
+    private static (double Width, double Height)? _billboardMeasuredSizeDip;
+    private static TaskbarInterop.RECT _billboardWorkAreaPx;
+
     private static TaskbarInterop.RECT _trayRectPx;
     private static TaskbarInterop.RECT _billboardRectPx;
 
@@ -302,6 +315,7 @@ static class TaskbarController
 
         EnsureInjected();
         AnchorTrayWindow();
+        UpdateBillboardInitialSizing();
         if (!_shellEditorActive)
             UpdateInteractions();
     }
@@ -652,50 +666,332 @@ static class TaskbarController
 
         billboard.OwnerCell = cell;
 
-        // Compute in DIPs — Reactor window APIs take DIPs; the physical pixel
-        // rect below is only for cursor hit-testing (GetCursorPos is physical).
-        var scale = ScaleOf(_trayWindow);
-        var popupW = billboard.WidthDip;
-        var popupH = billboard.HeightDip;
-        var xDip = rect.Value.Left / scale;
-        var yDip = rect.Value.Top / scale - popupH - 6;
-        if (yDip < 0)
-            yDip = rect.Value.Bottom / scale + 6; // taskbar at the top edge: open below
+        if (!TryGetBillboardWorkArea(rect.Value, out var workAreaPx))
+        {
+            PagurianLog.Host($"billboard monitor work area unavailable owner={cell.Key}");
+            return;
+        }
 
-        _billboardRectPx = CellRect(xDip * scale, yDip * scale, popupW * scale, popupH * scale);
+        // Owner geometry and monitor bounds are physical pixels. Convert the
+        // module's requested DIP size once using the owner monitor scale,
+        // clamp in that physical coordinate space, and cross back into DIPs
+        // only for the Reactor spec boundary.
+        var ownerScale = BillboardOwnerScale();
+        var initialWidthPx = Math.Clamp(
+            DipSizeToPx(billboard.WidthDip, ownerScale), 1, workAreaPx.Width);
+        var initialHeightPx = Math.Clamp(
+            DipSizeToPx(billboard.HeightDip, ownerScale), 1, workAreaPx.Height);
+        var initialRectPx = PlaceBillboard(
+            rect.Value, workAreaPx, initialWidthPx, initialHeightPx, ownerScale);
+        var initialPositionDip = (
+            initialRectPx.Left / ownerScale,
+            initialRectPx.Top / ownerScale);
 
         _billboardWindow = ReactorApp.OpenWindow(
-            BillboardSpec(billboard, (xDip, yDip)),
+            BillboardSpec(
+                billboard,
+                initialPositionDip,
+                initialWidthPx / ownerScale,
+                initialHeightPx / ownerScale,
+                workAreaPx.Width / ownerScale,
+                workAreaPx.Height / ownerScale),
             () => billboard);
-        _billboardWindow.SetSize(popupW, popupH);
-        _billboardWindow.SetPosition(xDip, yDip);
-        if (!_billboardWindow.IsVisible)
-            _billboardWindow.Show();
 
         _billboard = billboard;
         _billboardOwnerKey = cell.Key;
+        _billboardWorkAreaPx = workAreaPx;
+
+        // ManualPosition is initial placement intent. Repeat the move after
+        // creation with the live window scale because mixed-DPI desktops have
+        // no global DIP coordinate space. Do this before listening for the
+        // content-size event so a DPI change caused by the move cannot be
+        // mistaken for the first content layout.
+        var positionedWidthPx = initialWidthPx;
+        var positionedHeightPx = initialHeightPx;
+        if (TaskbarInterop.TryGetWindowRect(
+                WindowHwnd(_billboardWindow), out var openedRectPx))
+        {
+            positionedWidthPx = Math.Clamp(
+                openedRectPx.Width, 1, workAreaPx.Width);
+            positionedHeightPx = Math.Clamp(
+                openedRectPx.Height, 1, workAreaPx.Height);
+        }
+        PositionAndTrackBillboard(
+            _billboardWindow,
+            rect.Value,
+            workAreaPx,
+            positionedWidthPx,
+            positionedHeightPx);
+
+        _billboardAwaitingInitialSize = true;
+        _billboardAutoSizeTicksRemaining = BillboardAutoSizeFallbackTicks;
+        _billboardMeasuredSizeDip = null;
+        _billboardWindow.SizeChanged += OnBillboardSizeChanged;
+
+        if (!_billboardWindow.IsVisible)
+            _billboardWindow.Show();
+
         billboard.OnOpened();
+    }
+
+    private static void OnBillboardSizeChanged(
+        object? sender,
+        WindowDipSizeChangedEventArgs args)
+    {
+        if (!_billboardAwaitingInitialSize ||
+            sender is not ReactorWindow window ||
+            !ReferenceEquals(window, _billboardWindow))
+        {
+            return;
+        }
+
+        _billboardMeasuredSizeDip = args.Size;
+    }
+
+    private static void UpdateBillboardInitialSizing()
+    {
+        if (!_billboardAwaitingInitialSize || _billboardWindow == null)
+            return;
+
+        _billboardAutoSizeTicksRemaining--;
+        if (_billboardMeasuredSizeDip != null ||
+            _billboardAutoSizeTicksRemaining <= 0)
+        {
+            LockBillboardInitialSize(_billboardWindow);
+        }
+    }
+
+    private static void LockBillboardInitialSize(ReactorWindow window)
+    {
+        if (!_billboardAwaitingInitialSize ||
+            !ReferenceEquals(window, _billboardWindow) ||
+            _billboard == null ||
+            _billboardOwnerKey == null)
+        {
+            return;
+        }
+
+        _billboardAwaitingInitialSize = false;
+        window.SizeChanged -= OnBillboardSizeChanged;
+
+        var ownerRect = CellRectPx(_billboardOwnerKey);
+        if (ownerRect == null)
+        {
+            CloseBillboard();
+            return;
+        }
+
+        var workAreaPx =
+            TryGetBillboardWorkArea(ownerRect.Value, out var currentWorkArea)
+                ? currentWorkArea
+                : _billboardWorkAreaPx;
+        _billboardWorkAreaPx = workAreaPx;
+
+        var scale = ScaleOf(window);
+        var widthPx = Math.Clamp(
+            DipSizeToPx(_billboard.WidthDip, scale), 1, workAreaPx.Width);
+
+        int measuredHeightPx;
+        var hwnd = WindowHwnd(window);
+        if (TaskbarInterop.TryGetWindowRect(hwnd, out var measuredRectPx))
+        {
+            measuredHeightPx = measuredRectPx.Height;
+        }
+        else if (_billboardMeasuredSizeDip is { } measuredDip)
+        {
+            measuredHeightPx = DipSizeToPx(measuredDip.Height, scale);
+        }
+        else
+        {
+            measuredHeightPx = DipSizeToPx(_billboard.HeightDip, scale);
+        }
+        var heightPx = Math.Clamp(measuredHeightPx, 1, workAreaPx.Height);
+
+        var finalRectPx = PlaceBillboard(
+            ownerRect.Value, workAreaPx, widthPx, heightPx, scale);
+        window.Update(window.Spec with
+        {
+            Width = widthPx / scale,
+            Height = heightPx / scale,
+            MaxWidth = workAreaPx.Width / scale,
+            MaxHeight = workAreaPx.Height / scale,
+            SizeToContent = WindowSizeToContent.Manual,
+            StartPosition = WindowStartPosition.Manual,
+            ManualPosition = (
+                finalRectPx.Left / scale,
+                finalRectPx.Top / scale),
+        });
+
+        // Switching to Manual detaches Reactor's content-sizing handlers but
+        // deliberately leaves the current HWND size unchanged. Read that
+        // measured size back so placement and outside-click hit testing use
+        // the actual dimensions rather than the requested fallback.
+        if (TaskbarInterop.TryGetWindowRect(hwnd, out var actualRectPx))
+        {
+            widthPx = Math.Clamp(actualRectPx.Width, 1, workAreaPx.Width);
+            heightPx = Math.Clamp(actualRectPx.Height, 1, workAreaPx.Height);
+        }
+        PositionAndTrackBillboard(
+            window, ownerRect.Value, workAreaPx, widthPx, heightPx);
+
+        PagurianLog.Host(
+            $"billboard size locked owner={_billboardOwnerKey} " +
+            $"size={widthPx}x{heightPx}px scale={scale:F3} " +
+            $"work=({workAreaPx.Left},{workAreaPx.Top})-" +
+            $"({workAreaPx.Right},{workAreaPx.Bottom})");
+    }
+
+    private static void PositionAndTrackBillboard(
+        ReactorWindow window,
+        in TaskbarInterop.RECT ownerRectPx,
+        in TaskbarInterop.RECT workAreaPx,
+        int widthPx,
+        int heightPx)
+    {
+        var scale = ScaleOf(window);
+        var target = PlaceBillboard(
+            ownerRectPx, workAreaPx, widthPx, heightPx, scale);
+        window.SetPosition(target.Left / scale, target.Top / scale);
+
+        _billboardRectPx =
+            TaskbarInterop.TryGetWindowRect(WindowHwnd(window), out var actual)
+                ? actual
+                : target;
+    }
+
+    private static TaskbarInterop.RECT PlaceBillboard(
+        in TaskbarInterop.RECT ownerRectPx,
+        in TaskbarInterop.RECT workAreaPx,
+        int widthPx,
+        int heightPx,
+        double scale)
+    {
+        widthPx = Math.Clamp(widthPx, 1, workAreaPx.Width);
+        heightPx = Math.Clamp(heightPx, 1, workAreaPx.Height);
+
+        // A work-area-height billboard cannot retain an external gap and stay
+        // on screen. Shorter panels keep the established 6 DIP separation.
+        var gapPx = heightPx >= workAreaPx.Height
+            ? 0
+            : DipSizeToPx(BillboardGapDip, scale);
+
+        var xPx = Math.Clamp(
+            ownerRectPx.Left,
+            workAreaPx.Left,
+            workAreaPx.Right - widthPx);
+        var abovePx = ownerRectPx.Top - gapPx - heightPx;
+        var belowPx = ownerRectPx.Bottom + gapPx;
+
+        int yPx;
+        if (abovePx >= workAreaPx.Top)
+        {
+            yPx = abovePx;
+        }
+        else if (belowPx + heightPx <= workAreaPx.Bottom)
+        {
+            yPx = belowPx;
+        }
+        else
+        {
+            var roomAbove = Math.Max(0, ownerRectPx.Top - workAreaPx.Top);
+            var roomBelow = Math.Max(0, workAreaPx.Bottom - ownerRectPx.Bottom);
+            var preferred = roomAbove >= roomBelow ? abovePx : belowPx;
+            yPx = Math.Clamp(
+                preferred,
+                workAreaPx.Top,
+                workAreaPx.Bottom - heightPx);
+        }
+
+        return new TaskbarInterop.RECT
+        {
+            Left = xPx,
+            Top = yPx,
+            Right = xPx + widthPx,
+            Bottom = yPx + heightPx,
+        };
+    }
+
+    private static int DipSizeToPx(double dip, double scale) =>
+        (int)Math.Clamp(Math.Round(dip * scale), 1, int.MaxValue);
+
+    private static bool TryGetBillboardWorkArea(
+        in TaskbarInterop.RECT ownerRectPx,
+        out TaskbarInterop.RECT workAreaPx)
+    {
+        if (TaskbarInterop.TryGetMonitorWorkArea(ownerRectPx, out workAreaPx))
+            return true;
+
+        // MonitorFromRect/GetMonitorInfo are available on every supported
+        // Windows version, but keep billboard opening functional if native
+        // monitor discovery transiently fails. The tray currently belongs to
+        // Shell_TrayWnd on the primary display, so its screen rectangle is the
+        // closest safe approximation to the previous placement behavior.
+        if (TaskbarInterop.TryGetDesktopRects(
+                out _,
+                out var primaryScreenPx))
+        {
+            workAreaPx = primaryScreenPx;
+            PagurianLog.Host("billboard monitor work area unavailable; using primary screen bounds");
+            return true;
+        }
+
+        workAreaPx = default;
+        return false;
+    }
+
+    private static double BillboardOwnerScale() =>
+        TaskbarTrayPlacement.TryGetSurface(out var surface)
+            ? surface.Scale
+            : ScaleOf(_trayWindow!);
+
+    private static IntPtr WindowHwnd(ReactorWindow window)
+    {
+        try
+        {
+            return Win32Interop.GetWindowFromWindowId(window.AppWindow.Id);
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
     }
 
     private static void CloseBillboard()
     {
-        if (_billboardWindow == null)
+        var window = _billboardWindow;
+        if (window == null)
             return;
 
-        try { _billboardWindow.Close(); } catch { /* window may already be gone */ }
+        window.SizeChanged -= OnBillboardSizeChanged;
+        _billboardAwaitingInitialSize = false;
+        _billboardAutoSizeTicksRemaining = 0;
+        _billboardMeasuredSizeDip = null;
+
+        try { window.Close(); } catch { /* window may already be gone */ }
         try { _billboard?.OnClosed(); } catch { /* module code must not break the host */ }
         _billboardWindow = null;
         _billboard = null;
         _billboardOwnerKey = null;
+        _billboardRectPx = default;
+        _billboardWorkAreaPx = default;
     }
 
     // Host-standard billboard chrome: borderless, rounded, acrylic,
     // NoActivate, always-on-top. Modules supply only content and size.
-    private static WindowSpec BillboardSpec(Billboard billboard, (double X, double Y) positionDip) => new()
+    private static WindowSpec BillboardSpec(
+        Billboard billboard,
+        (double X, double Y) positionDip,
+        double widthDip,
+        double heightDip,
+        double maxWidthDip,
+        double maxHeightDip) => new()
     {
         Title = billboard.Title,
-        Width = billboard.WidthDip,
-        Height = billboard.HeightDip,
+        Width = widthDip,
+        Height = heightDip,
+        MaxWidth = maxWidthDip,
+        MaxHeight = maxHeightDip,
+        SizeToContent = WindowSizeToContent.Height,
         Style = WindowStyle.None,
         CornerStyle = WindowCornerStyle.Rounded,
         Backdrop = BackdropChoice.Of(BackdropKind.AcrylicThin),

@@ -25,6 +25,10 @@ public abstract class Billboard : Component
 
     public abstract double WidthDip { get; }
 
+    // Initial/fallback height used until the host completes the first content
+    // layout. The shown billboard then adopts the content's desired height,
+    // capped to the owner cell's monitor work area, and keeps that height for
+    // the rest of this open instance.
     public abstract double HeightDip { get; }
 
     // Window title (mostly invisible with the borderless style; used for
