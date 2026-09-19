@@ -136,10 +136,18 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   `HostSettings.SetConfigDir` → config reload → `TrayShells.ApplyConfig`).
   The Shells page keeps the module catalog or per-instance
   `ShellConfiguration` in the scrollable center, with the draft Tray fixed
-  at the bottom and horizontally scrollable. Drag or keyboard-add from the
-  module pool, reorder in the Tray, and remove back to the catalog. The draft
-  survives page switches; Save does `TrayConfig.Save` then
-  `TrayShells.ApplyConfig`, Revert reloads it, and closing the window
+  at the bottom and horizontally scrollable. Drag a Module icon into the Tray
+  to add it, drag a Tray icon within the Tray to reorder it, or drop a Tray
+  icon elsewhere inside the Shells page to remove it. Drag hover renders a
+  projected list without changing the draft; one draft change is committed
+  only after an accepted drop. Dropping outside the app, pressing Esc, or a
+  system cancellation restores the original list. Click/Enter/Space add,
+  explicit Remove, and Delete/Backspace remain equivalent keyboard and
+  pointer operations. The shared Shells draft, including per-instance
+  `ShellConfiguration` settings, survives page switches. Save persists the
+  complete draft with `TrayConfig.Save`, applies it with
+  `TrayShells.ApplyConfig`, and keeps Settings open; Revert reloads the last
+  persisted configuration into that draft. Closing with unsaved changes
   discards only after confirmation. Icons:
   `[Shell].PreviewIconPath` with `AppAssets.IconPath` fallback.
 - `PostBridge.cs` / `ShellMessageServer.cs` — the `post` pipeline. The bridge

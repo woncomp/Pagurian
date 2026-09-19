@@ -4,8 +4,8 @@ using Microsoft.UI.Reactor.Core;
 namespace Pagurian.Sdk;
 
 // A module-owned editor for one configured shell instance. The host mounts
-// the component by type in the dedicated Shell editor and owns the surrounding
-// selection, draft, Save-and-exit, and discard behavior.
+// the component by type on the Shells page in Settings and owns the surrounding
+// selection and shared draft, including Save, Revert, and close/discard behavior.
 public abstract class ShellConfiguration : Component<ShellConfigurationProps>
 {
     protected string InstanceId => Props.InstanceId;

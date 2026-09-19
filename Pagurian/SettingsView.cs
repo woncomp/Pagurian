@@ -10,6 +10,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Pagurian.Sdk;
+using Windows.Foundation;
 using Windows.Storage.Pickers;
 using Windows.System;
 using WinRT.Interop;
@@ -25,10 +26,12 @@ class SettingsView : Component
         InstantTooltipBindings = new();
 
     private const double StripPadX = 12;
-    private const double ChipSize = 40;
+    private const double ChipSize = 44;
     private const double ChipGap = 4;
     private const double ChipPitch = ChipSize + ChipGap;
     private const double EmptyTargetWidth = 160;
+    private const double AutoScrollEdge = 48;
+    private const double AutoScrollStep = 12;
 
     private sealed class InstantTooltipBinding
     {
@@ -75,6 +78,18 @@ class SettingsView : Component
         public static ShellDragPayload ForInstance(string instanceId) => new(null, instanceId);
     }
 
+    private enum ShellDropZone
+    {
+        Tray,
+        Remove,
+    }
+
+    private sealed record ShellDragSession(
+        ShellDragPayload Payload,
+        int OriginalIndex,
+        ShellDropZone Zone,
+        int CandidateIndex);
+
     public override Element Render()
     {
         var (page, setPage) = UseState(SettingsWindow.RequestedPage);
@@ -107,14 +122,49 @@ class SettingsView : Component
         var initialDraft = UseMemo(() => TrayConfig.Load().ToList(), Array.Empty<object>());
         var (draft, setDraft) = UseState(initialDraft);
         var (dirty, setDirty) = UseState(false);
-        var (stripHot, setStripHot) = UseState(false);
-        var (panelHot, setPanelHot) = UseState(false);
         var (selectedId, setSelectedId) = UseState<string?>(null);
-        var (preview, setPreview) = UseState<(int Index, string? InstanceId)?>(null);
+        var (dragSession, setDragSession) = UseState<ShellDragSession?>(null);
         var (discardDialogOpen, setDiscardDialogOpen) = UseState(false);
         var initialDir = UseMemo(() => HostSettings.ConfigDir, Array.Empty<object>());
         var (dirText, setDirText) = UseState(initialDir);
         var (appliedDir, setAppliedDir) = UseState(initialDir);
+
+        var shellPageRef = this.UseElementRef<Grid>();
+        var trayScrollerRef = this.UseElementRef<ScrollView>();
+        var draftRef = UseRef(draft);
+        var dragSessionRef = UseRef<ShellDragSession?>(dragSession);
+        var autoScrollDirectionRef = UseRef(0);
+        var lastTrayPointerXRef = UseRef(0d);
+        var autoScrollTickRef = UseRef<Action>(() => { });
+        draftRef.Current = draft;
+        dragSessionRef.Current = dragSession;
+
+        var autoScrollTimer = UseMemo(() =>
+        {
+            var timer = Microsoft.UI.Dispatching.DispatcherQueue
+                .GetForCurrentThread()
+                .CreateTimer();
+            timer.Interval = TimeSpan.FromMilliseconds(32);
+            timer.IsRepeating = true;
+            return timer;
+        }, Array.Empty<object>());
+        var scrollOptions = UseMemo(
+            () => new ScrollingScrollOptions(
+                ScrollingAnimationMode.Disabled,
+                ScrollingSnapPointsMode.Ignore),
+            Array.Empty<object>());
+        UseEffect(() =>
+        {
+            void OnTick(
+                Microsoft.UI.Dispatching.DispatcherQueueTimer sender,
+                object args) => autoScrollTickRef.Current();
+            autoScrollTimer.Tick += OnTick;
+            return () =>
+            {
+                autoScrollTimer.Stop();
+                autoScrollTimer.Tick -= OnTick;
+            };
+        }, autoScrollTimer);
 
         UseClosingGuard(() =>
         {
@@ -125,72 +175,306 @@ class SettingsView : Component
             return false;
         });
 
-        void ClearPreview()
-        {
-            if (preview != null)
-                setPreview(null);
-        }
-
         const double targetVisualScale = 1;
 
-        int InsertIndexFor(double x) =>
-            Math.Clamp(
-                (int)Math.Floor(
-                    (x / targetVisualScale - StripPadX) / ChipPitch),
-                0,
-                draft.Count);
-
-        void DropOnTarget(ShellDragPayload payload, double x)
+        void StopAutoScroll()
         {
-            var index = InsertIndexFor(x);
-            if (payload.InstanceId != null)
+            autoScrollDirectionRef.Current = 0;
+            lastTrayPointerXRef.Current = 0;
+            if (autoScrollTimer.IsRunning)
+                autoScrollTimer.Stop();
+        }
+
+        void SetDragSessionState(ShellDragSession? next)
+        {
+            if (Equals(dragSessionRef.Current, next))
+                return;
+
+            dragSessionRef.Current = next;
+            void Commit() => setDragSession(next);
+            if (reduceMotion)
+                Commit();
+            else
+                Animations.Animate(AnimationKind.Spring, Commit);
+        }
+
+        void ClearDragSession()
+        {
+            StopAutoScroll();
+            SetDragSessionState(null);
+        }
+
+        int CandidateIndexFor(
+            ShellDragPayload payload,
+            double contentX,
+            IReadOnlyList<TrayConfig.Entry> entries)
+        {
+            // Pick the closest projected slot. Once a placeholder moves, the
+            // remaining icons slide around it, so stable slot midpoints avoid
+            // switching early or oscillating against the original ordering.
+            var visualIndex = (int)Math.Floor(
+                (contentX / targetVisualScale - StripPadX + ChipGap / 2) /
+                ChipPitch);
+            return Math.Clamp(
+                visualIndex,
+                0,
+                payload.InstanceId == null
+                    ? entries.Count
+                    : entries.Count - 1);
+        }
+
+        bool TryResolveDrag(
+            DragData data,
+            Point rootPoint,
+            out ShellDragSession resolved,
+            out DragOperations operation,
+            out double trayPointerX)
+        {
+            resolved = null!;
+            operation = DragOperations.None;
+            trayPointerX = 0;
+            if (!TryGetPayload(data, out var payload) ||
+                (payload.KindId is null) == (payload.InstanceId is null))
             {
-                var from = draft.FindIndex(entry => entry.Id == payload.InstanceId);
-                if (from < 0)
-                    return;
-
-                var insertAt = from < index ? index - 1 : index;
-                if (insertAt == from)
-                    return;
-
-                var next = new List<TrayConfig.Entry>(draft);
-                var item = next[from];
-                next.RemoveAt(from);
-                next.Insert(Math.Clamp(insertAt, 0, next.Count), item);
-                setDraft(next);
-                setDirty(true);
+                return false;
             }
-            else if (payload.KindId != null)
+
+            var entries = draftRef.Current;
+            var originalIndex = payload.InstanceId == null
+                ? -1
+                : entries.FindIndex(entry => entry.Id == payload.InstanceId);
+            if (payload.InstanceId != null && originalIndex < 0)
+                return false;
+            if (payload.KindId != null && !ModuleLoader.TryGetKind(payload.KindId, out _))
+                return false;
+
+            var root = shellPageRef.Current;
+            var scroll = trayScrollerRef.Current;
+            if (root == null || scroll == null)
+                return false;
+
+            try
             {
-                var next = new List<TrayConfig.Entry>(draft);
-                next.Insert(index, new TrayConfig.Entry(
-                    payload.KindId,
-                    TrayConfig.NextId(draft.Select(entry => entry.Id)),
-                    null));
-                setDraft(next);
-                setDirty(true);
+                var origin = scroll.TransformToVisual(root)
+                    .TransformPoint(new Point(0, 0));
+                trayPointerX = rootPoint.X - origin.X;
+                var inTray = trayPointerX >= 0 &&
+                    trayPointerX <= scroll.ActualWidth &&
+                    rootPoint.Y >= origin.Y &&
+                    rootPoint.Y <= origin.Y + scroll.ActualHeight;
+                if (inTray)
+                {
+                    resolved = new ShellDragSession(
+                        payload,
+                        originalIndex,
+                        ShellDropZone.Tray,
+                        CandidateIndexFor(
+                            payload,
+                            trayPointerX + scroll.HorizontalOffset,
+                            entries));
+                    operation = payload.InstanceId == null
+                        ? DragOperations.Copy
+                        : DragOperations.Move;
+                    return true;
+                }
+
+                if (payload.InstanceId != null)
+                {
+                    resolved = new ShellDragSession(
+                        payload,
+                        originalIndex,
+                        ShellDropZone.Remove,
+                        -1);
+                    operation = DragOperations.Move;
+                    return true;
+                }
+            }
+            catch (Exception)
+            {
+                // Layout can detach between page navigation and a routed drag
+                // event. Reject that event rather than retaining stale state.
+            }
+
+            return false;
+        }
+
+        void UpdateAutoScroll(ShellDragSession resolved, double trayPointerX)
+        {
+            var scroll = trayScrollerRef.Current;
+            if (resolved.Zone != ShellDropZone.Tray || scroll == null ||
+                scroll.ScrollableWidth <= 0)
+            {
+                StopAutoScroll();
+                return;
+            }
+
+            lastTrayPointerXRef.Current = trayPointerX;
+            var direction = trayPointerX < AutoScrollEdge && scroll.HorizontalOffset > 0
+                ? -1
+                : trayPointerX > scroll.ActualWidth - AutoScrollEdge &&
+                    scroll.HorizontalOffset < scroll.ScrollableWidth
+                    ? 1
+                    : 0;
+            autoScrollDirectionRef.Current = direction;
+            if (direction == 0)
+            {
+                if (autoScrollTimer.IsRunning)
+                    autoScrollTimer.Stop();
+            }
+            else if (!autoScrollTimer.IsRunning)
+            {
+                autoScrollTimer.Start();
             }
         }
+
+        void UpdateDragTarget(DragTargetArgs args)
+        {
+            if (!TryResolveDrag(
+                    args.Data,
+                    args.Position,
+                    out var resolved,
+                    out var operation,
+                    out var trayPointerX))
+            {
+                args.AcceptedOperation = DragOperations.None;
+                args.UIOverride.IsCaptionVisible = false;
+                ClearDragSession();
+                return;
+            }
+
+            args.AcceptedOperation = operation;
+            args.UIOverride.Caption = resolved.Zone == ShellDropZone.Remove
+                ? "Remove from Tray"
+                : resolved.Payload.InstanceId == null
+                    ? "Add to Tray"
+                    : "Reorder in Tray";
+            args.UIOverride.IsCaptionVisible = true;
+            args.UIOverride.IsContentVisible = true;
+            args.UIOverride.IsGlyphVisible = true;
+            SetDragSessionState(resolved);
+            UpdateAutoScroll(resolved, trayPointerX);
+        }
+
+        void CommitDrop(ShellDragSession resolved)
+        {
+            StopAutoScroll();
+            var entries = draftRef.Current;
+            var next = new List<TrayConfig.Entry>(entries);
+            var changed = false;
+            string? removedId = null;
+
+            if (resolved.Zone == ShellDropZone.Remove &&
+                resolved.Payload.InstanceId is { } removeId)
+            {
+                changed = next.RemoveAll(entry => entry.Id == removeId) > 0;
+                removedId = changed ? removeId : null;
+            }
+            else if (resolved.Zone == ShellDropZone.Tray &&
+                resolved.Payload.KindId is { } kindId)
+            {
+                next.Insert(
+                    Math.Clamp(resolved.CandidateIndex, 0, next.Count),
+                    new TrayConfig.Entry(
+                        kindId,
+                        TrayConfig.NextId(entries.Select(entry => entry.Id)),
+                        null));
+                changed = true;
+            }
+            else if (resolved.Zone == ShellDropZone.Tray &&
+                resolved.Payload.InstanceId is { } instanceId)
+            {
+                var from = next.FindIndex(entry => entry.Id == instanceId);
+                if (from >= 0)
+                {
+                    var insertAt = Math.Clamp(resolved.CandidateIndex, 0, next.Count - 1);
+                    if (insertAt != from)
+                    {
+                        var entry = next[from];
+                        next.RemoveAt(from);
+                        next.Insert(insertAt, entry);
+                        changed = true;
+                    }
+                }
+            }
+
+            if (!changed)
+            {
+                ClearDragSession();
+                return;
+            }
+
+            draftRef.Current = next;
+            dragSessionRef.Current = null;
+            void Commit()
+            {
+                setDraft(next);
+                setDragSession(null);
+                setDirty(true);
+                if (removedId != null && selectedId == removedId)
+                    setSelectedId(null);
+            }
+
+            if (reduceMotion)
+                Commit();
+            else
+                Animations.Animate(AnimationKind.Spring, Commit);
+        }
+
+        autoScrollTickRef.Current = () =>
+        {
+            var resolved = dragSessionRef.Current;
+            var scroll = trayScrollerRef.Current;
+            var direction = autoScrollDirectionRef.Current;
+            if (resolved?.Zone != ShellDropZone.Tray || scroll == null || direction == 0)
+            {
+                StopAutoScroll();
+                return;
+            }
+
+            var currentOffset = scroll.HorizontalOffset;
+            var nextOffset = Math.Clamp(
+                currentOffset + direction * AutoScrollStep,
+                0,
+                scroll.ScrollableWidth);
+            if (Math.Abs(nextOffset - currentOffset) < 0.5)
+            {
+                StopAutoScroll();
+                return;
+            }
+
+            scroll.ScrollBy(nextOffset - currentOffset, 0, scrollOptions);
+            SetDragSessionState(resolved with
+            {
+                CandidateIndex = CandidateIndexFor(
+                    resolved.Payload,
+                    lastTrayPointerXRef.Current + nextOffset,
+                    draftRef.Current),
+            });
+        };
 
         void AddKind(string kindId)
         {
-            var next = new List<TrayConfig.Entry>(draft)
+            var entries = draftRef.Current;
+            var next = new List<TrayConfig.Entry>(entries)
             {
                 new(
                     kindId,
-                    TrayConfig.NextId(draft.Select(entry => entry.Id)),
+                    TrayConfig.NextId(entries.Select(entry => entry.Id)),
                     null),
             };
+            draftRef.Current = next;
             setDraft(next);
             setDirty(true);
         }
 
         void RemoveInstance(string instanceId)
         {
-            var next = draft.Where(entry => entry.Id != instanceId).ToList();
-            if (next.Count == draft.Count)
+            var entries = draftRef.Current;
+            var next = entries.Where(entry => entry.Id != instanceId).ToList();
+            if (next.Count == entries.Count)
                 return;
 
+            draftRef.Current = next;
             setDraft(next);
             if (selectedId == instanceId)
                 setSelectedId(null);
@@ -206,15 +490,17 @@ class SettingsView : Component
                 return;
             }
 
-            var index = draft.FindIndex(entry => entry.Id == instanceId);
+            var entries = draftRef.Current;
+            var index = entries.FindIndex(entry => entry.Id == instanceId);
             if (index < 0)
                 return;
 
-            var next = new List<TrayConfig.Entry>(draft);
+            var next = new List<TrayConfig.Entry>(entries);
             next[index] = next[index] with
             {
                 Settings = settings is { } replacement ? replacement.Clone() : null,
             };
+            draftRef.Current = next;
             setDraft(next);
             setDirty(true);
         }
@@ -224,10 +510,11 @@ class SettingsView : Component
             if (!dirty)
                 return;
 
+            var entries = draftRef.Current;
             try
             {
-                TrayConfig.Save(draft);
-                TrayShells.ApplyConfig(draft);
+                TrayConfig.Save(entries);
+                TrayShells.ApplyConfig(entries);
             }
             catch (Exception ex)
             {
@@ -239,12 +526,13 @@ class SettingsView : Component
 
             setDirty(false);
             PagurianLog.Host(
-                $"settings: applied tray configuration ({draft.Count} shells)");
+                $"settings: applied tray configuration ({entries.Count} shells)");
         }
 
         void RevertDraft()
         {
             var entries = TrayConfig.Load().ToList();
+            draftRef.Current = entries;
             setDraft(entries);
             if (selectedId != null && entries.All(entry => entry.Id != selectedId))
                 setSelectedId(null);
@@ -261,6 +549,7 @@ class SettingsView : Component
                 TrayShells.ApplyConfig(entries);
                 setAppliedDir(HostSettings.ConfigDir);
                 setDirText(HostSettings.ConfigDir);
+                draftRef.Current = entries;
                 setDraft(entries);
                 if (selectedId != null && entries.All(entry => entry.Id != selectedId))
                     setSelectedId(null);
@@ -284,27 +573,60 @@ class SettingsView : Component
 
         // The draft tray uses ordinary window DIPs. It no longer mirrors the
         // physical taskbar's position or per-monitor scale.
-        var chips = new List<Element>();
-        for (var i = 0; i <= draft.Count; i++)
+        var projectedEntries = new List<TrayConfig.Entry>(draft);
+        string? placeholderInstanceId = null;
+        string? hiddenInstanceId = null;
+        string? placeholderKindId = null;
+        var placeholderIndex = -1;
+        if (dragSession is { Payload.InstanceId: { } instanceId } instanceDrag)
         {
-            if (preview is { } currentPreview && currentPreview.Index == i)
-                chips.Add(GhostSlot(highContrast, targetVisualScale));
-            if (i >= draft.Count)
+            var sourceIndex = projectedEntries.FindIndex(entry => entry.Id == instanceId);
+            if (sourceIndex >= 0 && instanceDrag.Zone == ShellDropZone.Tray)
+            {
+                projectedEntries.RemoveAt(sourceIndex);
+                projectedEntries.Insert(
+                    Math.Clamp(instanceDrag.CandidateIndex, 0, projectedEntries.Count),
+                    draft[sourceIndex]);
+                placeholderInstanceId = instanceId;
+            }
+            else if (sourceIndex >= 0)
+                hiddenInstanceId = instanceId;
+        }
+        else if (dragSession is
+            {
+                Zone: ShellDropZone.Tray,
+                Payload.KindId: { } kindId,
+            } kindDrag)
+        {
+            placeholderKindId = kindId;
+            placeholderIndex = Math.Clamp(
+                kindDrag.CandidateIndex,
+                0,
+                projectedEntries.Count);
+        }
+
+        var chips = new List<Element>();
+        for (var i = 0; i <= projectedEntries.Count; i++)
+        {
+            if (placeholderKindId != null && placeholderIndex == i)
+                chips.Add(GhostSlot(placeholderKindId, highContrast, targetVisualScale));
+            if (i >= projectedEntries.Count)
                 continue;
 
-            var entry = draft[i];
+            var entry = projectedEntries[i];
             chips.Add(TargetChip(
                 entry,
                 selectedId == entry.Id,
                 () => setSelectedId(entry.Id),
                 () => RemoveInstance(entry.Id),
-                ClearPreview,
+                ClearDragSession,
                 i + 1,
-                draft.Count,
+                projectedEntries.Count,
                 highContrast,
                 reduceMotion,
                 targetVisualScale,
-                preview?.InstanceId == entry.Id));
+                placeholderInstanceId == entry.Id,
+                hiddenInstanceId == entry.Id));
         }
 
         Element targetContent = chips.Count == 0
@@ -314,10 +636,9 @@ class SettingsView : Component
                 .VAlign(VerticalAlignment.Center)
             : HStack(ChipGap * targetVisualScale, chips.ToArray())
                 .VAlign(VerticalAlignment.Center);
-        if (!reduceMotion && chips.Count > 0)
-            targetContent = targetContent.SpringLayoutAnimation();
 
-        var targetHeightDip = TaskbarTrayWindow.ContentHeightDip * targetVisualScale;
+        var targetHeightDip = (ChipSize + 8) * targetVisualScale;
+        var stripHot = dragSession?.Zone == ShellDropZone.Tray;
 
         var targetFill = stripHot
             ? highContrast ? Theme.Ref("SystemColorWindowColorBrush") : Theme.SystemAttentionBackground
@@ -327,14 +648,13 @@ class SettingsView : Component
             : highContrast ? Theme.Ref("SystemColorWindowTextColorBrush") : Theme.ControlStroke;
         var targetBorderThickness = stripHot || highContrast ? 2d : 1d;
         // Width/Height include BorderThickness and Padding. Reserve the
-        // border inside the fixed taskbar-sized target so its 40-DIP chips do
-        // not overflow and get clipped along the right or bottom edge.
+        // border inside the target so its 44-DIP drag surfaces do not clip.
         var targetPaddingX = Math.Max(
             0,
             StripPadX * targetVisualScale - targetBorderThickness);
         var targetPaddingY = Math.Max(
             0,
-            2 * targetVisualScale - targetBorderThickness);
+            4 * targetVisualScale - targetBorderThickness);
 
         var target = (Border(targetContent) with { CornerRadius = 4 * targetVisualScale })
             .MinWidth(EmptyTargetWidth * targetVisualScale)
@@ -343,8 +663,8 @@ class SettingsView : Component
                 targetPaddingX, targetPaddingY)
             .Background(targetFill)
             .WithBorder(targetStroke, targetBorderThickness)
-            .AutomationName("Target taskbar tray")
-            .HelpText("Drop shell icons here. Drag existing icons to reorder them.")
+            .AutomationName("Draft Tray drop target")
+            .HelpText("Drop module icons here to add them. Drag existing icons to reorder, or elsewhere on this Shells page to remove.")
             .IsTabStop(true)
             .Ref(initialFocusRef)
             .OnTapped((_, _) => setSelectedId(null))
@@ -355,34 +675,6 @@ class SettingsView : Component
                     setSelectedId(null);
                     args.Handled = true;
                 }
-            })
-            .OnDragEnter(_ => setStripHot(true))
-            .OnDragLeave(_ =>
-            {
-                setStripHot(false);
-                ClearPreview();
-            })
-            .OnDragOver(args =>
-            {
-                if (!TryGetPayload(args.Data, out var payload))
-                    return;
-
-                args.AcceptedOperation = payload.InstanceId != null
-                    ? DragOperations.Move
-                    : DragOperations.Copy;
-                var index = InsertIndexFor(args.Position.X);
-                if (preview == null || preview.Value.Index != index ||
-                    preview.Value.InstanceId != payload.InstanceId)
-                {
-                    setPreview((index, payload.InstanceId));
-                }
-            })
-            .OnDrop(args =>
-            {
-                setStripHot(false);
-                ClearPreview();
-                if (TryGetPayload(args.Data, out var payload))
-                    DropOnTarget(payload, args.Position.X);
             });
 
         var cardFill = highContrast
@@ -403,7 +695,7 @@ class SettingsView : Component
                 group.Module,
                 group.Kinds,
                 AddKind,
-                ClearPreview,
+                ClearDragSession,
                 highContrast))
             .ToArray();
 
@@ -429,7 +721,7 @@ class SettingsView : Component
             panelBody = FlexColumn(
                 Subtitle("Modules")
                     .HeadingLevel(AutomationHeadingLevel.Level2),
-                Body("Drag a shell to the Tray below for exact placement, or click it to append.")
+                Body("Drag a Shell icon to the Tray below for exact placement, or click the tile to append.")
                     .TextWrapping(TextWrapping.WrapWholeWords)
                     .Foreground(Theme.SecondaryText)
                     .Margin(0, 4, 0, 0),
@@ -474,7 +766,7 @@ class SettingsView : Component
                     FlexColumn(
                             Title("Edit Shells")
                                 .HeadingLevel(AutomationHeadingLevel.Level1),
-                            Caption("Choose modules and arrange the tray below, then save and exit.")
+                            Caption("Choose modules and arrange the Tray below, then save your changes.")
                                 .Foreground(Theme.SecondaryText)
                                 .Margin(0, 4, 0, 0))
                         .Grid(row: 0, column: 0),
@@ -498,47 +790,30 @@ class SettingsView : Component
                 ])
             .Margin(24, 20, 24, 16);
 
-        var panelBackground = panelHot
+        var removeHot = dragSession?.Zone == ShellDropZone.Remove;
+        var panelBackground = removeHot
             ? highContrast ? Theme.Ref("SystemColorWindowColorBrush") : Theme.SystemCriticalBackground
             : cardFill;
-        var panelStroke = panelHot
+        var panelStroke = removeHot
             ? highContrast ? Theme.Ref("SystemColorHighlightColorBrush") : Theme.SystemCritical
             : cardStroke;
 
         var panel = (Border(scrollBody) with { CornerRadius = 8 })
             .Background(panelBackground)
-            .WithBorder(panelStroke, panelHot || highContrast ? 2 : 1)
+            .WithBorder(panelStroke, removeHot || highContrast ? 2 : 1)
             .AutomationName("Shell editor")
             .Landmark(AutomationLandmarkType.Main)
-            .Margin(24, 0, 24, 16)
-            .OnDragEnter(args =>
-            {
-                if (TryGetPayload(args.Data, out var payload) && payload.InstanceId != null)
-                    setPanelHot(true);
-                ClearPreview();
-            })
-            .OnDragLeave(_ => setPanelHot(false))
-            .OnDragOver(args =>
-            {
-                if (TryGetPayload(args.Data, out var payload) && payload.InstanceId != null)
-                    args.AcceptedOperation = DragOperations.Move;
-            })
-            .OnDrop(args =>
-            {
-                setPanelHot(false);
-                ClearPreview();
-                if (TryGetPayload(args.Data, out var payload) && payload.InstanceId != null)
-                    RemoveInstance(payload.InstanceId);
-            });
+            .Margin(24, 0, 24, 16);
 
         var trayScroller = ScrollView(target)
             .HorizontalContentAlignment(HorizontalAlignment.Stretch)
+            .Ref(trayScrollerRef)
             .Margin(0, 12, 0, 0);
         var trayFooter = Border(
                 FlexColumn(
                     Subtitle("Tray")
                         .HeadingLevel(AutomationHeadingLevel.Level2),
-                    Body("Drag shells here to add or reorder them. Drag an existing shell back to Modules to remove it.")
+                    Body("Drag module icons here to add them. Reorder Tray icons in place, or drop one elsewhere on this Shells page to remove it.")
                         .TextWrapping(TextWrapping.WrapWholeWords)
                         .Foreground(Theme.SecondaryText)
                         .Margin(0, 4, 0, 0),
@@ -623,13 +898,36 @@ class SettingsView : Component
             .Landmark(AutomationLandmarkType.Main);
 
         var shellPage = Grid(
-            [GridSize.Star()],
-            [GridSize.Auto, GridSize.Star(), GridSize.Auto],
-            [
-                header.Grid(row: 0, column: 0),
-                panel.Grid(row: 1, column: 0),
-                trayFooter.Grid(row: 2, column: 0),
-            ]);
+                [GridSize.Star()],
+                [GridSize.Auto, GridSize.Star(), GridSize.Auto],
+                [
+                    header.Grid(row: 0, column: 0),
+                    panel.Grid(row: 1, column: 0),
+                    trayFooter.Grid(row: 2, column: 0),
+                ])
+            // A transparent hit-test surface lets the whole Shells page act
+            // as one drop target without painting over the window backdrop.
+            .Background(Theme.Ref("SubtleFillColorTransparentBrush"))
+            .Ref(shellPageRef)
+            .OnDragEnter(UpdateDragTarget)
+            .OnDragOver(UpdateDragTarget)
+            .OnDragLeave(_ => ClearDragSession())
+            .OnDrop(args =>
+            {
+                if (TryResolveDrag(
+                        args.Data,
+                        args.Position,
+                        out var resolved,
+                        out _,
+                        out _))
+                {
+                    CommitDrop(resolved);
+                }
+                else
+                {
+                    ClearDragSession();
+                }
+            });
 
         var discardDialog = ContentDialog(
             "Discard changes?",
@@ -656,10 +954,18 @@ class SettingsView : Component
             page == SettingsPage.Shells ? shellPage : generalPage) with
         {
             SelectedTag = selectedTag,
-            OnSelectedTagChanged = tag => setPage(
-                string.Equals(tag, "shells", StringComparison.OrdinalIgnoreCase)
+            OnSelectedTagChanged = tag =>
+            {
+                var nextPage = string.Equals(
+                    tag,
+                    "shells",
+                    StringComparison.OrdinalIgnoreCase)
                     ? SettingsPage.Shells
-                    : SettingsPage.General),
+                    : SettingsPage.General;
+                if (nextPage != SettingsPage.Shells)
+                    ClearDragSession();
+                setPage(nextPage);
+            },
             PaneDisplayMode = NavigationViewPaneDisplayMode.Left,
             PaneTitle = "Pagurian",
             IsPaneOpen = true,
@@ -686,6 +992,12 @@ class SettingsView : Component
                     return;
 
                 args.Handled = true;
+                if (dragSessionRef.Current != null)
+                {
+                    ClearDragSession();
+                    return;
+                }
+
                 SettingsWindow.RequestClose();
             })
             .Backdrop(BackdropKind.MicaAlt);
@@ -704,7 +1016,8 @@ class SettingsView : Component
         bool highContrast,
         bool reduceMotion,
         double scale,
-        bool dimmed)
+        bool placeholder,
+        bool hidden)
     {
         var known = ModuleLoader.TryGetKind(entry.ShellType, out _);
         var name = NameFor(entry.ShellType);
@@ -716,52 +1029,19 @@ class SettingsView : Component
         var highlight = Theme.Ref("SystemColorHighlightColorBrush");
         var fill = highContrast
             ? windowFill
-            : !known
+            : placeholder
+                ? Theme.AccentTertiary
+                : !known
                 ? Theme.SystemCriticalBackground
                 : selected ? Theme.SubtleFill : Theme.ControlFill;
         var stroke = highContrast
-            ? selected ? highlight : windowText
-            : selected ? Theme.Accent : Theme.ControlStroke;
-
-        Element[] iconLayers = known
-            ?
-            [
-                Image(IconFor(entry.ShellType))
-                    .Width(24 * scale)
-                    .Height(24 * scale)
-                    .AccessibilityHidden()
-                    .HAlign(HorizontalAlignment.Center)
-                    .VAlign(VerticalAlignment.Center),
-            ]
-            :
-            [
-                Image(IconFor(entry.ShellType))
-                    .Width(24 * scale)
-                    .Height(24 * scale)
-                    .AccessibilityHidden()
-                    .HAlign(HorizontalAlignment.Center)
-                    .VAlign(VerticalAlignment.Center),
-                BodyStrong("\u25B2")
-                    .FontSize(26 * scale)
-                    .Foreground(highContrast ? highlight : Theme.SystemCaution)
-                    .Opacity(0.76)
-                    .AccessibilityHidden()
-                    .HAlign(HorizontalAlignment.Center)
-                    .VAlign(VerticalAlignment.Center),
-                BodyStrong("!")
-                    .FontSize(12 * scale)
-                    .Foreground(Theme.Ref("SystemColorWindowTextColorBrush"))
-                    .Opacity(0.76)
-                    .Margin(0, 4 * scale, 0, 0)
-                    .AccessibilityHidden()
-                    .HAlign(HorizontalAlignment.Center)
-                    .VAlign(VerticalAlignment.Center),
-            ];
+            ? placeholder || selected ? highlight : windowText
+            : placeholder || selected ? Theme.Accent : Theme.ControlStroke;
 
         var chipPanelBase = Grid(
                 [GridSize.Star()],
                 [GridSize.Star()],
-                iconLayers)
+                [ShellIconVisual(entry.ShellType, highContrast, scale, placeholder)])
             .Background(fill);
         Element chipPanel = !reduceMotion && !highContrast
             ? chipPanelBase.BackgroundTransition()
@@ -770,24 +1050,35 @@ class SettingsView : Component
         var chipBase = (Border(chipPanel) with { CornerRadius = 4 * scale })
             .Width(ChipSize * scale)
             .Height(ChipSize * scale)
-            .WithBorder(stroke, highContrast || selected ? 2 : known ? 1 : 0)
-            .HelpText($"{tip}. Press Delete to remove.")
-            .AutomationName($"Configure {name}, shell {entry.Id}")
+            .WithBorder(stroke, highContrast || selected || placeholder ? 2 : known ? 1 : 0)
+            .HelpText(placeholder
+                ? $"Proposed position for {tip}."
+                : $"{tip}. Drag to reorder or remove. Press Delete to remove.")
+            .AutomationName(placeholder
+                ? $"Proposed position for {name}, shell {entry.Id}"
+                : $"Configure {name}, shell {entry.Id}")
             .PositionInSet(position, setSize)
-            .IsTabStop(true)
+            .IsTabStop(!placeholder && !hidden)
+            // Keep a Tray drag source mounted while its remove preview is
+            // visually collapsed. Unmounting it can cancel the native drag
+            // before the page-level Drop/DragLeave cleanup runs.
+            .IsVisible(!hidden)
             .OnTapped((_, args) =>
             {
                 args.Handled = true;
-                onSelected();
+                if (!placeholder && !hidden)
+                    onSelected();
             })
             .OnKeyDown((_, args) =>
             {
-                if (args.Key is VirtualKey.Enter or VirtualKey.Space)
+                if (!placeholder && !hidden &&
+                    args.Key is VirtualKey.Enter or VirtualKey.Space)
                 {
                     onSelected();
                     args.Handled = true;
                 }
-                else if (args.Key is VirtualKey.Delete or VirtualKey.Back)
+                else if (!placeholder && !hidden &&
+                    args.Key is VirtualKey.Delete or VirtualKey.Back)
                 {
                     onRemove();
                     args.Handled = true;
@@ -799,9 +1090,12 @@ class SettingsView : Component
                 _ => onDragEnd());
 
         Element chip = chipBase;
-        if (dimmed && !highContrast)
-            chip = chip.Opacity(0.32);
-        return WithInstantTooltip(chip.WithKey(entry.Id), tip);
+        if (placeholder || hidden)
+            chip = chip.AccessibilityHidden();
+        var tooltip = placeholder
+            ? tip
+            : $"{tip}\nDrag to reorder, or drop elsewhere on the Shells page to remove.";
+        return WithInstantTooltip(chip, tooltip).WithKey(entry.Id);
     }
 
     private static Element ShellConfigurationPanel(
@@ -865,17 +1159,28 @@ class SettingsView : Component
                 var name = kind.DisplayName.Length > 0
                     ? kind.DisplayName
                     : ShortName(kindId);
+                var dragIcon = WithInstantTooltip(Border(
+                        Image(kind.PreviewIconPath ?? AppAssets.IconPath)
+                            .Width(24)
+                            .Height(24)
+                            .AccessibilityHidden()
+                            .HAlign(HorizontalAlignment.Center)
+                            .VAlign(VerticalAlignment.Center))
+                    .Width(44)
+                    .Height(44)
+                    .Background(Theme.Ref("SubtleFillColorTransparentBrush"))
+                    .AccessibilityHidden()
+                    .OnDragStart(
+                        () => ShellDragPayload.ForKind(kindId),
+                        DragOperations.Copy,
+                        _ => onDragEnd()),
+                    $"Drag {name} to the Tray to add it.");
                 return (Element)Button(
                         Grid(
                             [GridSize.Auto, GridSize.Auto],
                             [GridSize.Auto],
                             [
-                                Image(kind.PreviewIconPath ?? AppAssets.IconPath)
-                                    .Width(24)
-                                    .Height(24)
-                                    .AccessibilityHidden()
-                                    .VAlign(VerticalAlignment.Center)
-                                    .Grid(row: 0, column: 0),
+                                dragIcon.Grid(row: 0, column: 0),
                                 FlexColumn(
                                         BodyStrong(name)
                                             .TextWrapping(TextWrapping.WrapWholeWords),
@@ -889,11 +1194,8 @@ class SettingsView : Component
                     .Padding(12)
                     .HAlign(HorizontalAlignment.Left)
                     .AutomationName($"Add {name} to tray")
+                    .HelpText("Click or press Enter to append. Drag the icon to choose its Tray position.")
                     .PositionInSet(index + 1, kinds.Count)
-                    .OnDragStart(
-                        () => ShellDragPayload.ForKind(kindId),
-                        DragOperations.Copy,
-                        _ => onDragEnd())
                     .WithKey(module.Id + ":" + kindId);
             })
             .ToArray();
@@ -926,19 +1228,73 @@ class SettingsView : Component
             .WithKey(module.Id);
     }
 
-    private static Element GhostSlot(bool highContrast, double scale) =>
-        (Border(null!) with { CornerRadius = 4 * scale })
+    private static Element GhostSlot(string kindId, bool highContrast, double scale) =>
+        (Border(ShellIconVisual(kindId, highContrast, scale, faded: true)) with
+        {
+            CornerRadius = 4 * scale,
+        })
             .Width(ChipSize * scale)
             .Height(ChipSize * scale)
             .Background(highContrast
                 ? Theme.Ref("SystemColorWindowColorBrush")
-                : Theme.SystemAttentionBackground)
+                : Theme.AccentTertiary)
             .WithBorder(
                 highContrast
                     ? Theme.Ref("SystemColorHighlightColorBrush")
                     : Theme.Accent,
                 2)
-            .WithKey("ghost");
+            .IsTabStop(false)
+            .AccessibilityHidden()
+            .WithKey("shell-drag-placeholder");
+
+    private static Element ShellIconVisual(
+        string kindId,
+        bool highContrast,
+        double scale,
+        bool faded)
+    {
+        var known = ModuleLoader.TryGetKind(kindId, out _);
+        Element baseIcon = Image(IconFor(kindId))
+            .Width(24 * scale)
+            .Height(24 * scale)
+            .AccessibilityHidden()
+            .HAlign(HorizontalAlignment.Center)
+            .VAlign(VerticalAlignment.Center);
+
+        Element icon = baseIcon;
+        if (!known)
+        {
+            Element triangle = BodyStrong("\u25B2")
+                .FontSize(26 * scale)
+                .Foreground(highContrast
+                    ? Theme.Ref("SystemColorHighlightColorBrush")
+                    : Theme.SystemCaution)
+                .AccessibilityHidden()
+                .HAlign(HorizontalAlignment.Center)
+                .VAlign(VerticalAlignment.Center);
+            Element exclamation = BodyStrong("!")
+                .FontSize(12 * scale)
+                .Foreground(highContrast
+                    ? Theme.Ref("SystemColorWindowTextColorBrush")
+                    : Theme.PrimaryText)
+                .Margin(0, 4 * scale, 0, 0)
+                .AccessibilityHidden()
+                .HAlign(HorizontalAlignment.Center)
+                .VAlign(VerticalAlignment.Center);
+            if (!highContrast)
+            {
+                triangle = triangle.Opacity(0.76);
+                exclamation = exclamation.Opacity(0.76);
+            }
+
+            icon = Grid(
+                [GridSize.Star()],
+                [GridSize.Star()],
+                [baseIcon, triangle, exclamation]);
+        }
+
+        return faded && !highContrast ? icon.Opacity(0.48) : icon;
+    }
 
     private static Element WithInstantTooltip(Element element, string text) =>
         element
