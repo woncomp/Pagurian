@@ -136,14 +136,16 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   `HostSettings.SetConfigDir` → config reload → `TrayShells.ApplyConfig`).
   The Shells page keeps the module catalog or per-instance
   `ShellConfiguration` in the scrollable center, with the draft Tray fixed
-  at the bottom and horizontally scrollable. Drag a Module icon into the Tray
-  to add it, drag a Tray icon within the Tray to reorder it, or drop a Tray
-  icon elsewhere inside the Shells page to remove it. Drag hover renders a
-  projected list without changing the draft; one draft change is committed
-  only after an accepted drop. Dropping outside the app, pressing Esc, or a
-  system cancellation restores the original list. Click/Enter/Space add,
-  explicit Remove, and Delete/Backspace remain equivalent keyboard and
-  pointer operations. The shared Shells draft, including per-instance
+  at the bottom and horizontally scrollable. Module Shells are drag-only:
+  moving an icon 3 DIPs starts the native drag, and dropping it into the Tray
+  adds it. Drag a Tray icon within the Tray to reorder it, or drop it onto the
+  central Modules/configuration panel (highlighted with the critical border)
+  to remove it. Other page regions and the area outside the app reject the
+  drop. Drag hover renders a projected list without changing the draft; one
+  draft change is committed only after an accepted drop. Pressing Esc or a
+  system cancellation restores the original list. Explicit Remove and
+  Delete/Backspace remain available removal operations. The shared Shells
+  draft, including per-instance
   `ShellConfiguration` settings, survives page switches. Save persists the
   complete draft with `TrayConfig.Save`, applies it with
   `TrayShells.ApplyConfig`, and keeps Settings open; Revert reloads the last

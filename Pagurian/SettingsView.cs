@@ -9,6 +9,7 @@ using Microsoft.UI.Reactor.Layout;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Pagurian.Sdk;
 using Windows.Foundation;
 using Windows.Storage.Pickers;
@@ -24,6 +25,8 @@ class SettingsView : Component
 {
     private static readonly ConditionalWeakTable<FrameworkElement, InstantTooltipBinding>
         InstantTooltipBindings = new();
+    private static readonly ConditionalWeakTable<FrameworkElement, ThresholdDragBinding>
+        ThresholdDragBindings = new();
 
     private const double StripPadX = 12;
     private const double ChipSize = 44;
@@ -32,6 +35,7 @@ class SettingsView : Component
     private const double EmptyTargetWidth = 160;
     private const double AutoScrollEdge = 48;
     private const double AutoScrollStep = 12;
+    private const double DragThreshold = 3;
 
     private sealed class InstantTooltipBinding
     {
@@ -76,6 +80,131 @@ class SettingsView : Component
     {
         public static ShellDragPayload ForKind(string kindId) => new(kindId, null);
         public static ShellDragPayload ForInstance(string instanceId) => new(null, instanceId);
+    }
+
+    private sealed class ThresholdDragBinding
+    {
+        private readonly FrameworkElement _element;
+        private uint? _pointerId;
+        private Point _startPoint;
+        private bool _dragStarted;
+        private bool _attached;
+
+        public ThresholdDragBinding(FrameworkElement element)
+        {
+            _element = element;
+        }
+
+        public void Attach()
+        {
+            if (_attached)
+                return;
+
+            _attached = true;
+            _element.CanDrag = false;
+            _element.PointerPressed += OnPointerPressed;
+            _element.PointerMoved += OnPointerMoved;
+            _element.PointerReleased += OnPointerReleased;
+            _element.PointerCanceled += OnPointerCanceled;
+            _element.PointerCaptureLost += OnPointerCaptureLost;
+        }
+
+        public void Detach()
+        {
+            if (!_attached)
+                return;
+
+            _attached = false;
+            _element.PointerPressed -= OnPointerPressed;
+            _element.PointerMoved -= OnPointerMoved;
+            _element.PointerReleased -= OnPointerReleased;
+            _element.PointerCanceled -= OnPointerCanceled;
+            _element.PointerCaptureLost -= OnPointerCaptureLost;
+            Reset(releaseCapture: true);
+        }
+
+        private void OnPointerPressed(object sender, PointerRoutedEventArgs args)
+        {
+            if (!_attached || _dragStarted)
+                return;
+
+            // Reactor enables CanDrag for its typed data pipeline. Disable its
+            // built-in gesture threshold before movement starts; StartDragAsync
+            // below still raises the same DragStarting/DropCompleted events.
+            _element.CanDrag = false;
+            var point = args.GetCurrentPoint(_element);
+            var properties = point.Properties;
+            var isPrimary = properties.IsLeftButtonPressed ||
+                point.IsInContact &&
+                !properties.IsRightButtonPressed &&
+                !properties.IsMiddleButtonPressed;
+            if (!isPrimary)
+                return;
+
+            _pointerId = args.Pointer.PointerId;
+            _startPoint = point.Position;
+            _element.CapturePointer(args.Pointer);
+        }
+
+        private void OnPointerMoved(object sender, PointerRoutedEventArgs args)
+        {
+            if (!_attached || _dragStarted || _pointerId != args.Pointer.PointerId)
+                return;
+
+            var point = args.GetCurrentPoint(_element);
+            var deltaX = point.Position.X - _startPoint.X;
+            var deltaY = point.Position.Y - _startPoint.Y;
+            if (deltaX * deltaX + deltaY * deltaY < DragThreshold * DragThreshold)
+                return;
+
+            _dragStarted = true;
+            _element.ReleasePointerCapture(args.Pointer);
+            args.Handled = true;
+            BeginDrag(point);
+        }
+
+        private void OnPointerReleased(object sender, PointerRoutedEventArgs args)
+        {
+            if (!_dragStarted && _pointerId == args.Pointer.PointerId)
+                Reset(releaseCapture: true);
+        }
+
+        private void OnPointerCanceled(object sender, PointerRoutedEventArgs args)
+        {
+            if (!_dragStarted && _pointerId == args.Pointer.PointerId)
+                Reset(releaseCapture: true);
+        }
+
+        private void OnPointerCaptureLost(object sender, PointerRoutedEventArgs args)
+        {
+            if (!_dragStarted && _pointerId == args.Pointer.PointerId)
+                Reset(releaseCapture: false);
+        }
+
+        private async void BeginDrag(Microsoft.UI.Input.PointerPoint point)
+        {
+            try
+            {
+                await _element.StartDragAsync(point);
+            }
+            catch (Exception ex)
+            {
+                PagurianLog.HostError($"shell editor: failed to start drag: {ex.Message}");
+            }
+            finally
+            {
+                Reset(releaseCapture: true);
+            }
+        }
+
+        private void Reset(bool releaseCapture)
+        {
+            if (releaseCapture)
+                _element.ReleasePointerCaptures();
+            _pointerId = null;
+            _dragStarted = false;
+            _element.CanDrag = false;
+        }
     }
 
     private enum ShellDropZone
@@ -130,6 +259,7 @@ class SettingsView : Component
         var (appliedDir, setAppliedDir) = UseState(initialDir);
 
         var shellPageRef = this.UseElementRef<Grid>();
+        var removalPanelRef = this.UseElementRef<Border>();
         var trayScrollerRef = this.UseElementRef<ScrollView>();
         var draftRef = UseRef(draft);
         var dragSessionRef = UseRef<ShellDragSession?>(dragSession);
@@ -249,8 +379,9 @@ class SettingsView : Component
                 return false;
 
             var root = shellPageRef.Current;
+            var removalPanel = removalPanelRef.Current;
             var scroll = trayScrollerRef.Current;
-            if (root == null || scroll == null)
+            if (root == null || removalPanel == null || scroll == null)
                 return false;
 
             try
@@ -278,7 +409,13 @@ class SettingsView : Component
                     return true;
                 }
 
-                if (payload.InstanceId != null)
+                var removalOrigin = removalPanel.TransformToVisual(root)
+                    .TransformPoint(new Point(0, 0));
+                var inRemovalPanel = rootPoint.X >= removalOrigin.X &&
+                    rootPoint.X <= removalOrigin.X + removalPanel.ActualWidth &&
+                    rootPoint.Y >= removalOrigin.Y &&
+                    rootPoint.Y <= removalOrigin.Y + removalPanel.ActualHeight;
+                if (payload.InstanceId != null && inRemovalPanel)
                 {
                     resolved = new ShellDragSession(
                         payload,
@@ -451,21 +588,6 @@ class SettingsView : Component
                     draftRef.Current),
             });
         };
-
-        void AddKind(string kindId)
-        {
-            var entries = draftRef.Current;
-            var next = new List<TrayConfig.Entry>(entries)
-            {
-                new(
-                    kindId,
-                    TrayConfig.NextId(entries.Select(entry => entry.Id)),
-                    null),
-            };
-            draftRef.Current = next;
-            setDraft(next);
-            setDirty(true);
-        }
 
         void RemoveInstance(string instanceId)
         {
@@ -664,7 +786,7 @@ class SettingsView : Component
             .Background(targetFill)
             .WithBorder(targetStroke, targetBorderThickness)
             .AutomationName("Draft Tray drop target")
-            .HelpText("Drop module icons here to add them. Drag existing icons to reorder, or elsewhere on this Shells page to remove.")
+            .HelpText("Drop module icons here to add them. Drag existing icons to reorder, or onto the Modules panel to remove.")
             .IsTabStop(true)
             .Ref(initialFocusRef)
             .OnTapped((_, _) => setSelectedId(null))
@@ -694,7 +816,6 @@ class SettingsView : Component
             .Select(group => ModuleCard(
                 group.Module,
                 group.Kinds,
-                AddKind,
                 ClearDragSession,
                 highContrast))
             .ToArray();
@@ -721,7 +842,7 @@ class SettingsView : Component
             panelBody = FlexColumn(
                 Subtitle("Modules")
                     .HeadingLevel(AutomationHeadingLevel.Level2),
-                Body("Drag a Shell icon to the Tray below for exact placement, or click the tile to append.")
+                Body("Drag a Shell icon to the Tray below to add it.")
                     .TextWrapping(TextWrapping.WrapWholeWords)
                     .Foreground(Theme.SecondaryText)
                     .Margin(0, 4, 0, 0),
@@ -803,6 +924,7 @@ class SettingsView : Component
             .WithBorder(panelStroke, removeHot || highContrast ? 2 : 1)
             .AutomationName("Shell editor")
             .Landmark(AutomationLandmarkType.Main)
+            .Ref(removalPanelRef)
             .Margin(24, 0, 24, 16);
 
         var trayScroller = ScrollView(target)
@@ -813,7 +935,7 @@ class SettingsView : Component
                 FlexColumn(
                     Subtitle("Tray")
                         .HeadingLevel(AutomationHeadingLevel.Level2),
-                    Body("Drag module icons here to add them. Reorder Tray icons in place, or drop one elsewhere on this Shells page to remove it.")
+                    Body("Drag module icons here to add them. Reorder Tray icons in place, or drop one onto the Modules panel to remove it.")
                         .TextWrapping(TextWrapping.WrapWholeWords)
                         .Foreground(Theme.SecondaryText)
                         .Margin(0, 4, 0, 0),
@@ -1047,7 +1169,7 @@ class SettingsView : Component
             ? chipPanelBase.BackgroundTransition()
             : chipPanelBase;
 
-        var chipBase = (Border(chipPanel) with { CornerRadius = 4 * scale })
+        var chipBase = WithThresholdDrag((Border(chipPanel) with { CornerRadius = 4 * scale })
             .Width(ChipSize * scale)
             .Height(ChipSize * scale)
             .WithBorder(stroke, highContrast || selected || placeholder ? 2 : known ? 1 : 0)
@@ -1087,14 +1209,14 @@ class SettingsView : Component
             .OnDragStart(
                 () => ShellDragPayload.ForInstance(entry.Id),
                 DragOperations.Move,
-                _ => onDragEnd());
+                _ => onDragEnd()));
 
         Element chip = chipBase;
         if (placeholder || hidden)
             chip = chip.AccessibilityHidden();
         var tooltip = placeholder
             ? tip
-            : $"{tip}\nDrag to reorder, or drop elsewhere on the Shells page to remove.";
+            : $"{tip}\nDrag to reorder, or drop onto the Modules panel to remove.";
         return WithInstantTooltip(chip, tooltip).WithKey(entry.Id);
     }
 
@@ -1148,7 +1270,6 @@ class SettingsView : Component
     private static Element ModuleCard(
         PagurianModule module,
         List<ShellAttribute> kinds,
-        Action<string> onAddKind,
         Action onDragEnd,
         bool highContrast)
     {
@@ -1159,7 +1280,7 @@ class SettingsView : Component
                 var name = kind.DisplayName.Length > 0
                     ? kind.DisplayName
                     : ShortName(kindId);
-                var dragIcon = WithInstantTooltip(Border(
+                var dragIcon = WithThresholdDrag(WithInstantTooltip(Border(
                         Image(kind.PreviewIconPath ?? AppAssets.IconPath)
                             .Width(24)
                             .Height(24)
@@ -1174,8 +1295,8 @@ class SettingsView : Component
                         () => ShellDragPayload.ForKind(kindId),
                         DragOperations.Copy,
                         _ => onDragEnd()),
-                    $"Drag {name} to the Tray to add it.");
-                return (Element)Button(
+                    $"Drag {name} to the Tray to add it."));
+                return (Element)Border(
                         Grid(
                             [GridSize.Auto, GridSize.Auto],
                             [GridSize.Auto],
@@ -1184,17 +1305,25 @@ class SettingsView : Component
                                 FlexColumn(
                                         BodyStrong(name)
                                             .TextWrapping(TextWrapping.WrapWholeWords),
-                                        Caption("Drag or click to add")
+                                        Caption("Drag to add")
                                             .Foreground(Theme.SecondaryText)
                                             .Margin(0, 4, 0, 0))
                                     .Margin(12, 0, 0, 0)
                                     .Grid(row: 0, column: 1),
-                            ]),
-                        () => onAddKind(kindId))
+                            ]))
                     .Padding(12)
+                    .CornerRadius(4)
                     .HAlign(HorizontalAlignment.Left)
-                    .AutomationName($"Add {name} to tray")
-                    .HelpText("Click or press Enter to append. Drag the icon to choose its Tray position.")
+                    .Background(highContrast
+                        ? Theme.Ref("SystemColorWindowColorBrush")
+                        : Theme.ControlFill)
+                    .WithBorder(
+                        highContrast
+                            ? Theme.Ref("SystemColorWindowTextColorBrush")
+                            : Theme.ControlStroke,
+                        highContrast ? 2 : 1)
+                    .AutomationName($"Drag {name} to tray")
+                    .HelpText("Drag the icon to the Tray to add this Shell.")
                     .PositionInSet(index + 1, kinds.Count)
                     .WithKey(module.Id + ":" + kindId);
             })
@@ -1300,6 +1429,28 @@ class SettingsView : Component
         element
             .OnMountAdd(frameworkElement => AttachInstantTooltip(frameworkElement, text))
             .OnUnmountAdd(DetachInstantTooltip);
+
+    private static Element WithThresholdDrag(Element element) =>
+        element
+            .OnMountAdd(AttachThresholdDrag)
+            .OnUnmountAdd(DetachThresholdDrag);
+
+    private static void AttachThresholdDrag(FrameworkElement element)
+    {
+        DetachThresholdDrag(element);
+        var binding = new ThresholdDragBinding(element);
+        ThresholdDragBindings.Add(element, binding);
+        binding.Attach();
+    }
+
+    private static void DetachThresholdDrag(FrameworkElement element)
+    {
+        if (!ThresholdDragBindings.TryGetValue(element, out var binding))
+            return;
+
+        binding.Detach();
+        ThresholdDragBindings.Remove(element);
+    }
 
     private static void AttachInstantTooltip(FrameworkElement element, string text)
     {
