@@ -136,7 +136,13 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   `HostSettings.SetConfigDir` → config reload → `TrayShells.ApplyConfig`).
   The Shells page keeps the module catalog or per-instance
   `ShellConfiguration` in the scrollable center, with the draft Tray fixed
-  at the bottom and horizontally scrollable. Module Shells are drag-only:
+  at the bottom and horizontally scrollable. The center uses a nested
+  `NavigationHost` with `Modules` and per-instance `ShellConfiguration`
+  routes: configurations enter from the right with
+  `NavigationTransition.Spring()`, and Back plays the reverse transition.
+  Reduce Motion uses `NavigationTransition.None`. Only the scrollable center
+  participates; the Tray/footer remains fixed outside the transition. Module
+  Shells are drag-only:
   any drag movement starts the native drag immediately, and dropping it into the Tray
   adds it. Drag a Tray icon within the Tray to reorder it, or drop it onto the
   central Modules/configuration panel (highlighted with the critical border)

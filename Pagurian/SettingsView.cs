@@ -6,6 +6,7 @@ using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Reactor.Hooks;
 using Microsoft.UI.Reactor.Input;
 using Microsoft.UI.Reactor.Layout;
+using Microsoft.UI.Reactor.Navigation;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
@@ -233,9 +234,18 @@ class SettingsView : Component
         ShellDropZone Zone,
         int CandidateIndex);
 
+    private abstract record ShellEditorRoute
+    {
+        public sealed record Modules : ShellEditorRoute;
+        public sealed record Configuration(string InstanceId) : ShellEditorRoute;
+    }
+
+    private static readonly ShellEditorRoute ModulesRoute = new ShellEditorRoute.Modules();
+
     public override Element Render()
     {
         var (page, setPage) = UseState(SettingsWindow.RequestedPage);
+        var shellNavigation = UseNavigation<ShellEditorRoute>(ModulesRoute);
         UseEffect(() =>
         {
             void OnPageRequested(SettingsPage requested) => setPage(requested);
@@ -245,12 +255,14 @@ class SettingsView : Component
 
         var colorScheme = UseColorScheme();
         var highContrastScheme = UseHighContrastScheme();
+        var reduceMotion = UseReducedMotion();
         var (initialFocusRef, requestInitialFocus) = this.UseElementFocus();
         UseEffect(() =>
         {
-            if (page == SettingsPage.Shells)
+            if (page == SettingsPage.Shells &&
+                shellNavigation.CurrentRoute is ShellEditorRoute.Modules)
                 requestInitialFocus();
-        }, page);
+        }, page, shellNavigation.CurrentRoute);
         var highContrast = colorScheme == ColorScheme.HighContrast;
 
         var configurationTheme = UseMemo(
@@ -264,7 +276,9 @@ class SettingsView : Component
         var initialDraft = UseMemo(() => TrayConfig.Load().ToList(), Array.Empty<object>());
         var (draft, setDraft) = UseState(initialDraft);
         var (dirty, setDirty) = UseState(false);
-        var (selectedId, setSelectedId) = UseState<string?>(null);
+        var selectedId = shellNavigation.CurrentRoute is ShellEditorRoute.Configuration configurationRoute
+            ? configurationRoute.InstanceId
+            : null;
         var (dragSession, setDragSession) = UseState<ShellDragSession?>(null);
         var (activeTrayDragId, setActiveTrayDragId) = UseState<string?>(null);
         var (discardDialogOpen, setDiscardDialogOpen) = UseState(false);
@@ -283,6 +297,38 @@ class SettingsView : Component
         var autoScrollTickRef = UseRef<Action>(() => { });
         draftRef.Current = draft;
         dragSessionRef.Current = dragSession;
+
+        void OpenConfiguration(string instanceId)
+        {
+            if (shellNavigation.CurrentRoute is ShellEditorRoute.Configuration current)
+            {
+                if (current.InstanceId == instanceId)
+                    return;
+
+                shellNavigation.Replace(new ShellEditorRoute.Configuration(instanceId));
+                return;
+            }
+
+            shellNavigation.Navigate(new ShellEditorRoute.Configuration(instanceId));
+        }
+
+        void BackToModules()
+        {
+            if (shellNavigation.CurrentRoute is ShellEditorRoute.Modules)
+                return;
+
+            if (!shellNavigation.GoBack())
+                shellNavigation.Reset(ModulesRoute);
+        }
+
+        UseEffect(() =>
+        {
+            if (shellNavigation.CurrentRoute is ShellEditorRoute.Configuration current &&
+                draft.All(entry => entry.Id != current.InstanceId))
+            {
+                BackToModules();
+            }
+        }, shellNavigation.CurrentRoute, draft);
 
         var autoScrollTimer = UseMemo(() =>
         {
@@ -662,11 +708,11 @@ class SettingsView : Component
             dragSessionRef.Current = null;
             void Commit()
             {
+                if (removedId != null && selectedId == removedId)
+                    BackToModules();
                 setDraft(next);
                 setDragSession(null);
                 setDirty(true);
-                if (removedId != null && selectedId == removedId)
-                    setSelectedId(null);
             }
 
             // StartDragAsync still owns the dragged element while OnDrop runs.
@@ -714,10 +760,10 @@ class SettingsView : Component
             if (next.Count == entries.Count)
                 return;
 
+            if (selectedId == instanceId)
+                BackToModules();
             draftRef.Current = next;
             setDraft(next);
-            if (selectedId == instanceId)
-                setSelectedId(null);
             setDirty(true);
         }
 
@@ -772,10 +818,10 @@ class SettingsView : Component
         void RevertDraft()
         {
             var entries = TrayConfig.Load().ToList();
+            if (selectedId != null && entries.All(entry => entry.Id != selectedId))
+                BackToModules();
             draftRef.Current = entries;
             setDraft(entries);
-            if (selectedId != null && entries.All(entry => entry.Id != selectedId))
-                setSelectedId(null);
             setDirty(false);
         }
 
@@ -789,10 +835,10 @@ class SettingsView : Component
                 TrayShells.ApplyConfig(entries);
                 setAppliedDir(HostSettings.ConfigDir);
                 setDirText(HostSettings.ConfigDir);
+                if (selectedId != null && entries.All(entry => entry.Id != selectedId))
+                    BackToModules();
                 draftRef.Current = entries;
                 setDraft(entries);
-                if (selectedId != null && entries.All(entry => entry.Id != selectedId))
-                    setSelectedId(null);
                 setDirty(false);
             }
             catch (Exception ex)
@@ -821,7 +867,7 @@ class SettingsView : Component
             .Select((entry, index) => TargetChip(
                 entry,
                 selectedId == entry.Id,
-                () => setSelectedId(entry.Id),
+                () => OpenConfiguration(entry.Id),
                 () => RemoveInstance(entry.Id),
                 () => BeginTrayDrag(entry.Id),
                 () =>
@@ -912,12 +958,12 @@ class SettingsView : Component
             .HelpText("Drop module icons here to add them. The insertion line shows the pending position. Drag existing icons to reorder, or onto the Modules panel to remove.")
             .IsTabStop(true)
             .Ref(initialFocusRef)
-            .OnTapped((_, _) => setSelectedId(null))
+            .OnTapped((_, _) => BackToModules())
             .OnKeyDown((_, args) =>
             {
                 if (args.Key is VirtualKey.Enter or VirtualKey.Space)
                 {
-                    setSelectedId(null);
+                    BackToModules();
                     args.Handled = true;
                 }
             });
@@ -955,14 +1001,8 @@ class SettingsView : Component
                 ColumnGap = 12,
             });
 
-        var selectedEntry = selectedId == null
-            ? null
-            : draft.FirstOrDefault(entry => entry.Id == selectedId);
-
-        Element panelBody;
-        if (selectedEntry == null)
-        {
-            panelBody = FlexColumn(
+        Element ModulesPanel() =>
+            FlexColumn(
                 Subtitle("Modules")
                     .HeadingLevel(AutomationHeadingLevel.Level2),
                 Body("Drag a Shell icon to the Tray below to add it.")
@@ -970,25 +1010,46 @@ class SettingsView : Component
                     .Foreground(Theme.SecondaryText)
                     .Margin(0, 4, 0, 0),
                 catalogContent.Margin(0, 16, 0, 0));
-        }
-        else
+
+        Element ConfigurationPanel(string instanceId)
         {
+            var selectedEntry = draft.FirstOrDefault(entry => entry.Id == instanceId);
+            if (selectedEntry == null)
+                return ModulesPanel();
+
             var selectedName = NameFor(selectedEntry.ShellType);
-            panelBody = FlexColumn(
+            var removeBackground = highContrast
+                ? Theme.Ref("SystemColorHighlightColorBrush")
+                : Theme.SystemCritical;
+            var removeForeground = highContrast
+                ? Theme.Ref("SystemColorHighlightTextColorBrush")
+                : Theme.Ref("TextOnAccentFillColorPrimaryBrush");
+
+            return FlexColumn(
                 Grid(
                     [GridSize.Star(), GridSize.Auto, GridSize.Auto],
                     [GridSize.Auto],
                     [
                         FlexColumn(
-                                Subtitle($"{selectedName} configuration")
+                                Subtitle($"Configuration: {selectedName}")
                                     .HeadingLevel(AutomationHeadingLevel.Level2),
                                 Caption($"Shell #{selectedEntry.Id}")
                                     .Foreground(Theme.SecondaryText)
                                     .Margin(0, 4, 0, 0))
                             .Grid(row: 0, column: 0),
                         Button("Remove", () => RemoveInstance(selectedEntry.Id))
+                            .Resources(resources => resources
+                                .Set("ButtonBackground", removeBackground)
+                                .Set("ButtonBackgroundPointerOver", removeBackground)
+                                .Set("ButtonBackgroundPressed", removeBackground)
+                                .Set("ButtonBorderBrush", removeBackground)
+                                .Set("ButtonBorderBrushPointerOver", removeBackground)
+                                .Set("ButtonBorderBrushPressed", removeBackground)
+                                .Set("ButtonForeground", removeForeground)
+                                .Set("ButtonForegroundPointerOver", removeForeground)
+                                .Set("ButtonForegroundPressed", removeForeground))
                             .Grid(row: 0, column: 1),
-                        Button("Back to modules", () => setSelectedId(null))
+                        Button("Back to modules", BackToModules)
                             .Margin(8, 0, 0, 0)
                             .Grid(row: 0, column: 2),
                     ]),
@@ -999,6 +1060,21 @@ class SettingsView : Component
                         settings => UpdateEntrySettings(selectedEntry.Id, settings))
                     .Margin(0, 16, 0, 0));
         }
+
+        Element PanelForRoute(ShellEditorRoute route) => route switch
+        {
+            ShellEditorRoute.Configuration configuration =>
+                ConfigurationPanel(configuration.InstanceId),
+            _ => ModulesPanel(),
+        };
+
+        var panelBody = NavigationHost(shellNavigation, PanelForRoute) with
+        {
+            CacheMode = NavigationCacheMode.Disabled,
+            Transition = reduceMotion
+                ? NavigationTransition.None
+                : NavigationTransition.Spring(),
+        };
 
         var scrollBody = ScrollView(Border(panelBody).Padding(24))
             .HorizontalContentAlignment(HorizontalAlignment.Stretch);
