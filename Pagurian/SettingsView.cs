@@ -35,7 +35,7 @@ class SettingsView : Component
     private const double EmptyTargetWidth = 160;
     private const double AutoScrollEdge = 48;
     private const double AutoScrollStep = 12;
-    private const double DragThreshold = 3;
+    private const double DragThreshold = 0;
 
     private sealed class InstantTooltipBinding
     {

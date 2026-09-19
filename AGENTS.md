@@ -137,7 +137,7 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   The Shells page keeps the module catalog or per-instance
   `ShellConfiguration` in the scrollable center, with the draft Tray fixed
   at the bottom and horizontally scrollable. Module Shells are drag-only:
-  moving an icon 3 DIPs starts the native drag, and dropping it into the Tray
+  any drag movement starts the native drag immediately, and dropping it into the Tray
   adds it. Drag a Tray icon within the Tray to reorder it, or drop it onto the
   central Modules/configuration panel (highlighted with the critical border)
   to remove it. Other page regions and the area outside the app reject the
