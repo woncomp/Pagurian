@@ -124,8 +124,8 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   editor), and the host never auto-adds discovered shells. `NextId(taken)`
   allocates a fresh 4-digit id.
 - `TrayShells.cs` — the ordered shell registry + flattened cell list.
-  `Shell.AddCell/RemoveCell` call back through an internal channel; every
-  change raises `Changed` → the tray window re-renders as a whole (no diff).
+  `Shell.AddCell/RemoveCell` call back through an internal channel; coalesced
+  changes raise `Changed` → keyed reconciliation preserves surviving controls.
   Also routes `post` messages by `Shell.InstanceId`.
   `ApplyConfig(entries)` reconciles the live set with a config list without
   restarting unchanged shells (kept by id when the kind still matches),
@@ -165,24 +165,18 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   retries and **always exits 0** (callers are fail-closed). The server
   marshals each envelope to the UI thread and routes it; unknown ids / empty
   commands are dropped with a log line.
-- `TaskbarTrayWindow.cs` — the Tray. Renders
-  `TrayShells.Cells` as keyed cell Borders (host chrome: hover overlay live
-  brush, 3×4 DIP hover margins, width read-back `Ref`), each wrapping a
-  `ComponentElement(cell.ViewType, cell.Props)`. Owns the sampled taskbar
-  blend gradient, the content-scale transform, and the hover-brush cache.
-- `TaskbarTrayLayout.cs` — cell widths read back from mounted controls'
-  `ActualWidth` through the refs; the window starts at a 1-DIP floor and
-  grows within a tick or two.
-- `TaskbarController.cs` — the 50 ms poll loop on the UI dispatcher:
-  inject/anchor into `Shell_TrayWnd` (re-inject after Explorer restarts),
-  background-throttled taskbar color sampling (NEVER on the UI thread — see
-  conventions), theme derivation, per-cell hover/pressed overlays, cursor
-  hit-testing, click dispatch (custom `OnClicked` delegate wins; otherwise
-  the cell's billboard toggles), hover-dwell tooltips, and unified billboard
-  management (position above owner cell / below at top-edge taskbars,
-  outside-click dismiss, one at a time, auto-close when the owner cell is
-  removed; `Billboard.OnOpened/OnClosed` invoked around the window lifetime;
-  fresh billboard instance per show via the cell's `CreateBillboard`).
+- `TaskbarTrayWindow.cs`: keyed cell Borders and stable hover brushes.
+  Cells measure naturally inside the session's left-aligned host panel.
+- `TaskbarTrayLayout.cs`: per-window cell refs and immutable measured
+  snapshots shared by native positioning, hit-testing and billboard anchors.
+- `TrayWindowSession.cs`: persistent HWND, hidden preparation, injection,
+  coalesced layout commits and a rendered/DwmFlush presentation gate.
+  `TrayBackgroundSampler.cs` captures spatial taskbar strips off the UI thread;
+  resizing reuses the cached strip. See `docs/Tray-Lifecycle.md` for native
+  child-window requirements and the pinned Reactor native-loss adapter.
+- `TaskbarController.cs`: the 50 ms input/environment observer. It no longer
+  polls cell widths or owns window geometry. It dispatches clicks, hover,
+  tooltips and billboard sessions using the committed tray snapshot.
 - `ThemeService.cs` — host `IThemeService`: `IsDark` from sampled luminance
   (Rec.601, threshold 140 — always matches the taskbar itself), the shared
   live `TextBrush` (mutated in place on flips), and the `Changed` broadcast.

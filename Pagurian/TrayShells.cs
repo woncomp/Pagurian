@@ -1,4 +1,5 @@
 using Pagurian.Sdk;
+using Microsoft.UI.Reactor;
 
 namespace Pagurian;
 
@@ -13,7 +14,10 @@ namespace Pagurian;
 static class TrayShells
 {
     private static readonly List<Shell> _shells = new();
-    private static readonly List<ShellCellHandle> _cells = new();
+    private static IReadOnlyList<ShellCellHandle> _cells = Array.Empty<ShellCellHandle>();
+    private static int _batchDepth;
+    private static bool _publishQueued;
+    private static long _publicationTicket;
     private static readonly Dictionary<string, ShellCellHandle> _cellsByKey = new();
 
     // Raised on the UI thread whenever the flattened cell set changes.
@@ -38,6 +42,16 @@ static class TrayShells
     // started, and the survivors take the entries' order — all without
     // restarting instances that are already live. Ends with one RebuildCells.
     public static void ApplyConfig(IReadOnlyList<TrayConfig.Entry> entries)
+    {
+        _batchDepth++;
+        try { ApplyConfigCore(entries); }
+        finally
+        {
+            if (--_batchDepth == 0) RebuildCells();
+        }
+    }
+
+    private static void ApplyConfigCore(IReadOnlyList<TrayConfig.Entry> entries)
     {
         var wanted = new HashSet<string>(entries.Select(e => e.Id));
         foreach (var shell in _shells.Where(s => !wanted.Contains(s.InstanceId)).ToList())
@@ -84,7 +98,6 @@ static class TrayShells
         }
         _shells.Clear();
         _shells.AddRange(ordered);
-        RebuildCells();
     }
 
     private static bool SettingsEqual(
@@ -159,10 +172,13 @@ static class TrayShells
 
     public static void ShutdownAll()
     {
-        foreach (var shell in _shells)
-            ShutdownOne(shell);
-        _shells.Clear();
-        RebuildCells();
+        _batchDepth++;
+        try
+        {
+            foreach (var shell in _shells) ShutdownOne(shell);
+            _shells.Clear();
+        }
+        finally { if (--_batchDepth == 0) RebuildCells(); }
     }
 
     private static void ShutdownOne(Shell shell)
@@ -179,21 +195,34 @@ static class TrayShells
 
     private static void RebuildCells()
     {
-        _cells.Clear();
+        _publicationTicket++;
+        _publishQueued = false;
+        var next = _shells.SelectMany(shell => shell.Cells).ToArray();
+        if (_cells.SequenceEqual(next)) return;
+        _cells = Array.AsReadOnly(next);
         _cellsByKey.Clear();
-        foreach (var shell in _shells)
-        {
-            foreach (var cell in shell.Cells)
-            {
-                _cells.Add(cell);
-                _cellsByKey[cell.Key] = cell;
-            }
-        }
+        foreach (var cell in next) _cellsByKey.Add(cell.Key, cell);
         Changed?.Invoke();
+    }
+
+    private static void QueuePublication()
+    {
+        // Invalidate removed interaction targets immediately, even when the
+        // visual list publication is coalesced until the end of this UI turn.
+        var liveKeys = _shells.SelectMany(s => s.Cells).Select(c => c.Key).ToHashSet();
+        foreach (var key in _cellsByKey.Keys.Where(k => !liveKeys.Contains(k)).ToArray())
+            _cellsByKey.Remove(key);
+        if (_batchDepth > 0 || _publishQueued) return;
+        _publishQueued = true;
+        long ticket = ++_publicationTicket;
+        if (ReactorApp.UIDispatcher?.TryEnqueue(() =>
+        {
+            if (ticket == _publicationTicket && _batchDepth == 0) RebuildCells();
+        }) != true) RebuildCells();
     }
 
     private sealed class Channel : IShellHostChannel
     {
-        public void NotifyCellsChanged() => RebuildCells();
+        public void NotifyCellsChanged() => QueuePublication();
     }
 }

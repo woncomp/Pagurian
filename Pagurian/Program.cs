@@ -34,11 +34,7 @@ ReactorApp.Run(_ =>
         Key: WindowKey.Of("pagurian-tray"),
         IsVisible: true));
 
-    var trayWindow = ReactorApp.OpenWindow(
-        TaskbarTrayWindow.CreateSpec(),
-        () => new TaskbarTrayWindow());
-
-    TaskbarController.Start(trayWindow);
+    TaskbarController.Start();
 
     tray.DoubleClick += (_, _) => SettingsWindow.OpenOrActivate(SettingsPage.Shells);
 

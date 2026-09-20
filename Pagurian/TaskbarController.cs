@@ -1,478 +1,92 @@
-using System.Threading;
-using System.Threading.Tasks;
-using Microsoft.UI;
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
 using Pagurian.Sdk;
 
 namespace Pagurian;
 
-// Owns the ongoing behaviors of the app:
-//  1. Keeps the tray window — a horizontal container of shell cells —
-//     anchored to the left-bottom corner of the taskbar, resizing it as
-//     cells come and go.
-//  2. Per-cell interaction by polling the cursor position and left mouse
-//     button: native hover/pressed highlights, a hover-dwell tooltip (the
-//     cell's GetTooltip delegate), click dispatch (the cell's OnClicked
-//     delegate, or its billboard toggle by default), and outside-click
-//     dismissal of the open billboard.
-//  3. Billboard management: one billboard at a time, positioned above its
-//     owner cell (below when the taskbar is at the screen's top edge),
-//     closed on outside click or when its owner cell is removed.
-// Runs on a DispatcherQueueTimer on the UI thread.
-//
-// The tray window is injected into the taskbar via SetParent (same approach as
-// AwqatSalaat.WinUI's TaskBarWidget): it becomes a child of Shell_TrayWnd and is
-// positioned in taskbar client coordinates with raw SetWindowPos (AppWindow.Move
-// semantics are unreliable for child windows owned by WinUI). If injection fails
-// the controller falls back to the original floating topmost window.
-//
-// Note: Reactor window APIs (WindowSpec.Width/Height, ManualPosition,
-// ReactorWindow.SetPosition/SetSize) take DIPs and scale them by the window DPI
-// themselves. Raw Win32 calls (SetWindowPos for the injected window, GetCursorPos
-// hit-testing) operate in physical pixels. The controller computes anchor
-// positions in physical pixels (taskbar rects are physical) and converts to
-// DIPs only at the Reactor API boundary.
+// The timer observes the external taskbar and polls input. TrayWindowSession
+// owns rendering, measurement, native geometry and presentation.
 static class TaskbarController
 {
-    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(50);
-    private const int InjectRetryIntervalTicks = 25; // ~5s at 200ms per tick
-
-    private static ReactorWindow? _trayWindow;
+    private static TrayWindowSession? _traySession;
+    private static ReactorWindow? _trayWindow => _traySession?.Window;
     private static BillboardSession? _billboardSession;
     private static string? _billboardOwnerKey;
     private static ReactorWindow? _tooltipWindow;
-    private static int _billboardCount; // unique WindowKey per opened billboard
-
-    private static TaskbarInterop.RECT _trayRectPx;
-
-    // Per-cell hit-test rects in physical pixels, keyed by cell key, rebuilt
-    // on every anchor pass.
-    private static readonly List<(string Key, TaskbarInterop.RECT Rect)> _cellRectsPx = new();
-
-    private static (double X, double Y) _lastTrayPos = (double.MinValue, double.MinValue);
-    private static (double W, double H) _lastTraySize = (0, 0);
-    private static bool _injected;
-    private static int _ticksSinceInjectAttempt = int.MaxValue; // inject on first tick
+    private static int _billboardCount;
+    private static DateTime _nextSessionAttempt;
     private static Microsoft.UI.Dispatching.DispatcherQueueTimer? _timer;
-    private static Windows.UI.Color _taskbarColor = TaskbarTrayWindow.DefaultTaskbarColor; // average of the gradient stops, for theme derivation
-    private static string? _hoverCellKey; // cell under the cursor (null = outside)
-    private static bool _pressed;
-    private static bool _wasLeftButtonDown; // previous tick's button state, for click-edge detection
-
-    // Tooltip dwell: the tooltip appears only after the cursor rests on a
-    // cell for ~400 ms (native tooltip timing).
-    private const int TooltipDwellTicks = 8; // at 50 ms per tick
-    private static string? _tooltipHoverKey; // cell the dwell timer is running for
+    private static string? _hoverCellKey, _tooltipHoverKey;
+    private static bool _pressed, _wasLeftButtonDown;
     private static int _tooltipHoverTicks;
+    private const int TooltipDwellTicks = 8;
+    private static IEnumerable<(string Key, TaskbarInterop.RECT Rect)> CellRects =>
+        _traySession is { State: TrayWindowSessionState.Visible, Snapshot: { } snapshot }
+            ? snapshot.Cells.Select(c => (c.Key, c.BoundsPx)) : [];
 
-    // Screen-color sampling cadence. Every read from the screen DC synchronizes
-    // with DWM composition and stalls for ~one display frame (measured: 17-33
-    // ms), so sampling must NEVER run on the UI thread: a stalled UI thread
-    // stops pumping, and with the tray parented into the taskbar the attached
-    // input queues then wedge the whole taskbar. Sampling runs throttled on a
-    // background thread and applies via the dispatcher.
-    private static readonly TimeSpan SampleInterval = TimeSpan.FromMilliseconds(250);
-    private static DateTime _lastSampleUtc = DateTime.MinValue;
-    private static int _sampleInFlight; // 0/1, Interlocked guarded
-
-    public static void Start(ReactorWindow trayWindow)
+    public static void Start()
     {
-        _trayWindow = trayWindow;
-        PagurianLog.Host($"start hwnd={TrayWindowHwnd()} dipScale={ScaleOf(trayWindow):F3}");
-
+        TrayShells.Changed += OnCellsChanged;
+        ThemeService.Instance.Changed += ApplyEffectiveBrushColor;
+        StartSession();
         _timer = ReactorApp.UIDispatcher!.CreateTimer();
-        _timer.Interval = PollInterval;
-        _timer.IsRepeating = true;
+        _timer.Interval = TimeSpan.FromMilliseconds(50);
         _timer.Tick += (_, _) => Tick();
         _timer.Start();
+    }
+
+    private static void StartSession()
+    {
+        _nextSessionAttempt = DateTime.UtcNow.AddSeconds(1.25);
+        _traySession?.Close();
+        _traySession = new TrayWindowSession();
+        _traySession.Start();
+    }
+
+    private static void OnCellsChanged()
+    {
+        if (_billboardOwnerKey != null && TrayShells.FindCell(_billboardOwnerKey) == null)
+            CloseBillboard();
+        if (_tooltipHoverKey != null && TrayShells.FindCell(_tooltipHoverKey) == null)
+        {
+            HideTooltip();
+            _tooltipHoverKey = null;
+            _tooltipHoverTicks = 0;
+        }
+        if (_hoverCellKey != null && TrayShells.FindCell(_hoverCellKey) == null)
+            _hoverCellKey = null;
     }
 
     public static void Stop()
     {
         _timer?.Stop();
+        TrayShells.Changed -= OnCellsChanged;
+        ThemeService.Instance.Changed -= ApplyEffectiveBrushColor;
         CloseBillboard();
         HideTooltip();
+        _traySession?.Close();
+        _traySession = null;
     }
-
-    // Keeps the theme and the hovered cell's overlay in sync with the sampled
-    // taskbar colors. The theme flip (light/dark from sampled luminance) is
-    // applied to the shared ThemeService: the text brush is mutated in place
-    // and the Changed broadcast lets per-render-colored cells and billboards
-    // re-render themselves. The hover overlay (SubtleFillColorSecondary on
-    // hover, SubtleFillColorTertiary while pressed) is host chrome and is
-    // mutated in place here.
-    private static void ApplyEffectiveBrushColor()
-    {
-        ThemeService.Instance.Apply(Luminance(_taskbarColor) <= 140);
-
-        if (_hoverCellKey != null)
-        {
-            var overlay = TaskbarTrayWindow.HoverOverlayColorFor(ThemeService.Instance.IsDark, _pressed);
-            var brush = TaskbarTrayWindow.HoverBrushFor(_hoverCellKey);
-            if (brush.Color != overlay)
-                brush.Color = overlay;
-        }
-    }
-
-    private static double Luminance(Windows.UI.Color c) =>
-        0.299 * c.R + 0.587 * c.G + 0.114 * c.B;
-
-    // Keeps the tray window's background in sync with the taskbar. The taskbar
-    // is translucent, so its apparent color can vary along its length
-    // (wallpaper showing through — measured deltas over 25 levels across the
-    // tray's own width): no single color blends the tray in. Instead the tray
-    // paints a gradient whose stops are sampled from the native taskbar
-    // sliver the tray's 2-DIP inset leaves uncovered — below the tray for
-    // horizontal taskbars, above and below for vertical ones — so each stop
-    // matches the real taskbar color at that spot. Every sample is a trimmed
-    // mean over a small patch, robust against acrylic noise and text/icon
-    // glyph pixels.
-    //
-    // Runs on the UI thread every tick but only maintains the gradient axis;
-    // the screen capture itself is throttled and async (see SampleInterval).
-    private static void SyncTaskbarColor(in TaskbarInterop.RECT taskbar, double scale)
-    {
-        var horizontal = taskbar.Width >= taskbar.Height;
-        var brush = TaskbarTrayWindow.TaskbarColorBrush;
-
-        // The gradient follows the taskbar's long axis.
-        var start = horizontal ? new Windows.Foundation.Point(0, 0.5) : new Windows.Foundation.Point(0.5, 0);
-        var end = horizontal ? new Windows.Foundation.Point(1, 0.5) : new Windows.Foundation.Point(0.5, 1);
-        if (brush.StartPoint != start) brush.StartPoint = start;
-        if (brush.EndPoint != end) brush.EndPoint = end;
-
-        if (DateTime.UtcNow - _lastSampleUtc < SampleInterval)
-            return;
-        if (Interlocked.CompareExchange(ref _sampleInFlight, 1, 0) != 0)
-            return;
-        _lastSampleUtc = DateTime.UtcNow;
-
-        if (horizontal)
-        {
-            // One strip captures all stops: the native sliver below the tray
-            // (uncovered thanks to WindowInsetYDip), spanning the tray's
-            // width; each stop is a column slice of it (ApplyHorizontalSample).
-            var sx = _trayRectPx.Left;
-            var sy = _trayRectPx.Bottom;
-            var sw = Math.Max(1, _trayRectPx.Right - _trayRectPx.Left);
-            var sh = Math.Max(1, taskbar.Bottom - sy); // rows [trayBottom, taskbarBottom - 1]
-            Task.Run(() =>
-            {
-                byte[]? px;
-                try
-                {
-                    px = TaskbarInterop.CaptureScreenRegionPixels(sx, sy, sw, sh);
-                }
-                finally
-                {
-                    Interlocked.Exchange(ref _sampleInFlight, 0);
-                }
-                if (px != null)
-                    ReactorApp.UIDispatcher?.TryEnqueue(() => ApplyHorizontalSample(px, sw, sh));
-            });
-        }
-        else
-        {
-            // Vertical taskbar: only the tray's top and bottom edges have an
-            // uncovered native sliver, so capture those two strips across the
-            // taskbar's thickness and interpolate between them.
-            var x = taskbar.Left + 4;
-            var w = Math.Max(1, taskbar.Width - 8);
-            var yTop = Math.Clamp(_trayRectPx.Top - 3, taskbar.Top, taskbar.Bottom - 3);
-            var yBottom = Math.Clamp(_trayRectPx.Bottom + 1, taskbar.Top, taskbar.Bottom - 3);
-            Task.Run(() =>
-            {
-                byte[]? top, bottom;
-                try
-                {
-                    top = TaskbarInterop.CaptureScreenRegionPixels(x, yTop, w, 3);
-                    bottom = TaskbarInterop.CaptureScreenRegionPixels(x, yBottom, w, 3);
-                }
-                finally
-                {
-                    Interlocked.Exchange(ref _sampleInFlight, 0);
-                }
-                if (top != null && bottom != null)
-                    ReactorApp.UIDispatcher?.TryEnqueue(() => ApplyVerticalSample(top, bottom, w));
-            });
-        }
-    }
-
-    // UI thread. One captured strip -> per-stop colors: stop i is a trimmed
-    // mean over a ~5-px-wide column slice centered on its fraction along the
-    // tray's width.
-    private static void ApplyHorizontalSample(byte[] rgba, int width, int height)
-    {
-        var count = TaskbarTrayWindow.GradientStopCount;
-        var colors = new Windows.UI.Color[count];
-        for (var i = 0; i < count; i++)
-        {
-            var center = (int)Math.Round(StopFraction(i, count) * (width - 1));
-            var color = TaskbarInterop.TrimmedMeanColor(rgba, width, height, center - 2, center + 3);
-            if (color is not { } c)
-                return; // unreadable: keep the last good colors
-            colors[i] = c;
-        }
-        ApplyStopColors(colors);
-    }
-
-    // UI thread. Two captured strips (above/below the tray) -> per-stop
-    // colors interpolated along the taskbar's long axis.
-    private static void ApplyVerticalSample(byte[] top, byte[] bottom, int width)
-    {
-        var t = TaskbarInterop.TrimmedMeanColor(top, width, 3, 0, width);
-        var b = TaskbarInterop.TrimmedMeanColor(bottom, width, 3, 0, width);
-        if (t is not { } tc || b is not { } bc)
-            return;
-
-        var count = TaskbarTrayWindow.GradientStopCount;
-        var colors = new Windows.UI.Color[count];
-        for (var i = 0; i < count; i++)
-            colors[i] = LerpColor(tc, bc, StopFraction(i, count));
-        ApplyStopColors(colors);
-    }
-
-    // UI thread. Writes the new stop colors into the live gradient brush (no
-    // re-render needed) and re-derives the theme from their average.
-    private static void ApplyStopColors(Windows.UI.Color[] colors)
-    {
-        var brush = TaskbarTrayWindow.TaskbarColorBrush;
-        var count = colors.Length;
-
-        var changed = false;
-        for (var i = 0; i < count && !changed; i++)
-        {
-            var cur = brush.GradientStops[i].Color;
-            changed = Math.Abs(cur.R - colors[i].R) > 2
-                   || Math.Abs(cur.G - colors[i].G) > 2
-                   || Math.Abs(cur.B - colors[i].B) > 2;
-        }
-        if (!changed)
-            return;
-
-        for (var i = 0; i < count; i++)
-            brush.GradientStops[i].Color = colors[i];
-
-        // The theme (light/dark text and hover overlay) follows the average.
-        long rSum = 0, gSum = 0, bSum = 0;
-        foreach (var c in colors) { rSum += c.R; gSum += c.G; bSum += c.B; }
-        _taskbarColor = Windows.UI.Color.FromArgb(255,
-            (byte)(rSum / count), (byte)(gSum / count), (byte)(bSum / count));
-        ApplyEffectiveBrushColor();
-    }
-
-    private static double StopFraction(int i, int count) =>
-        count == 1 ? 0.5 : (double)i / (count - 1);
-
-    private static Windows.UI.Color LerpColor(Windows.UI.Color a, Windows.UI.Color b, double f) =>
-        Windows.UI.Color.FromArgb(255,
-            (byte)(a.R + (b.R - a.R) * f),
-            (byte)(a.G + (b.G - a.G) * f),
-            (byte)(a.B + (b.B - a.B) * f));
 
     private static void Tick()
     {
-        if (_trayWindow == null)
-            return;
-
-        EnsureInjected();
-        AnchorTrayWindow();
+        if (_traySession == null) return;
+        if (!_traySession.CheckEnvironment() && DateTime.UtcNow >= _nextSessionAttempt) StartSession();
         UpdateInteractions();
     }
 
-    private static void EnsureInjected()
+    public static nint TrayWindowHwnd() => _traySession?.Hwnd ?? 0;
+
+    private static void ApplyEffectiveBrushColor()
     {
-        if (_injected)
-        {
-            var hwnd = TrayWindowHwnd();
-            var taskbar = TaskbarInterop.FindTaskbar();
-
-            if (hwnd != IntPtr.Zero &&
-                TaskbarInterop.IsWindow(hwnd) &&
-                taskbar != IntPtr.Zero &&
-                TaskbarInterop.GetAncestor(hwnd, TaskbarInterop.GA_PARENT) == taskbar)
-            {
-                return; // still injected, nothing to do
-            }
-
-            // Explorer restart destroys Shell_TrayWnd and every child window with
-            // it. Recreate the tray window and re-inject on this tick.
-            _injected = false;
-            try { _trayWindow!.Close(); } catch { /* native window may already be gone */ }
-            _trayWindow = ReactorApp.OpenWindow(
-                TaskbarTrayWindow.CreateSpec(), () => new TaskbarTrayWindow());
-            _lastTrayPos = (double.MinValue, double.MinValue);
-            _lastTraySize = (0, 0);
-            _ticksSinceInjectAttempt = int.MaxValue;
-        }
-
-        if (_ticksSinceInjectAttempt >= InjectRetryIntervalTicks)
-        {
-            _ticksSinceInjectAttempt = 0;
-            _injected = TryInject();
-            PagurianLog.Host($"inject result={_injected} trayHwnd={TrayWindowHwnd()} taskbarHwnd={TaskbarInterop.FindTaskbar()}");
-        }
-        else
-        {
-            _ticksSinceInjectAttempt++;
-        }
+        if (_hoverCellKey != null)
+            TaskbarTrayWindow.HoverBrushFor(_hoverCellKey).Color =
+                TaskbarTrayWindow.HoverOverlayColorFor(ThemeService.Instance.IsDark, _pressed);
     }
-
-    private static bool TryInject()
-    {
-        var taskbar = TaskbarInterop.FindTaskbar();
-        var hwnd = TrayWindowHwnd();
-        if (taskbar == IntPtr.Zero || hwnd == IntPtr.Zero)
-            return false;
-
-        if (TaskbarInterop.GetAncestor(hwnd, TaskbarInterop.GA_PARENT) == taskbar)
-            return true;
-
-        // Convert the top-level style to a child style BEFORE SetParent,
-        // otherwise the coordinate space and clipping misbehave.
-        var style = (int)TaskbarInterop.GetWindowStyle(hwnd);
-        style = (style & ~TaskbarInterop.WS_POPUP) | TaskbarInterop.WS_CHILD;
-        TaskbarInterop.SetWindowStyle(hwnd, (IntPtr)style);
-
-        // One attempt per tick; the poll loop provides the retries so the UI
-        // thread never blocks (AwqatSalaat sleeps between attempts instead).
-        var previousParent = TaskbarInterop.SetParent(hwnd, taskbar);
-        PagurianLog.Host($"set-parent trayHwnd={hwnd} taskbarHwnd={taskbar} previousParent={previousParent} style=0x{style:X8}");
-        return previousParent != IntPtr.Zero;
-    }
-
-    // HWND of the tray window, or IntPtr.Zero when it is gone (e.g. right after
-    // an Explorer restart destroyed it). Safe to call any time.
-    public static IntPtr TrayWindowHwnd()
-    {
-        try
-        {
-            return _trayWindow == null
-                ? IntPtr.Zero
-                : Win32Interop.GetWindowFromWindowId(_trayWindow.AppWindow.Id);
-        }
-        catch
-        {
-            return IntPtr.Zero; // window already destroyed (e.g. by an Explorer restart)
-        }
-    }
-
-    private static void AnchorTrayWindow()
-    {
-        if (!TaskbarTrayPlacement.TryGetSurface(out var surface))
-            return;
-
-        var taskbar = surface.ContentRect;
-        var taskbarParent = surface.ParentRect;
-
-        // Ignore transient bogus rects (display topology changes, Explorer
-        // restarts): keep the last good anchor instead of jumping off-taskbar.
-        if (taskbar.Width < 32 || taskbar.Height < 16)
-            return;
-
-        // Taskbars are 48 DIPs thick by design, so the scale derived from the
-        // real taskbar rect doubles as the taskbar's own DPI scale. Use it —
-        // not the window's DipScale, which can lag behind monitor changes —
-        // and size the tray straight from the taskbar rect, minus a small
-        // vertical inset: winH < taskbar.Height always, so the tray can never
-        // stick out of the taskbar, whatever DPI it believes it is on.
-        var scale = surface.Scale;
-        var windowScale = ScaleOf(_trayWindow!);
-        TaskbarTrayWindow.SetContentScale(scale / windowScale);
-        var totalWidthDip = TaskbarTrayLayout.TotalWidthDip;
-        TaskbarTrayLayout.ReportMeasuredWidth(totalWidthDip);
-        _trayRectPx = surface.Place(totalWidthDip);
-        var xPx = (double)_trayRectPx.Left;
-        var yPx = (double)_trayRectPx.Top;
-        var winW = (double)_trayRectPx.Width;
-        var winH = (double)_trayRectPx.Height;
-
-        // Per-cell hit-test rects, left to right in the layout's order (the
-        // same order the window renders them).
-        _cellRectsPx.Clear();
-        var cellLeft = xPx;
-        foreach (var cell in TaskbarTrayLayout.Cells)
-        {
-            _cellRectsPx.Add((cell.Key, CellRect(cellLeft, yPx, cell.CellWidthDip * scale, winH)));
-            cellLeft += cell.CellWidthDip * scale;
-        }
-
-        SyncTaskbarColor(in taskbar, scale);
-
-        var sizeChanged = Math.Abs(winW - _lastTraySize.W) > 0.5 || Math.Abs(winH - _lastTraySize.H) > 0.5;
-        var posChanged = Math.Abs(xPx - _lastTrayPos.X) > 0.5 || Math.Abs(yPx - _lastTrayPos.Y) > 0.5;
-        if (!sizeChanged && !posChanged)
-            return;
-
-        _lastTraySize = (winW, winH);
-        _lastTrayPos = (xPx, yPx);
-
-        if (_injected)
-        {
-            var hwnd = TrayWindowHwnd();
-            if (hwnd == IntPtr.Zero)
-                return;
-
-            // Child window: coordinates are relative to the taskbar's client area.
-            var positioned = TaskbarInterop.SetWindowPos(hwnd, TaskbarInterop.HWND_TOP,
-                (int)(xPx - taskbarParent.Left), (int)(yPx - taskbarParent.Top),
-                (int)winW, (int)winH,
-                TaskbarInterop.SWP_NOACTIVATE);
-            TaskbarInterop.TryGetWindowRect(hwnd, out var actual);
-            LogAnchor("injected", taskbar, taskbarParent, scale, windowScale, winW, winH, xPx, yPx, hwnd, positioned, actual);
-        }
-        else
-        {
-            // Floating fallback: Reactor window APIs take DIPs, not pixels;
-            // convert with the window's own DPI scale.
-            var winScale = ScaleOf(_trayWindow!);
-            if (sizeChanged)
-                _trayWindow!.SetSize(winW / winScale, winH / winScale);
-            if (posChanged)
-                _trayWindow!.SetPosition(xPx / winScale, yPx / winScale);
-            TaskbarInterop.TryGetWindowRect(TrayWindowHwnd(), out var actual);
-            LogAnchor("floating", taskbar, taskbarParent, scale, windowScale, winW, winH, xPx, yPx, TrayWindowHwnd(), true, actual);
-        }
-    }
-
-    private static void LogAnchor(
-        string mode,
-        in TaskbarInterop.RECT taskbar,
-        in TaskbarInterop.RECT taskbarParent,
-        double taskbarScale,
-        double windowScale,
-        double widthPx,
-        double heightPx,
-        double xPx,
-        double yPx,
-        IntPtr hwnd,
-        bool positioned,
-        in TaskbarInterop.RECT actual)
-    {
-        var cells = string.Join(", ", TaskbarTrayLayout.Cells.Select(c => $"{c.Key}:{c.CellWidthDip:F1}dip"));
-        PagurianLog.Host(
-            $"anchor mode={mode} positioned={positioned} hwnd={hwnd} parent={TaskbarInterop.GetAncestor(hwnd, TaskbarInterop.GA_PARENT)} " +
-            $"taskbar=({taskbar.Left},{taskbar.Top})-({taskbar.Right},{taskbar.Bottom}) {taskbar.Width}x{taskbar.Height}px " +
-            $"shell=({taskbarParent.Left},{taskbarParent.Top})-({taskbarParent.Right},{taskbarParent.Bottom}) {taskbarParent.Width}x{taskbarParent.Height}px " +
-            $"scale={taskbarScale:F3} windowDipScale={windowScale:F3} contentScale={TaskbarTrayWindow.ContentScale:F3} " +
-            $"desired=({xPx:F1},{yPx:F1}) {widthPx:F1}x{heightPx:F1}px " +
-            $"actual=({actual.Left},{actual.Top})-({actual.Right},{actual.Bottom}) {actual.Width}x{actual.Height}px " +
-            $"cells=[{cells}]");
-    }
-
-    private static TaskbarInterop.RECT CellRect(double xPx, double yPx, double wPx, double hPx) =>
-        new()
-        {
-            Left = (int)xPx,
-            Top = (int)yPx,
-            Right = (int)(xPx + wPx),
-            Bottom = (int)(yPx + hPx),
-        };
 
     private static TaskbarInterop.RECT? CellRectPx(string cellKey)
     {
-        foreach (var (key, rect) in _cellRectsPx)
+        foreach (var (key, rect) in CellRects)
         {
             if (key == cellKey)
                 return rect;
@@ -497,9 +111,9 @@ static class TaskbarController
 
         // Which cell is under the cursor, if any?
         string? hoverKey = null;
-        foreach (var (key, rect) in _cellRectsPx)
+        foreach (var (key, rect) in CellRects)
         {
-            if (rect.Contains(cursor))
+            if (TrayShells.FindCell(key) != null && rect.Contains(cursor))
             {
                 hoverKey = key;
                 break;

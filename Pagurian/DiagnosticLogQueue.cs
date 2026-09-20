@@ -1,6 +1,6 @@
 namespace Pagurian;
 
-// Navigation observations never write to disk on the UI thread. The sole
+// UI observations never write to disk on the UI thread. The sole
 // worker exits as soon as the bounded queue becomes empty.
 internal sealed class DiagnosticLogQueue
 {
@@ -8,15 +8,17 @@ internal sealed class DiagnosticLogQueue
     private readonly Queue<Entry> pending = new();
     private readonly Action<string> writeLine;
     private readonly int capacity;
+    private readonly string tag;
     private Task? worker;
     private long nextSequence;
     private DroppedEntries? dropped;
 
-    internal DiagnosticLogQueue(Action<string> writeLine, int capacity = 4096)
+    internal DiagnosticLogQueue(Action<string> writeLine, int capacity = 4096, string tag = "shell-navigation")
     {
         ArgumentNullException.ThrowIfNull(writeLine);
         ArgumentOutOfRangeException.ThrowIfLessThan(capacity, 1);
         this.writeLine = writeLine;
+        this.tag = SingleLine(tag);
         this.capacity = capacity;
     }
 
@@ -71,7 +73,7 @@ internal sealed class DiagnosticLogQueue
 
             try
             {
-                writeLine($"{entry.Timestamp:O} [{SingleLine(entry.Level)}] [shell-navigation] " +
+                writeLine($"{entry.Timestamp:O} [{SingleLine(entry.Level)}] [{tag}] " +
                     $"pid={Environment.ProcessId} seq={entry.Sequence} session={SingleLine(entry.SessionId)} " +
                     SingleLine(entry.Message));
             }

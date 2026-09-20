@@ -10,6 +10,7 @@ static class PagurianLog
 {
     private static readonly object FileGate = new();
     private static readonly DiagnosticLogQueue NavigationQueue = new(AppendLine);
+    private static readonly DiagnosticLogQueue TrayQueue = new(AppendLine, tag: "tray");
 
     public static readonly string LogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -23,6 +24,8 @@ static class PagurianLog
     public static void HostError(string message, Exception? ex = null) =>
         Write("host", "ERROR", ex == null ? message : $"{message}: {ex}");
 
+    internal static void Tray(string sessionId, string message) => TrayQueue.Enqueue(sessionId, message);
+
     internal static void Navigation(string sessionId, string message, string level = "INFO") =>
         NavigationQueue.Enqueue(sessionId, message, level);
 
@@ -34,7 +37,7 @@ static class PagurianLog
         {
             // Regular Settings close uses the asynchronous flush. Explicit
             // process exit cannot wait forever if disk I/O is stalled.
-            FlushNavigationAsync().Wait(TimeSpan.FromSeconds(2));
+            Task.WhenAll(FlushNavigationAsync(), TrayQueue.FlushAsync()).Wait(TimeSpan.FromSeconds(2));
         }
         catch
         {
