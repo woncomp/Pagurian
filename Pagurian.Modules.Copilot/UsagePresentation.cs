@@ -1,6 +1,9 @@
+using Microsoft.UI.Reactor;
+using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 using Windows.UI;
+using static Microsoft.UI.Reactor.Factories;
 
 namespace Pagurian.Modules.Copilot;
 
@@ -11,7 +14,8 @@ internal static class UsageTint
     internal static Color ColorFor(int? roundedBalance, bool dark)
     {
         var neutral = dark ? Microsoft.UI.Colors.White : Microsoft.UI.Colors.Black;
-        if (roundedBalance is null or 0) return neutral;
+        if (roundedBalance is null) return neutral;
+        if (roundedBalance is 0) return Color.FromArgb(255, 52, 120, 184);
         var signal = roundedBalance > 0
             ? dark ? Color.FromArgb(255, 108, 203, 95) : Color.FromArgb(255, 16, 124, 16)
             : dark ? Color.FromArgb(255, 255, 153, 164) : Color.FromArgb(255, 196, 43, 28);
@@ -27,4 +31,22 @@ internal static class UsageTint
 
     internal static Brush SystemBrush(string key) =>
         (Brush)Application.Current.Resources[key];
+}
+
+internal static class UsageBalanceLabel
+{
+    internal static Element Render(CopilotUsagePace pace, bool dark, bool highContrast)
+    {
+        var tint = UsageTint.BrushFor(pace.RoundedBalance, dark, highContrast);
+        return Grid([GridSize.Auto, GridSize.Star()], [GridSize.Auto],
+            new UsagePulseElement().Set(pulse =>
+                {
+                    pulse.Compact = true;
+                    pulse.Tint = tint;
+                })
+                .AccessibilityHidden().VerticalAlignment(VerticalAlignment.Top).Grid(column: 0),
+            BodyStrong(pace.BalanceText).Foreground(tint)
+                .TextWrapping(TextWrapping.WrapWholeWords).Grid(column: 1))
+            with { ColumnSpacing = 8 };
+    }
 }

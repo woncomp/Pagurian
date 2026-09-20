@@ -24,11 +24,8 @@ internal sealed class UsagePaceCard : Component<UsagePaceCardProps>
         var p = Props;
         return Border(VStack(8,
                 BodyStrong("Used Percentage").HeadingLevel(AutomationHeadingLevel.Level2),
-                    BodyStrong(p.Pace.BalanceText)
-                        .Foreground(UsageTint.BrushFor(p.Pace.RoundedBalance, p.Dark, p.HighContrast))
-                        .TextWrapping(TextWrapping.WrapWholeWords),
-                    new UsageAxisElement().Set(axis => axis.Update(p.Pace, p.Dark, p.HighContrast)),
-                    null))
+                UsageBalanceLabel.Render(p.Pace, p.Dark, p.HighContrast),
+                new UsageAxisElement().Set(axis => axis.Update(p.Pace, p.Dark, p.HighContrast))))
             .Padding(12).CornerRadius(8)
             .Background(p.HighContrast ? ReactorTheme.Ref("SystemColorWindowColorBrush")
                 : ReactorTheme.Ref("LayerOnAcrylicFillColorDefaultBrush"))

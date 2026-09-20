@@ -28,7 +28,13 @@ next UTC month's first day and are explicitly **estimated**.
 The Used Percentage card compares elapsed workdays with Credits consumption.
 Balance is elapsed days minus used fraction times total working days, rounded
 midpoint-away-from-zero. The same integer drives the card and pulse tint:
-neutral at zero, red behind, green ahead; only color saturates at six days.
+opaque blue at rounded zero (the same blue in Light and Dark), red behind,
+green ahead; only color saturates at six days. Nonzero colors still blend from
+the theme's neutral color, never from blue; unavailable remains neutral.
+Settings and Billboard balance sentences share a leading tinted pulse icon.
+The Settings tooltip previews all 13 colors from +6 through zero to -6, followed
+by Surplus, On track, and Over budget explanations. High Contrast retains system
+colors rather than the ordinary palette.
 At reset the comparison stays unavailable until a fresh-cycle quota arrives.
 The top taskbar gauge and bottom percentage still mean Credits used.
 

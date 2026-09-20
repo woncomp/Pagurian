@@ -77,11 +77,15 @@ internal sealed class UsagePulse : Panel
     private readonly Microsoft.UI.Xaml.Controls.TextBlock _lineMeasure = new() { Text = "100%", FontSize = 12 };
     public UsagePulse() { Children.Add(_icon); }
     internal Brush Tint { set => _icon.Foreground = value; }
+    internal bool Compact { get; set; }
     internal Rect VisibleBounds { get; private set; }
     protected override Size MeasureOverride(Size availableSize)
     {
+        _lineMeasure.Style = Compact ? (Style)Application.Current.Resources["BodyStrongTextBlockStyle"] : null;
+        if (Compact) _lineMeasure.ClearValue(Microsoft.UI.Xaml.Controls.TextBlock.FontSizeProperty);
+        else _lineMeasure.FontSize = 12;
         _lineMeasure.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-        var width = Math.Max(32, _lineMeasure.DesiredSize.Width);
+        var width = Compact ? _lineMeasure.DesiredSize.Height : Math.Max(32, _lineMeasure.DesiredSize.Width);
         var height = _lineMeasure.DesiredSize.Height;
         _icon.Measure(new Size(width * 50 / 40, height * 50 / 24));
         return new Size(width, height);

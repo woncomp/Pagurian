@@ -32,6 +32,11 @@ Rich balance and disabled-date tooltips are opened in controlled native
 `ToolTip` wrappers with the production content, not simulated with a second
 window. Tests check the whole-row hit area, accessible help, legend colors,
 effective Settings theme changes, and open-tooltip disposal on unmount.
+The balance labels reuse the tinted pulse silhouette. Palette checks cover
+opaque blue only at rounded zero, neutral unavailable text, unchanged nonzero
+ramps, the 13-square +6-to-minus-6 preview, and Surplus/On track/Over budget
+legend ordering. Both Settings and Billboard leading icons are checked for
+asset identity, shared tint, first-line alignment, and unclipped bounds.
 Tooltip PNGs capture the rendered content on a transparent background.
 The calendar is stressed at 150%, 200%, and 250% local font size; horizontal
 overflow remains scrollable rather than squeezing the measured columns.

@@ -349,12 +349,11 @@ sealed class Harness
                     "HC ramp did not use system foreground");
                 var row = Find<FrameworkElement>().Single(e =>
                     AutomationProperties.GetAutomationId(e) == "FixtureHighContrastBalance");
-                Require(Descendants<XamlText>(row).Take(2).All(t => ReferenceEquals(t.Foreground, brush)),
-                    "HC balance dot/text did not use the same system foreground");
+                Require(ReferenceEquals(Descendants<XamlText>(row).First().Foreground, brush) &&
+                    ReferenceEquals(Descendants<BitmapIcon>(row).Single().Foreground, brush),
+                    "HC balance pulse/text did not use the same system foreground");
                 OpenBalanceTip(row);
-                Require(Descendants<XamlText>((FrameworkElement)_openTip!.Content)
-                    .Where(t => t.Text != UsageCalendarView.RoundingHelp)
-                    .All(t => ReferenceEquals(t.Foreground, brush)), "HC tooltip legend kept signal colors");
+                CheckTooltipPalette(Dark, true);
                 Require(((Microsoft.UI.Xaml.Controls.Border)row).BorderThickness.Left == 2 &&
                     ReferenceEquals(((Microsoft.UI.Xaml.Controls.Border)row).BorderBrush, brush),
                     "HC hover border not a reserved system-color border");
@@ -387,6 +386,36 @@ sealed class Harness
                 CheckRenderedTint();
             });
             CaptureStep("08-debt-red");
+            Step(() =>
+            {
+                _source.Publish(_source.State with
+                {
+                    Usage = new(_source.State.Usage.PremiumInteractions! with
+                    {
+                        UsedPercentage = SavedA.Pace.ElapsedWorkdays * 100d / SavedA.Pace.TotalWorkdays,
+                    }),
+                });
+                Changed?.Invoke();
+            });
+            Step(() =>
+            {
+                Require(SavedA.Pace.RoundedBalance == 0, "on-track scenario must round to zero");
+                CheckRenderedTint();
+                CheckBalance();
+            });
+            CaptureStep("08f-on-track-light");
+            Step(() => { Dark = true; Theme.Set(true); Changed?.Invoke(); });
+            Step(() => { CheckRenderedTint(); CheckBalance(); });
+            CaptureStep("08g-on-track-dark");
+            Step(() =>
+            {
+                Dark = false; Theme.Set(false);
+                _source.Publish(_source.State with
+                {
+                    Usage = new(_source.State.Usage.PremiumInteractions! with { UsedPercentage = 100 }),
+                });
+                Changed?.Invoke();
+            });
             Step(() => _window.NativeWindow.AppWindow.Resize(new Windows.Graphics.SizeInt32(620, 900)));
             Step(() =>
             {
@@ -430,6 +459,18 @@ sealed class Harness
                         $"scaled tooltip text clipped: {text.Text}, desired={text.DesiredSize}, actual={text.ActualWidth}x{text.ActualHeight}");
             });
             CaptureStep("08d-scaled-tooltip", tooltip: true);
+            Step(() =>
+            {
+                var palette = Descendants<UsagePalettePreview>((FrameworkElement)_openTip!.Content).Single();
+                palette.Width = 100;
+                ((FrameworkElement)_openTip.Content).UpdateLayout();
+                var text = Descendants<XamlText>(palette).Single();
+                var bounds = text.TransformToVisual(palette).TransformBounds(
+                    new Rect(0, 0, text.ActualWidth, text.ActualHeight));
+                Require(text.Inlines.Count == 13 && bounds.Width > 0 && bounds.Right <= 100.1 &&
+                    bounds.Bottom <= palette.ActualHeight + .1, "scaled narrow preview lost colors");
+                palette.ClearValue(FrameworkElement.WidthProperty);
+            });
             Step(CloseTip);
             Step(() =>
             {
@@ -608,10 +649,10 @@ sealed class Harness
         var pace = _draftModel!.Pace;
         Require(texts[0] == "Workday calendar" &&
             texts[1] == "This period: Sep 1, 2026 - Sep 30, 2026" &&
-            texts[2] == "●" && texts[3] == pace.BalanceText &&
-            texts[4] == $"{pace.TotalWorkdays} total workdays · {pace.ElapsedWorkdays} elapsed through today",
+            texts[2] == pace.BalanceText &&
+            texts[3] == $"{pace.TotalWorkdays} total workdays · {pace.ElapsedWorkdays} elapsed through today",
             "Config header ordering/text incorrect");
-        Require(texts.Skip(5).Take(7).SequenceEqual(new[] { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" }),
+        Require(texts.Skip(4).Take(7).SequenceEqual(new[] { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" }),
             "weekday headings not Sunday first");
         Require(!texts.Any(t => t.Contains("assumption") || t.Contains("inferred") || t.Contains("Estimated cycle") ||
             t.Contains("counts as a full") || t.Contains("cumulative") || t.Contains("by default") ||
@@ -653,11 +694,12 @@ sealed class Harness
     private void CheckBalance()
     {
         var texts = Descendants<XamlText>(Balance).ToArray();
-        Require(texts.Length == 3 && texts[0].Text == "●" && texts[1].Text == _draftModel!.Pace.BalanceText &&
-            texts[2].Text == $"{_draftModel.Pace.TotalWorkdays} total workdays · {_draftModel.Pace.ElapsedWorkdays} elapsed through today",
+        Require(texts.Length == 2 && texts[0].Text == _draftModel!.Pace.BalanceText &&
+            texts[1].Text == $"{_draftModel.Pace.TotalWorkdays} total workdays · {_draftModel.Pace.ElapsedWorkdays} elapsed through today",
             "balance row not using shared draft sentence");
-        Require(texts.Take(2).All(t => ((SolidColorBrush)t.Foreground).Color ==
+        Require(texts.Take(1).All(t => ((SolidColorBrush)t.Foreground).Color ==
             UsageTint.ColorFor(_draftModel!.Pace.RoundedBalance, Theme.IsDark)), "draft tint or effective Settings theme incorrect");
+        CheckLeadingPulse(Balance, texts[0], _draftModel!.Pace.RoundedBalance);
         Require(AutomationProperties.GetHelpText(Balance) == UsageCalendarView.BalanceHelp, "balance accessible help absent");
         CheckBalanceWidth();
         var origin = Balance.TransformToVisual(Root).TransformPoint(new());
@@ -683,8 +725,8 @@ sealed class Harness
         var before = (row.ActualWidth, row.ActualHeight, CalendarGrid.TransformToVisual(Root).TransformPoint(new()).Y);
         var texts = Descendants<XamlText>(row).ToArray();
         var origin = row.TransformToVisual(Root).TransformPoint(new());
-        var circle = texts[0].TransformToVisual(row).TransformPoint(new());
-        var sentence = texts[1].TransformToVisual(row).TransformPoint(new());
+        var circle = Descendants<UsagePulse>(row).Single().TransformToVisual(row).TransformPoint(new());
+        var sentence = texts[0].TransformToVisual(row).TransformPoint(new());
         // Padding/corners, glyph, inter-child gap, sentence and unused tail.
         var points = new[] { new Point(1, 1), new Point(4, row.ActualHeight / 2),
             new Point(circle.X + 2, circle.Y + 2),
@@ -742,9 +784,20 @@ sealed class Harness
         var content = (FrameworkElement)_openTip.Content;
         var body = (StackPanel)((ScrollViewer)content).Content;
         var texts = Descendants<XamlText>(body).ToArray();
-        Require(body.Children.Count == 4, "tooltip body must have three rows and one paragraph");
-        Require(texts.Select(t => t.Text).SequenceEqual(new[] { "●", UsageCalendarView.SurplusHelp,
-            "●", UsageCalendarView.BudgetHelp, "●", UsageCalendarView.NeutralHelp, UsageCalendarView.RoundingHelp }),
+        Require(body.Children.Count == 5, "tooltip body must have a preview, three rows and one paragraph");
+        var preview = texts[0];
+        Require(preview.Inlines.Count == 13 && !preview.IsColorFontEnabled &&
+            preview.TextWrapping == TextWrapping.NoWrap, "preview must contain 13 monochrome single-row glyphs");
+        Require(preview.Inlines.Cast<Microsoft.UI.Xaml.Documents.Run>().All(r => r.Text == "\u2B1B\uFE0E"),
+            "preview must use tintable square text glyphs");
+        var palette = Descendants<UsagePalettePreview>(body).Single();
+        var previewBounds = preview.TransformToVisual(palette).TransformBounds(
+            new Rect(0, 0, preview.ActualWidth, preview.ActualHeight));
+        Require(previewBounds.X >= -.1 && previewBounds.Right <= palette.ActualWidth + .1 &&
+            previewBounds.Bottom <= palette.ActualHeight + .1,
+            "all 13 colors must fit without scrolling or clipping");
+        Require(texts.Skip(1).Select(t => t.Text).SequenceEqual(new[] { "●", UsageCalendarView.SurplusHelp,
+            "●", UsageCalendarView.NeutralHelp, "●", UsageCalendarView.BudgetHelp, UsageCalendarView.RoundingHelp }),
             "tooltip must contain exactly three bullet sentences and only the parenthetical paragraph: " +
                 string.Join(" | ", texts.Select(t => t.Text)));
         foreach (var text in texts.Where(t => t.Inlines.Count == 2))
@@ -791,13 +844,22 @@ sealed class Harness
     private void CheckTooltipPalette(bool dark, bool highContrast)
     {
         var texts = Descendants<XamlText>((StackPanel)((ScrollViewer)_openTip!.Content).Content).ToArray();
-        foreach (var (index, balance) in new[] { (0, 6), (2, -6), (4, 0) })
+        foreach (var (index, balance) in new[] { (1, 6), (3, 0), (5, -6) })
         {
             var expected = UsageTint.BrushFor(balance, dark, highContrast);
             Require(((SolidColorBrush)texts[index].Foreground).Color == ((SolidColorBrush)expected).Color &&
                 ReferenceEquals(texts[index].Foreground, texts[index + 1].Foreground),
                 "tooltip circle/sentence no longer share current palette");
         }
+        var swatches = texts[0].Inlines.Cast<Microsoft.UI.Xaml.Documents.Run>().ToArray();
+        Require(swatches.Length == 13, "palette must have 13 entries");
+        for (int index = 0; index < swatches.Length; index++)
+            Require(((SolidColorBrush)swatches[index].Foreground).Color ==
+                ((SolidColorBrush)UsageTint.BrushFor(6 - index, dark, highContrast)).Color,
+                $"preview color at index {index} does not match actual balance");
+        Require(((SolidColorBrush)texts[^1].Foreground).Color ==
+            ((SolidColorBrush)UsageTint.BrushFor(null, dark, highContrast)).Color,
+            "rounding paragraph must remain neutral rather than on-track blue");
     }
 
     private void CloseTip()
@@ -824,7 +886,21 @@ sealed class Harness
     {
         foreach (bool dark in new[] { true, false })
         {
-            Require(UsageTint.ColorFor(null, dark) == UsageTint.ColorFor(0, dark), "unavailable tint not neutral");
+            var neutral = dark ? Microsoft.UI.Colors.White : Microsoft.UI.Colors.Black;
+            Require(UsageTint.ColorFor(null, dark) == neutral, "unavailable tint not neutral");
+            Require(UsageTint.ColorFor(0, dark) == Windows.UI.Color.FromArgb(255, 52, 120, 184),
+                "zero must use the shared opaque blue");
+            for (int days = -6; days <= 6; days++)
+            {
+                if (days == 0) continue;
+                var endpoint = UsageTint.ColorFor(days > 0 ? 6 : -6, dark);
+                var weight = Math.Abs(days) / 6d;
+                byte Blend(byte start, byte end) => (byte)Math.Round(start + (end - start) * weight);
+                var expected = Windows.UI.Color.FromArgb(255, Blend(neutral.R, endpoint.R),
+                    Blend(neutral.G, endpoint.G), Blend(neutral.B, endpoint.B));
+                Require(UsageTint.ColorFor(days, dark) == expected,
+                    "nonzero ramp must retain neutral interpolation without blue");
+            }
             Require(UsageTint.ColorFor(6, dark) == UsageTint.ColorFor(16, dark), "surplus not saturated at six");
             Require(UsageTint.ColorFor(-6, dark) == UsageTint.ColorFor(-16, dark), "debt not saturated at six");
             Require(UsageTint.ColorFor(0, dark) != UsageTint.ColorFor(1, dark), "ramp omitted first day");
@@ -842,6 +918,27 @@ sealed class Harness
         var axis = Find<UsageAxis>().Single();
         var bookmark = Descendants<Microsoft.UI.Xaml.Shapes.Polygon>(axis).Single();
         Require(((SolidColorBrush)bookmark.Fill).Color == expected, "bookmark tint disagrees with pulse");
+        var card = (FrameworkElement)axis.Parent;
+        var sentence = Descendants<XamlText>(card).Single(t => t.Text == SavedA.Pace.BalanceText);
+        CheckLeadingPulse(card, sentence, SavedA.Pace.RoundedBalance);
+        Require(((SolidColorBrush)axis.UsedLabel.Foreground).Color == expected, "Used label tint disagrees with pulse");
+    }
+
+    private void CheckLeadingPulse(FrameworkElement owner, XamlText sentence, int? balance)
+    {
+        var pulse = Descendants<UsagePulse>(owner).Single();
+        var icon = Descendants<BitmapIcon>(pulse).Single();
+        Require(pulse.Compact && icon.ShowAsMonochrome &&
+            icon.UriSource == new Uri(CopilotModule.UsageIconPath), "leading pulse must reuse the monochrome asset");
+        Require(((SolidColorBrush)icon.Foreground).Color == UsageTint.ColorFor(balance, Theme.IsDark),
+            "leading pulse and balance sentence colors disagree");
+        var iconPosition = pulse.TransformToVisual(owner).TransformPoint(new());
+        var textPosition = sentence.TransformToVisual(owner).TransformPoint(new());
+        Require(iconPosition.X + pulse.ActualWidth <= textPosition.X &&
+            Math.Abs(iconPosition.Y - textPosition.Y) < .1, "pulse must lead the first text line");
+        Require(pulse.VisibleBounds.Width > 0 && pulse.VisibleBounds.Height > 0 &&
+            pulse.VisibleBounds.Right <= pulse.ActualWidth + .1 &&
+            pulse.VisibleBounds.Bottom <= pulse.ActualHeight + .1, "leading pulse silhouette clipped");
     }
 
     private void CheckAxis(double used, double work, bool longLabel = false)

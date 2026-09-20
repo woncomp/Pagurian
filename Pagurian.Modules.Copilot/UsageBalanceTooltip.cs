@@ -78,6 +78,7 @@ internal sealed class UsageBalanceTooltip : IDisposable
     private readonly StackPanel _content = new() { Spacing = 8 };
     private readonly ScrollViewer _viewport;
     private readonly List<(TextBlock Bullet, TextBlock Text, int Balance)> _rows = [];
+    private readonly List<(Run Glyph, int Balance)> _swatches = [];
     private readonly TextBlock _rounding;
     private Brush? _hoverBrush;
     private bool _disposed, _hovered;
@@ -97,9 +98,21 @@ internal sealed class UsageBalanceTooltip : IDisposable
     private UsageBalanceTooltip(Border owner)
     {
         _owner = owner;
+        var preview = BodyText("");
+        preview.TextWrapping = TextWrapping.NoWrap;
+        preview.IsColorFontEnabled = false;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAccessibilityView(
+            preview, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+        for (int balance = 6; balance >= -6; balance--)
+        {
+            var glyph = new Run { Text = "\u2B1B\uFE0E" };
+            preview.Inlines.Add(glyph);
+            _swatches.Add((glyph, balance));
+        }
+        _content.Children.Add(new UsagePalettePreview(preview));
         AddRow(UsageCalendarView.SurplusHelp, 6);
-        AddRow(UsageCalendarView.BudgetHelp, -6);
         AddRow(UsageCalendarView.NeutralHelp, 0);
+        AddRow(UsageCalendarView.BudgetHelp, -6);
         _rounding = BodyText(UsageCalendarView.RoundingHelp);
         _content.Children.Add(_rounding);
         _viewport = new ScrollViewer
@@ -155,7 +168,9 @@ internal sealed class UsageBalanceTooltip : IDisposable
         Tip.RequestedTheme = dark ? ElementTheme.Dark : ElementTheme.Light;
         foreach (var (bullet, text, balance) in _rows)
             bullet.Foreground = text.Foreground = UsageTint.BrushFor(balance, dark, highContrast);
-        _rounding.Foreground = UsageTint.BrushFor(0, dark, highContrast);
+        foreach (var (glyph, balance) in _swatches)
+            glyph.Foreground = UsageTint.BrushFor(balance, dark, highContrast);
+        _rounding.Foreground = UsageTint.BrushFor(null, dark, highContrast);
         _hoverBrush = highContrast ? UsageTint.SystemBrush("SystemColorWindowTextColorBrush")
             : ThemeBrush("ControlStrokeColorDefaultBrush", dark);
         _owner.BorderThickness = new Thickness(highContrast ? 2 : 1);

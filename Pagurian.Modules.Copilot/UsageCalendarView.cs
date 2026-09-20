@@ -122,20 +122,14 @@ internal static class UsageCalendarView
 
     internal const string SurplusHelp = "Surplus: Credits used are below the elapsed working-day allocation, shown as green.";
     internal const string BudgetHelp = "Over budget: Credits used exceed the elapsed working-day allocation, shown as red.";
-    internal const string NeutralHelp = "On track: The rounded credit balance is zero, shown in the theme’s neutral color.";
+    internal const string NeutralHelp = "On track: The rounded credit balance is zero, shown as blue.";
     internal const string RoundingHelp = "(Days are rounded to the nearest whole workday, with halves rounded away from zero.)";
-    internal const string BalanceHelp = SurplusHelp + " " + BudgetHelp + " " + NeutralHelp + " " +
+    internal const string BalanceHelp = SurplusHelp + " " + NeutralHelp + " " + BudgetHelp + " " +
         RoundingHelp;
 
     internal static Element BalanceRow(CopilotUsagePace pace, bool dark, bool highContrast)
     {
-        var tint = UsageTint.BrushFor(pace.RoundedBalance, dark, highContrast);
-        var balance = (Grid([GridSize.Auto, GridSize.Star()], [GridSize.Auto],
-                BodyStrong("●").Foreground(tint).AccessibilityHidden()
-                    .VerticalAlignment(VerticalAlignment.Top).Grid(column: 0),
-                BodyStrong(pace.BalanceText).Foreground(tint)
-                    .TextWrapping(TextWrapping.WrapWholeWords).Grid(column: 1))
-            with { ColumnSpacing = 8 });
+        var balance = UsageBalanceLabel.Render(pace, dark, highContrast);
         var workdayStats = BodyStrong(
                 $"{pace.TotalWorkdays} total workdays · {pace.ElapsedWorkdays} elapsed through today")
             .TextWrapping(TextWrapping.WrapWholeWords)
@@ -143,7 +137,7 @@ internal static class UsageCalendarView
             .Padding(20, 0, 0, 0);
         return Border(VStack(4, balance, workdayStats)
                 .Set(content => content.IsHitTestVisible = false))
-#pragma warning disable REACTOR_THEME_004 // Include the unpainted circle/text gap in the tooltip hit area.
+#pragma warning disable REACTOR_THEME_004 // Include the unpainted icon/text gap in the tooltip hit area.
             .Background(new SolidColorBrush(Microsoft.UI.Colors.Transparent))
 #pragma warning restore REACTOR_THEME_004
             .Padding(8)
