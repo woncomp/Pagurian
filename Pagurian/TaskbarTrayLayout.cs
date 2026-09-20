@@ -16,14 +16,23 @@ internal sealed class TaskbarTrayLayout
     internal int MountCount { get; private set; }
     internal int UnmountCount { get; private set; }
     internal event Action<string>? Diagnostic;
-    internal void Mounted(string key) { MountCount++; Diagnostic?.Invoke($"mount key={key}"); }
-    internal void Unmounted(string key) { UnmountCount++; Diagnostic?.Invoke($"unmount key={key}"); }
+    internal void Mounted(string key)
+    {
+        MountCount++;
+        TaskbarTrayWindow.BrushMounted(key);
+        Diagnostic?.Invoke($"mount key={key}");
+    }
+    internal void Unmounted(string key)
+    {
+        UnmountCount++;
+        TaskbarTrayWindow.BrushUnmounted(key);
+        Diagnostic?.Invoke($"unmount key={key}");
+    }
     internal void SetCells(ShellCellHandle[] cells)
     {
         _cells = cells;
         var keys = cells.Select(c => c.Key).ToHashSet();
         foreach (var key in _refs.Keys.Where(k => !keys.Contains(k)).ToArray()) _refs.Remove(key);
-        TaskbarTrayWindow.PruneBrushes(keys);
     }
     internal ElementRef RefFor(string key)
     {

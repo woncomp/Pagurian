@@ -64,7 +64,9 @@ sealed class Harness
     private TaskCompletionSource<byte[]?>? _delayed;
     private TrayBackgroundSampler? _sampler;
     private int _captures, _samples;
+    private readonly ThemeService _theme = new();
     private static TrayConfig.Entry Entry(string id) => new(typeof(ProbeShell).FullName!, id, null);
+    private static TrayConfig.TrayGroup Group(params TrayConfig.Entry[] entries) => new(TrayId.PrimaryLeft, entries);
     internal void Run()
     {
         try
@@ -92,9 +94,9 @@ sealed class Harness
             }
             Console.WriteLine($"Capture region: {_surface.ContentRect.Left},{_surface.ContentRect.Top},{_surface.ContentRect.Width},{_surface.ContentRect.Height} hwnd={_parentHwnd}");
             ModuleLoader.Catalog[typeof(ProbeShell).FullName!] = new ShellAttribute { ShellType = typeof(ProbeShell) };
-            TrayShells.Changed += () => _publications++;
-            TrayShells.ApplyConfig([Entry("1001"), Entry("1002"), Entry("1003")]);
-            _models = TrayShells.Shells.Cast<ProbeShell>().Select(s => s.Model).ToArray();
+            TrayManager.Changed += () => _publications++;
+            TrayManager.ApplyConfig([Group(Entry("1001"), Entry("1002"), Entry("1003"))]);
+            _models = TrayManager.Shells.Cast<ProbeShell>().Select(s => s.Model).ToArray();
             Require(_publications == 1, "initial cells were published more than once");
             _session = Create();
             _session.Start();
@@ -106,7 +108,7 @@ sealed class Harness
                 Require(_session.Injected, "child window injection failed");
                 Require(_session.Layout.MountCount == 3, "initial cells not mounted exactly once");
                 _publications = 0;
-                TrayShells.ApplyConfig([Entry("1001"), Entry("1003")]);
+                TrayManager.ApplyConfig([Group(Entry("1001"), Entry("1003"))]);
                 Require(_publications == 1, "shutdown published intermediate lists");
             });
             Step(180, () =>
@@ -115,7 +117,7 @@ sealed class Harness
                 Require(_models[0].Mounts == 1 && _models[2].Mounts == 1, "survivors remounted on middle deletion");
                 Require(_models[1].Unmounts == 1, "deleted cell did not unmount");
                 Require(_session.Hwnd == _originalHwnd, "ordinary deletion replaced HWND");
-                TrayShells.ApplyConfig([Entry("1003")]);
+                TrayManager.ApplyConfig([Group(Entry("1003"))]);
             });
             Step(180, () => { Visible(66); _models[2].Resize!(117); });
             Step(180, () =>
@@ -128,19 +130,19 @@ sealed class Harness
                 Require(_session.CommitCount == _commits, "idle tray kept committing geometry");
                 Require(_session.MeasureCount == _measures, "color sampling caused idle measurement");
                 _publications = 0;
-                var shell = (ProbeShell)TrayShells.Shells[0];
+                var shell = (ProbeShell)TrayManager.Shells[0];
                 shell.Add(); shell.Remove(); shell.Add();
             });
             Step(200, () =>
             {
                 Require(_publications == 1, "dynamic cell edits were not coalesced");
                 Visible(189);
-                TrayShells.ApplyConfig([]);
+                TrayManager.ApplyConfig([]);
             });
             Step(180, () =>
             {
                 Require(_session.State == TrayWindowSessionState.Preparing && !IsWindowVisible(_session.Hwnd), "empty tray remained visible");
-                TrayShells.ApplyConfig([Entry("1004")]);
+                TrayManager.ApplyConfig([Group(Entry("1004"))]);
             });
             Step(350, () =>
             {
@@ -168,7 +170,7 @@ sealed class Harness
             Step(500, () =>
             {
                 Visible(66);
-                Require(!ThemeService.Instance.IsDark, "light sample did not select light text theme");
+                Require(!_theme.IsDark, "light sample did not select light text theme");
                 _session.Close();
                 _session = Create(capture: r => Task.FromResult<byte[]?>(Pixels(r, 24)));
                 _session.Start();
@@ -176,7 +178,7 @@ sealed class Harness
             Step(500, () =>
             {
                 Visible(66);
-                Require(ThemeService.Instance.IsDark, "dark sample did not select dark text theme");
+                Require(_theme.IsDark, "dark sample did not select dark text theme");
                 _session.Close();
                 _session = Create(capture: _ => { _delayed = new(); return _delayed.Task; });
                 _session.Start();
@@ -215,7 +217,7 @@ sealed class Harness
             {
                 Visible(66);
                 _session.Close();
-                TrayShells.ShutdownAll();
+                TrayManager.ShutdownAll();
                 if (_realTaskbar) _parent.Close();
                 Console.WriteLine($"Tray lifecycle passed: {_checks} assertions.");
                 Environment.Exit(0);
@@ -229,7 +231,7 @@ sealed class Harness
     }
     private TrayWindowSession Create(Func<nint>? parent = null, Func<TaskbarInterop.RECT, Task<byte[]?>>? capture = null)
     {
-        var session = new TrayWindowSession(() => _surface, parent ?? (() => _parentHwnd), capture, Console.WriteLine);
+        var session = new TrayWindowSession(() => _surface, parent ?? (() => _parentHwnd), capture, Console.WriteLine, _theme.Apply);
         session.Revealed += () =>
         {
             Require(session.Snapshot is { Cells.IsEmpty: false }, "revealed an empty snapshot");

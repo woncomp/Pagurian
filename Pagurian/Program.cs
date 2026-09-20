@@ -25,7 +25,7 @@ ReactorApp.Run(_ =>
         PagurianLog.Host($"FATAL XAML unhandled exception: {e.Exception}");
 
     ModuleLoader.LoadAll();
-    TrayShells.LoadFromConfig(TrayConfig.Load());
+    TrayManager.LoadFromConfig(TrayConfig.Load());
     ShellMessageServer.Start();
 
     var tray = ReactorApp.OpenTrayIcon(new TrayIconSpec(
@@ -34,13 +34,13 @@ ReactorApp.Run(_ =>
         Key: WindowKey.Of("pagurian-tray"),
         IsVisible: true));
 
-    TaskbarController.Start();
+    TraySurfaceController.Start();
 
     tray.DoubleClick += (_, _) => SettingsWindow.OpenOrActivate(SettingsPage.Shells);
 
     tray.RightClick += (_, _) =>
     {
-        var cmd = TaskbarInterop.ShowTrayMenu(TaskbarController.TrayWindowHwnd());
+        var cmd = TaskbarInterop.ShowTrayMenu(TraySurfaceController.TrayWindowHwnd());
         if (cmd == TaskbarInterop.EditShellsCommandId)
         {
             SettingsWindow.OpenOrActivate(SettingsPage.Shells);
@@ -57,10 +57,10 @@ ReactorApp.Run(_ =>
         // ReactorApp.Exit(0) only calls WinUI's Application.Exit(), which closes
         // the windows but leaves this process running, so finish the job once
         // the WinUI unwind has been kicked off.
-        TaskbarController.Stop();
+        TraySurfaceController.Stop();
         ShellMessageServer.Stop();
         SettingsWindow.CloseIfOpen();
-        TrayShells.ShutdownAll();
+        TrayManager.ShutdownAll();
         ModuleLoader.ShutdownAll();
         tray.Close();
         ReactorApp.Exit(0);

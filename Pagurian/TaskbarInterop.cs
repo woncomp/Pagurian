@@ -84,6 +84,9 @@ static class TaskbarInterop
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromRect(ref RECT lprc, uint dwFlags);
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern bool GetMonitorInfoW(IntPtr hMonitor, ref MONITORINFOEX lpmi);
 
@@ -234,6 +237,30 @@ static class TaskbarInterop
 
     public static IntPtr FindTaskbar() => FindWindowW("Shell_TrayWnd", null);
 
+    // All taskbar windows: the primary Shell_TrayWnd plus every secondary
+    // taskbar (Shell_SecondaryTrayWnd, present only while "show taskbar on
+    // all displays" is on), each mapped to its owning monitor.
+    public static IReadOnlyList<(nint Hwnd, nint Monitor)> FindAllTaskbars()
+    {
+        var taskbars = new List<(nint Hwnd, nint Monitor)>();
+        var primary = FindTaskbar();
+        if (primary != IntPtr.Zero)
+            taskbars.Add((primary, MonitorFromWindow(primary, MONITOR_DEFAULTTONEAREST)));
+        nint after = IntPtr.Zero;
+        nint secondary;
+        while ((secondary = FindWindowExW(IntPtr.Zero, after, "Shell_SecondaryTrayWnd", null)) != IntPtr.Zero)
+        {
+            taskbars.Add((secondary, MonitorFromWindow(secondary, MONITOR_DEFAULTTONEAREST)));
+            after = secondary;
+        }
+        return taskbars;
+    }
+
+    // Monitor identity/geometry for an HMONITOR (from EnumDisplayMonitors or
+    // MonitorFromWindow), exposed for the display topology layer.
+    public static bool TryGetMonitorInfo(IntPtr monitor, out DisplayMonitor info) =>
+        TryReadDisplayMonitor(monitor, out info);
+
     [DllImport("shell32.dll")]
     private static extern IntPtr SHAppBarMessage(uint dwMessage, ref APPBARDATA pData);
 
@@ -323,22 +350,13 @@ static class TaskbarInterop
 
     public static bool TryGetTaskbarRect(out RECT rect)
     {
-        // Preferred: the taskbar window's rect directly. GetWindowRect sends no
-        // message, unlike SHAppBarMessage (a cross-process SendMessage to the
-        // taskbar that can block the caller — and with our window parented
-        // into the taskbar, a blocked UI thread wedges the taskbar's attached
-        // input queue). GetWindowRect also reflects the actual on-screen
-        // position, e.g. during the auto-hide slide.
         var hwnd = FindWindowW("Shell_TrayWnd", null);
-        if (hwnd != IntPtr.Zero && GetWindowRect(hwnd, out rect) &&
-            rect.Right > rect.Left && rect.Bottom > rect.Top)
-        {
+        if (TryGetTaskbarRect(hwnd, out rect))
             return true;
-        }
 
         // Fallback: official appbar API (works even when window enumeration
         // doesn't see Shell_TrayWnd). Rare enough that its blocking nature is
-        // acceptable.
+        // acceptable. Primary-only: no appbar message exists for secondaries.
         var data = new APPBARDATA { cbSize = Marshal.SizeOf<APPBARDATA>() };
         if (SHAppBarMessage(ABM_GETTASKBARPOS, ref data) != IntPtr.Zero &&
             data.rc.Right > data.rc.Left && data.rc.Bottom > data.rc.Top)
@@ -351,12 +369,33 @@ static class TaskbarInterop
         return false;
     }
 
-    // Windows 11's Shell_TrayWnd can include an empty strip above the actual
+    // The taskbar window's rect directly. GetWindowRect sends no message,
+    // unlike SHAppBarMessage (a cross-process SendMessage to the taskbar that
+    // can block the caller — and with our window parented into the taskbar, a
+    // blocked UI thread wedges the taskbar's attached input queue).
+    // GetWindowRect also reflects the actual on-screen position, e.g. during
+    // the auto-hide slide.
+    public static bool TryGetTaskbarRect(IntPtr taskbar, out RECT rect)
+    {
+        if (taskbar != IntPtr.Zero && GetWindowRect(taskbar, out rect) &&
+            rect.Right > rect.Left && rect.Bottom > rect.Top)
+        {
+            return true;
+        }
+
+        rect = default;
+        return false;
+    }
+
+    // Windows 11's taskbar windows can include an empty strip above the actual
     // taskbar controls. Anchor to a visible control's cross-axis bounds rather
     // than treating that outer host rectangle as the taskbar surface.
-    public static bool TryGetTaskbarContentRect(out RECT rect)
+    public static bool TryGetTaskbarContentRect(out RECT rect) =>
+        TryGetTaskbarContentRect(FindTaskbar(), out rect);
+
+    public static bool TryGetTaskbarContentRect(IntPtr taskbar, out RECT rect)
     {
-        if (!TryGetTaskbarRect(out var shellRect))
+        if (!TryGetTaskbarRect(taskbar, out var shellRect))
         {
             rect = default;
             return false;
@@ -365,7 +404,7 @@ static class TaskbarInterop
         var horizontal = shellRect.Width >= shellRect.Height;
         foreach (var className in new[] { "MSTaskListWClass", "ReBarWindow32", "Start" })
         {
-            var child = FindWindowExW(FindTaskbar(), IntPtr.Zero, className, null);
+            var child = FindWindowExW(taskbar, IntPtr.Zero, className, null);
             if (!TryGetWindowRect(child, out var childRect))
                 continue;
 

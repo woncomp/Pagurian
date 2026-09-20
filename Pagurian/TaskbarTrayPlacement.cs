@@ -9,7 +9,8 @@ static class TaskbarTrayPlacement
         TaskbarInterop.RECT ContentRect,
         TaskbarInterop.RECT ParentRect,
         bool IsHorizontal,
-        double Scale)
+        double Scale,
+        TrayEdge Edge = TrayEdge.Left)
     {
         public TaskbarInterop.RECT Place(double widthDip)
         {
@@ -20,7 +21,15 @@ static class TaskbarTrayPlacement
             double xPx, yPx;
             if (IsHorizontal)
             {
-                xPx = ContentRect.Left + 8 * Scale;
+                // TODO(right-edge trays): anchoring at the content rect's
+                // right end overlaps the notification area/clock on stock
+                // Windows; the right anchor needs a measured safe inset
+                // before TrayEdge.Right surfaces are materialized. Until then
+                // the binding engine normalizes every tray to the left
+                // surface, so this branch is unreachable.
+                xPx = Edge == TrayEdge.Right
+                    ? ContentRect.Right - winW - 8 * Scale
+                    : ContentRect.Left + 8 * Scale;
                 yPx = ContentRect.Top + (ContentRect.Height - winH) / 2;
             }
             else
@@ -48,10 +57,14 @@ static class TaskbarTrayPlacement
         }
     }
 
-    public static bool TryGetSurface(out Surface surface)
+    // The primary taskbar's left surface (the historical single-tray case).
+    public static bool TryGetSurface(out Surface surface) =>
+        TryGetSurface(TaskbarInterop.FindTaskbar(), TrayEdge.Left, out surface);
+
+    public static bool TryGetSurface(nint taskbar, TrayEdge edge, out Surface surface)
     {
-        if (!TaskbarInterop.TryGetTaskbarContentRect(out var contentRect) ||
-            !TaskbarInterop.TryGetTaskbarRect(out var parentRect) ||
+        if (!TaskbarInterop.TryGetTaskbarContentRect(taskbar, out var contentRect) ||
+            !TaskbarInterop.TryGetTaskbarRect(taskbar, out var parentRect) ||
             contentRect.Width < 32 || contentRect.Height < 16)
         {
             surface = default;
@@ -67,7 +80,7 @@ static class TaskbarTrayPlacement
             return false;
         }
 
-        surface = new Surface(contentRect, parentRect, horizontal, scale);
+        surface = new Surface(contentRect, parentRect, horizontal, scale, edge);
         return true;
     }
 }

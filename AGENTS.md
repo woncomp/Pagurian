@@ -13,8 +13,10 @@ dotnet run --project Pagurian -p:Platform=x64
 
 There is no general unit-test suite or linter. Run
 `tests\Verify-ModuleIsolation.ps1` for the module load-context contract, then
-launch the app and observe the tray icon, taskbar tray, settings, billboards,
+launch the app and observe the tray icon, taskbar trays, settings, billboards,
 and message boxes.
+`tests\Verify-TrayTopology.ps1` covers config migration, the tray→surface
+binding engine and its fallback chain with fabricated displays.
 `tests\Verify-CopilotSessions.ps1 -Platform x64` runs the dependency-free
 Copilot identity/state/dispatcher fixture using temporary sanitized metadata
 and transcripts; it does not launch Pagurian or change user hook/session files.
@@ -43,7 +45,8 @@ by the host project instead.)
 A WinUI 3 Fluent-style utility that (1) runs a system-tray icon with a
 native Win32 context menu ("Edit Shells…", "Settings…", and Quit;
 double-click opens Edit Shells), (2) injects a borderless **Tray** window
-into the Windows taskbar (child of `Shell_TrayWnd`) that lays out **Shells**
+into every display's Windows taskbar (child of `Shell_TrayWnd` /
+`Shell_SecondaryTrayWnd`) that lays out **Shells**
 horizontally, each shell contributing zero or more **ShellCells**, (3) shows
 **Billboards** (detail panels) above the tray when cells are clicked,
 (4) receives messages for shells via `Pagurian.exe post {shell_id} <cmd>
@@ -53,8 +56,12 @@ editing.
 
 Concepts:
 
-- **Tray** — the injected window; a horizontal stack of cells, ordered by the
-  config file. Host-owned.
+- **Tray (logical)** — a configured, ordered set of shells belonging to one
+  display/edge pair (`TrayId`); a config citizen that exists regardless of
+  whether its display is connected. Ordered by the config file. Host-owned.
+- **Surface (Tray surface)** — the injected window on one live display's
+  taskbar; renders every tray bound to it. One per (display, edge); only the
+  primary surface exists unconditionally.
 - **Shell** — a configured module feature instance (plain object, not a
   component) with a persistent 4-digit id; the `post` target; a container of
   cells. A shell with zero cells occupies no tray space.
@@ -104,15 +111,15 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   intercept**: `Pagurian.exe post {id} <cmd> [args...]` runs `PostBridge.Run`
   and returns before touching WinUI. Otherwise `ReactorApp.Run(startup)`:
   `ShutdownPolicy.Explicit`, `PagurianLog.Initialize()`, `ModuleLoader
-  .LoadAll()`, `TrayShells.LoadFromConfig(TrayConfig.Load())`,
-  `ShellMessageServer.Start()`, then tray icon + tray window + controller.
+  .LoadAll()`, `TrayManager.LoadFromConfig(TrayConfig.Load())`,
+  `ShellMessageServer.Start()`, then tray icon + tray surfaces + controller.
   The Settings window opens on the Shells page from tray-icon double-click or
   the tray menu's "Edit Shells…" item; "Settings…" opens the same window on
   its General page. Quit
   happens only via the tray menu:
-  `TaskbarController.Stop()` → `ShellMessageServer.Stop()` →
+  `TraySurfaceController.Stop()` → `ShellMessageServer.Stop()` →
   `SettingsWindow.CloseIfOpen()` →
-  `TrayShells.ShutdownAll()` →
+  `TrayManager.ShutdownAll()` →
   `ModuleLoader.ShutdownAll()` → `tray.Close()` → `ReactorApp.Exit(0)` →
   `Environment.Exit(0)` (the last call is required).
 - `ModuleLoader.cs` / `ModuleLoadContext.cs` — folders-only bundle discovery,
@@ -127,29 +134,62 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   (default `%LOCALAPPDATA%\Pagurian`; writing the default deletes the
   value). Read via `HostSettings.ConfigDir`.
 - `TrayConfig.cs` — `<HostSettings.ConfigDir>\config.json`:
-  `{ "tray": [ { "shell": "<FullName>", "id": "3842", "settings": {...}? } ] }`.
-  Order = tray order. Ids are 4-digit, globally unique; duplicates are logged
-  and skipped. The same kind twice = two instances. `settings` passes through
-  to `Shell.Settings` verbatim (reserved). A missing file is seeded with only
+  `{ "trays": [ { "monitor": "primary" | "<EDID identity key>", "edge"?: "left",
+  "shells": [ { "shell": "<FullName>", "id": "3842", "settings": {...}? } ] } ] }`.
+  Each group is one logical tray (a display/edge pair); entry order = tray order.
+  Ids are 4-digit, globally unique across all trays (`post` routes by bare id);
+  duplicates are logged and skipped. The same kind twice = two instances.
+  `settings` passes through to `Shell.Settings` verbatim (reserved). A legacy
+  flat `"tray"` array maps to the primary left tray in memory (rewritten as v2
+  on the next Save). A missing file is seeded with only
   the World Clock shell (tracking local time) and a random id; an existing
   file is only ever modified
-  through `Save(entries)` (temp file + atomic move, called by the Shell
+  through `Save(groups)` (temp file + atomic move, called by the Shell
   editor), and the host never auto-adds discovered shells. `NextId(taken)`
   allocates a fresh 4-digit id.
-- `TrayShells.cs` — the ordered shell registry + flattened cell list.
-  `Shell.AddCell/RemoveCell` call back through an internal channel; coalesced
-  changes raise `Changed` → keyed reconciliation preserves surviving controls.
-  Also routes `post` messages by `Shell.InstanceId`.
-  `ApplyConfig(entries)` reconciles the live set with a config list without
-  restarting unchanged shells (kept by id when the kind still matches),
-  reorders to the list order, and rebuilds cells once at the end.
+- `Trays/TrayId.cs` — `TrayId(MonitorKey, Edge)` (logical tray identity;
+  `MonitorKey` is `"primary"` or a display's EDID identity key, never a GDI
+  ordinal) and `SurfaceKey(DisplayKey, Edge)` (a live display's taskbar
+  surface). `TrayEdge.Right` is carried by the model/config but normalized to
+  the left surface until right-edge placement exists.
+- `Displays/DisplayInterop.cs` + `Displays/DisplayTopology.cs` — the physical
+  world: EnumDisplayMonitors geometry joined with DisplayConfig EDID identity
+  (`MODEL-UID` keys, friendly names like "DELL U2720Q") and each display's
+  taskbar window (`Shell_TrayWnd` + `Shell_SecondaryTrayWnd` via
+  MonitorFromWindow). `Refresh()` raises `Changed` on structural change only.
+  Last-seen name/geometry per identity persist to
+  `<HostSettings.ConfigDir>\monitors.json` (atomic write, cap 64) for
+  fallback matching and the settings picker's disconnected rows.
+- `Trays/TrayManager.cs` + `Trays/ShellTray.cs` — the logical world: one
+  ShellTray per configured TrayId (ordered shells, per-tray reconciliation,
+  coalesced `Changed`). Shells keep running and `post` keeps routing while
+  their display is absent; the binding engine maps each tray to a live
+  surface: exact display → closest aspect ratio to the recorded geometry
+  (monitors.json, |ln(a/b)| ≤ 0.15) → a display no configured tray owns →
+  primary. `CellsForSurface(key)` composes bound trays in config order;
+  `ApplyConfig(groups)` never restarts shells staying on the same tray (a
+  cross-tray move is a restart). Surface themes are registered by surfaces
+  and pushed into bound trays/shells.
+- `Trays/TraySurface.cs` + `Trays/TraySurfaceController.cs` — the
+  presentation world: one TrayWindowSession + one sampled ThemeService per
+  live surface. The controller's 50 ms tick polls input; every ~1.25 s it
+  refreshes the topology and reconciles surfaces (primary-left always exists
+  as the tray-icon menu owner; others only while cells are bound). Hover/
+  tooltip/click dispatch iterates surfaces; the tooltip flips against the
+  owning display's monitor rect, and the single billboard session uses the
+  owner surface's theme.
 - `SettingsWindow.cs` / `SettingsView.cs` — the singleton 1600×900
   Settings window and its `NavigationView` root. The General page owns the
   config-directory row (TextBox + folder picker →
-  `HostSettings.SetConfigDir` → config reload → `TrayShells.ApplyConfig`).
+  `HostSettings.SetConfigDir` → config reload → `TrayManager.ApplyConfig`).
   The Shells page keeps the module catalog or per-instance
   `ShellConfiguration` in the scrollable center, with the draft Tray fixed
-  at the bottom and horizontally scrollable. The center uses a nested
+  at the bottom and horizontally scrollable. The draft is a list of
+  per-display trays; a monitor-picker button at the right end of the Tray
+  container's title row opens a scaled display-layout preview (friendly
+  names, never display numbers; disconnected configured trays listed below)
+  and switches which tray is being edited. Selecting a display alone never
+  dirties the draft. The center uses a nested
   `NavigationHost` with `Modules` and per-instance `ShellConfiguration`
   routes: configurations enter from the right with
   `NavigationTransition.Spring()`, and Back plays the reverse transition.
@@ -168,7 +208,7 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   draft, including per-instance
   `ShellConfiguration` settings, survives page switches. Save persists the
   complete draft with `TrayConfig.Save`, applies it with
-  `TrayShells.ApplyConfig`, and keeps Settings open; Revert reloads the last
+  `TrayManager.ApplyConfig`, and keeps Settings open; Revert reloads the last
   persisted configuration into that draft. Closing with unsaved changes
   discards only after confirmation. Icons:
   `[Shell].PreviewIconPath` with `AppAssets.ModuleFallbackIconPath` fallback.
@@ -178,21 +218,23 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   retries and **always exits 0** (callers are fail-closed). The server
   marshals each envelope to the UI thread and routes it; unknown ids / empty
   commands are dropped with a log line.
-- `TaskbarTrayWindow.cs`: keyed cell Borders and stable hover brushes.
-  Cells measure naturally inside the session's left-aligned host panel.
+- `TaskbarTrayWindow.cs`: keyed cell Borders and stable hover brushes
+  (reference-counted per cell key; a rebinding cell briefly lives on two
+  surfaces). Cells measure naturally inside the session's left-aligned host
+  panel; each window renders only its surface's cells.
 - `TaskbarTrayLayout.cs`: per-window cell refs and immutable measured
   snapshots shared by native positioning, hit-testing and billboard anchors.
 - `TrayWindowSession.cs`: persistent HWND, hidden preparation, injection,
-  coalesced layout commits and a rendered/DwmFlush presentation gate.
+  coalesced layout commits and a rendered/DwmFlush presentation gate. One
+  session per surface; sampled luminance feeds the owning surface's theme
+  via the injected theme sink.
   `TrayBackgroundSampler.cs` captures spatial taskbar strips off the UI thread;
   resizing reuses the cached strip. See `docs/Tray-Lifecycle.md` for native
   child-window requirements and the pinned Reactor native-loss adapter.
-- `TaskbarController.cs`: the 50 ms input/environment observer. It no longer
-  polls cell widths or owns window geometry. It dispatches clicks, hover,
-  tooltips and billboard sessions using the committed tray snapshot.
-- `ThemeService.cs` — host `IThemeService`: `IsDark` from sampled luminance
-  (Rec.601, threshold 140 — always matches the taskbar itself), the shared
-  live `TextBrush` (mutated in place on flips), and the `Changed` broadcast.
+- `ThemeService.cs` — host `IThemeService`, one instance per tray surface:
+  `IsDark` from sampled luminance (Rec.601, threshold 140 — always matches
+  that surface's taskbar), the shared live `TextBrush` (mutated in place on
+  flips), and the `Changed` broadcast.
 - `PagurianLog.cs` — the unified log (`%LOCALAPPDATA%\Pagurian\pagurian.log`,
   timestamp + level + tag). Installs the Sdk `Logger` sink; host writes with
   tag `host`.
@@ -272,15 +314,17 @@ public sealed class MyShell : Shell
   `GetPixel` loops
   on the UI thread once wedged the whole taskbar because the cross-process
   `SetParent` attaches our input queue to Explorer's.)
-- **Taskbar rect**: `FindWindowW("Shell_TrayWnd")` + `GetWindowRect` first
+- **Taskbar rect**: `GetWindowRect` on the display's own taskbar HWND first
   (no message sent); `SHAppBarMessage(ABM_GETTASKBARPOS)` is a blocking
-  cross-process `SendMessage` — fallback only.
+  cross-process `SendMessage` — primary-only fallback only.
 - **Hover/click detection is cursor polling**, not XAML pointer events (the
   windows are NoActivate topmost overlays). Clicks are up→down edges of
   `GetAsyncKeyState(VK_LBUTTON)`. XAML `.ToolTip()` doesn't fire either —
   tooltips are real borderless windows (`TooltipWindow`) after a ~400 ms
-  dwell.
-- **Theme comes from sampled taskbar pixels**, not app theme APIs.
+  dwell, flipped against the owning display's monitor rect (never the
+  primary origin — secondary displays can be negative-coordinate).
+- **Theme comes from sampled taskbar pixels**, per tray surface, not app
+  theme APIs.
 - **Message boxes**: Win32 `MessageBoxW` (`MessageBoxes.Show` in the Sdk).
 - **Tray menu is a native Win32 popup menu** (`TaskbarInterop.ShowTrayMenu`,
   blocks the UI thread until selection; returns `EditShellsCommandId`,

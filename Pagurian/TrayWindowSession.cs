@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Reactor;
+using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -26,6 +27,9 @@ internal sealed class TrayWindowSession
     private readonly Func<TaskbarTrayPlacement.Surface?> _getSurface;
     private readonly Func<nint> _getParent;
     private readonly Action<string> _log;
+    private readonly Action<bool>? _themeSink;
+    private readonly Func<TaskbarTrayLayout, Component> _content;
+    private readonly WindowKey? _windowKey;
     private readonly TrayBackgroundSampler _background;
     private readonly NaturalTrayPanel _panel;
     private readonly LinearGradientBrush _brush = new();
@@ -51,11 +55,15 @@ internal sealed class TrayWindowSession
 
     internal TrayWindowSession(Func<TaskbarTrayPlacement.Surface?>? getSurface = null,
         Func<nint>? getParent = null, Func<TaskbarInterop.RECT, Task<byte[]?>>? capture = null,
-        Action<string>? log = null)
+        Action<string>? log = null, Action<bool>? themeSink = null,
+        Func<TaskbarTrayLayout, Component>? content = null, WindowKey? windowKey = null)
     {
         _getSurface = getSurface ?? (() => TaskbarTrayPlacement.TryGetSurface(out var s) ? s : null);
         _getParent = getParent ?? TaskbarInterop.FindTaskbar;
         _log = log ?? (message => PagurianLog.Tray(_id.ToString(), message));
+        _themeSink = themeSink;
+        _content = content ?? (layout => new TaskbarTrayWindow(layout));
+        _windowKey = windowKey;
         _panel = new NaturalTrayPanel(_target, QueueCommit, () => { if (_queued) Commit(insideArrange: true); });
         _root.Child = _panel;
         for (int i = 0; i < TaskbarTrayWindow.GradientStopCount; i++)
@@ -80,9 +88,9 @@ internal sealed class TrayWindowSession
         try
         {
             ApplyBackground();
-            TrayShells.Changed += OnCellsChanged;
+            TrayManager.Changed += OnCellsChanged;
             _uiSettings.ColorValuesChanged += OnSystemColorsChanged;
-            ReactorApp.OpenWindow(TaskbarTrayWindow.CreateSpec(), () => new TaskbarTrayWindow(Layout), host =>
+            ReactorApp.OpenWindow(TaskbarTrayWindow.CreateSpec(_windowKey), () => _content(Layout), host =>
             {
                 _window = host.OwningWindow!;
                 Hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window.NativeWindow);
@@ -265,7 +273,9 @@ internal sealed class TrayWindowSession
         if (changed) _presentationVersion++;
         dark = _brush.GradientStops.Average(stop => Luminance(stop.Color)) <= 140;
         _root.RequestedTheme = highContrast ? ElementTheme.Default : dark ? ElementTheme.Dark : ElementTheme.Light;
-        ThemeService.Instance.Apply(dark);
+        // The owning surface's theme follows the sampled taskbar luminance;
+        // trays bound to this surface (and their shells) share that instance.
+        _themeSink?.Invoke(dark);
     }
     private static double Luminance(Color c) => .299 * c.R + .587 * c.G + .114 * c.B;
 
@@ -382,7 +392,7 @@ internal sealed class TrayWindowSession
         _background.Dispose();
         _fallbackTimer.Stop();
         _fallbackTimer.Tick -= OnFallback;
-        TrayShells.Changed -= OnCellsChanged;
+        TrayManager.Changed -= OnCellsChanged;
         _uiSettings.ColorValuesChanged -= OnSystemColorsChanged;
         if (_window != null)
         {

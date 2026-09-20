@@ -1,21 +1,23 @@
 using Pagurian.Sdk;
 namespace Pagurian;
-// Only disk/config/module discovery are replaced. All rendering, registry,
-// measurement, native injection and sampler code are linked from production.
-static class AppAssets { internal static string ApplicationIconPath => Path.Combine(AppContext.BaseDirectory, "Assets", "Pagurian-256.ico"); }
+
+// Only disk/config/module discovery are replaced; the registry, binding
+// engine and config serialization are linked from production. HostSettings
+// redirects every file into an isolated temp folder.
 static class PagurianLog
 {
     internal static void Tray(string sessionId, string s) => Console.WriteLine(s);
     internal static void Host(string s) => Console.WriteLine(s);
     internal static void HostError(string s, Exception? ex = null) => Console.WriteLine($"{s} {ex}");
 }
-static class TrayConfig
-{
-    public sealed record Entry(string ShellType, string Id, System.Text.Json.JsonElement? Settings);
-    public sealed record TrayGroup(TrayId Id, System.Collections.Generic.IReadOnlyList<Entry> Entries);
-}
 static class ModuleLoader
 {
     internal static readonly Dictionary<string, ShellAttribute> Catalog = new();
     internal static bool TryGetKind(string type, out ShellAttribute kind) => Catalog.TryGetValue(type, out kind!);
+}
+static class HostSettings
+{
+    internal static readonly string TestDir = Path.Combine(
+        Path.GetTempPath(), "pagurian-topology-fixture-" + Guid.NewGuid().ToString("N")[..8]);
+    public static string ConfigDir => TestDir;
 }

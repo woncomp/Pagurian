@@ -88,6 +88,6 @@ static class ShellMessageServer
             ? at
             : DateTimeOffset.Now;
 
-        TrayShells.RouteMessage(id, new ShellMessage(command, args, payload, receivedAt));
+        TrayManager.RouteMessage(id, new ShellMessage(command, args, payload, receivedAt));
     }
 }

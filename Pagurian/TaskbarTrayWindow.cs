@@ -5,17 +5,17 @@ using static Microsoft.UI.Reactor.Factories;
 
 namespace Pagurian;
 
-// Borderless window anchored to the taskbar: the Tray, a horizontal container
-// of shell cells. All cell content comes from the configured shells
-// (TrayShells); the window itself only supplies the per-cell chrome — the
-// native rounded translucent hover overlay, the hover margins, and the width
-// read-back Ref — plus the sampled taskbar-color background gradient that
-// blends the whole tray into the taskbar. A shell with zero cells occupies no
-// space.
-class TaskbarTrayWindow(TaskbarTrayLayout layout) : Component
+// Borderless window anchored to one display's taskbar: a Tray surface, a
+// horizontal container of the shell cells TrayManager assigns to it. All
+// cell content comes from the bound trays; the window itself only supplies
+// the per-cell chrome — the native rounded translucent hover overlay, the
+// hover margins, and the width read-back Ref — while the session supplies
+// the sampled taskbar-color background gradient that blends the tray into
+// the taskbar. A surface with zero cells occupies no space.
+class TaskbarTrayWindow : Component
 {
-    // Design sizes in DIPs; the controller scales to physical pixels.
-    // WindowHeightDip is the full taskbar thickness (the controller derives
+    // Design sizes in DIPs; the session scales to physical pixels.
+    // WindowHeightDip is the full taskbar thickness (the session derives
     // the DPI scale from it); the widget itself is inset WindowInsetYDip
     // from the taskbar's top and bottom edges so it sits slightly inside.
     // Cell widths are measured naturally by the session before committing
@@ -30,7 +30,19 @@ class TaskbarTrayWindow(TaskbarTrayLayout layout) : Component
     public const double HoverMarginYDip = 4;
     public const double HoverCornerRadiusDip = 4;
 
-    public static WindowSpec CreateSpec() => new()
+    private readonly TaskbarTrayLayout _layout;
+    private readonly SurfaceKey _surface;
+
+    internal TaskbarTrayWindow(TaskbarTrayLayout layout)
+        : this(layout, TrayManager.DefaultSurfaceKey) { }
+
+    internal TaskbarTrayWindow(TaskbarTrayLayout layout, SurfaceKey surface)
+    {
+        _layout = layout;
+        _surface = surface;
+    }
+
+    public static WindowSpec CreateSpec(WindowKey? key = null) => new()
     {
         Title = "Pagurian",
         Width = 1,
@@ -48,7 +60,7 @@ class TaskbarTrayWindow(TaskbarTrayLayout layout) : Component
         Level = WindowLevel.AlwaysOnTop,
         StartPosition = WindowStartPosition.Manual,
         ManualPosition = (0, 0),
-        Key = WindowKey.Of("pagurian-icon"),
+        Key = key ?? WindowKey.Of("pagurian-icon"),
         Icon = WindowIcon.FromPath(AppAssets.ApplicationIconPath),
     };
 
@@ -56,28 +68,41 @@ class TaskbarTrayWindow(TaskbarTrayLayout layout) : Component
     // tray's width using the session's spatial background cache.
     public const int GradientStopCount = 5;
 
-    // Per-cell hover overlays: one live brush per cell key, created lazily and
-    // mutated in place by the controller's poll loop (no re-render) — the
-    // native SubtleFillColorSecondary (hover) / SubtleFillColorTertiary
-    // (pressed) feedback, alpha-blended over the sampled base color. Keeping
-    // the brush instances here keeps them stable across re-renders, so the
-    // controller always mutates the brush on screen.
-    private static readonly Dictionary<string, SolidColorBrush> _hoverBrushes = new();
+    // Per-cell hover overlays: one live brush per cell key, mutated in place
+    // by the controller's poll loop (no re-render) — the native
+    // SubtleFillColorSecondary (hover) / SubtleFillColorTertiary (pressed)
+    // feedback, alpha-blended over the sampled base color. Cell keys are
+    // globally unique across surfaces, so the table is shared; entries are
+    // reference-counted because a cell briefly lives in two windows while a
+    // rebinding moves it between surfaces.
+    private static readonly Dictionary<string, (SolidColorBrush Brush, int Refs)> _hoverBrushes = new();
 
     public static SolidColorBrush HoverBrushFor(string cellKey)
     {
-        if (!_hoverBrushes.TryGetValue(cellKey, out var brush))
+        if (!_hoverBrushes.TryGetValue(cellKey, out var entry))
         {
-            brush = new SolidColorBrush(HoverOverlayHidden);
-            _hoverBrushes[cellKey] = brush;
+            entry = (new SolidColorBrush(HoverOverlayHidden), 0);
+            _hoverBrushes[cellKey] = entry;
         }
-        return brush;
+        return entry.Brush;
     }
 
-    internal static void PruneBrushes(IReadOnlySet<string> keys)
+    internal static void BrushMounted(string cellKey)
     {
-        foreach (var key in _hoverBrushes.Keys.Where(k => !keys.Contains(k)).ToArray())
-            _hoverBrushes.Remove(key);
+        var entry = _hoverBrushes.TryGetValue(cellKey, out var existing)
+            ? existing
+            : (Brush: new SolidColorBrush(HoverOverlayHidden), Refs: 0);
+        _hoverBrushes[cellKey] = (entry.Brush, entry.Refs + 1);
+    }
+
+    internal static void BrushUnmounted(string cellKey)
+    {
+        if (!_hoverBrushes.TryGetValue(cellKey, out var entry))
+            return;
+        if (entry.Refs <= 1)
+            _hoverBrushes.Remove(cellKey);
+        else
+            _hoverBrushes[cellKey] = (entry.Brush, entry.Refs - 1);
     }
 
     public static readonly Windows.UI.Color HoverOverlayHidden = Windows.UI.Color.FromArgb(0, 0, 0, 0);
@@ -100,19 +125,19 @@ class TaskbarTrayWindow(TaskbarTrayLayout layout) : Component
         UseEffect(() =>
         {
             void OnChanged() => setVersion(++tick.Current);
-            TrayShells.Changed += OnChanged;
-            return () => TrayShells.Changed -= OnChanged;
+            TrayManager.Changed += OnChanged;
+            return () => TrayManager.Changed -= OnChanged;
         }, Array.Empty<object>());
-        var cells = TrayShells.Cells.ToArray();
-        layout.SetCells(cells);
+        var cells = TrayManager.CellsForSurface(_surface).ToArray();
+        _layout.SetCells(cells);
         return HStack(0, cells.Select(cell =>
             (Element)(Border(new ComponentElement(cell.ViewType, cell.Props))
                 with { CornerRadius = HoverCornerRadiusDip })
                 .Background(HoverBrushFor(cell.Key))
                 .Margin(HoverMarginXDip, HoverMarginYDip, HoverMarginXDip, HoverMarginYDip)
-                .Ref(layout.RefFor(cell.Key))
-                .OnMount(_ => layout.Mounted(cell.Key))
-                .OnUnmount(_ => layout.Unmounted(cell.Key))
+                .Ref(_layout.RefFor(cell.Key))
+                .OnMount(_ => _layout.Mounted(cell.Key))
+                .OnUnmount(_ => _layout.Unmounted(cell.Key))
                 .WithKey(cell.Key)).ToArray())
             .HorizontalAlignment(Microsoft.UI.Xaml.HorizontalAlignment.Left)
             .VerticalAlignment(Microsoft.UI.Xaml.VerticalAlignment.Top);

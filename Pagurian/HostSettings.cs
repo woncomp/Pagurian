@@ -12,6 +12,10 @@ static class HostSettings
     private const string KeyPath = @"Software\Pagurian";
     private const string ConfigDirValue = "ConfigDir";
 
+    // Test seam: fixtures set this once so nothing touches the user's real
+    // configuration directory (or registry) during verification runs.
+    internal static string? ConfigDirOverride { get; set; }
+
     public static string DefaultConfigDir { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "Pagurian");
@@ -20,6 +24,9 @@ static class HostSettings
     {
         get
         {
+            // Test fixtures redirect all config/state files into a temp folder.
+            if (ConfigDirOverride is { } overridden)
+                return overridden;
             try
             {
                 using var key = Registry.CurrentUser.OpenSubKey(KeyPath);

@@ -1,8 +1,44 @@
 # Tray lifecycle and coordinated layout
 
-The tray has one persistent TrayWindowSession. Startup and recovery prepare an
-invisible window; ordinary shell edits retain the HWND and surviving keyed cell
-controls. Module APIs and configuration formats are unchanged.
+Each presentation surface (one live display's taskbar at one edge) has one
+persistent TrayWindowSession; see "Multiple displays" below. Startup and
+recovery prepare an invisible window; ordinary shell edits retain the HWND and
+surviving keyed cell controls. Module APIs and configuration formats are
+unchanged.
+
+## Multiple displays
+
+Three layers, one-directional:
+
+- **DisplayTopology** owns the physical world: EnumDisplayMonitors geometry
+  joined with DisplayConfig EDID identity (`monitorFriendlyDeviceName`,
+  `monitorDevicePath`; durable key `MODEL-UID`, e.g. `DEL40A6-UID4354`), plus
+  the taskbar window on each display (`Shell_TrayWnd` primary,
+  `Shell_SecondaryTrayWnd` secondaries, mapped via MonitorFromWindow).
+  Structural changes (identity set, geometry, primary flag, taskbar presence)
+  raise Changed; taskbar HWNDs are re-resolved lazily because Explorer
+  recreates them without a topology change. Last-seen name/geometry per
+  identity is persisted to `monitors.json` (host state, atomic write; cap 64).
+- **TrayManager** owns the logical world: one ShellTray per configured
+  `TrayId(MonitorKey, Edge)`; shells keep running and `post` keeps routing
+  while their display is absent. The binding engine maps each tray to a live
+  surface: exact display (the `primary` alias follows the current primary) →
+  closest aspect ratio to the recorded geometry (|ln(a/b)| ≤ 0.15) → a display
+  no configured tray owns → the primary display. A surface renders the cells of
+  every tray bound to it, in config order. Right-edge trays are carried in the
+  identity/config model and currently normalized to the left surface.
+- **TraySurface** owns the presentation world: one TrayWindowSession, one
+  sampled ThemeService, and the interaction state for its display. The
+  TraySurfaceController reconciles the surface set on a throttled cadence: the
+  primary display's left surface always exists (tray-icon menu owner), others
+  exist only while cells are bound to them.
+
+DPI falls out of the existing math (surface scale is the measured taskbar
+thickness ÷ 48 DIP). Tooltips flip against the owning display's monitor rect —
+never the primary origin, which is wrong for negative-coordinate displays.
+Hover overlay brushes are reference-counted per cell key because a rebinding
+cell briefly mounts on two surfaces. Billboard anchoring was already
+monitor-aware (MonitorFromRect work areas).
 
 ## Preparation and presentation
 
@@ -93,6 +129,11 @@ at a bounded cadence; close invalidates queued capture and first-frame callbacks
   identity, first/middle/last removal, dynamic width, publication batching, idle
   stability, empty/repopulate, positioning, light/dark samples, 500 ms fallback,
   late results, floating fallback, parent destruction and subsequent recovery.
+- `tests/Verify-TrayTopology.ps1`: config v1→v2 migration and roundtrip, global
+  id uniqueness across trays, exact/alias binding, the full fallback chain
+  (aspect → unoccupied → primary), reconnection, right-edge normalization,
+  cross-tray `post` routing, and cross-tray move restart semantics. Fabricated
+  displays and an isolated temp config; never touches user state.
 - `tests/Verify-TrayLifecycle.ps1 -Taskbar`: the same production session under
   the actual Explorer taskbar; no Explorer restart or user config/module loading.
 - `python tests/Capture-TrayLifecycle.py --taskbar`: desktop frame capture and

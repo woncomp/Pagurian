@@ -300,12 +300,15 @@ class SettingsView : Component
             colorScheme,
             highContrastScheme ?? "");
 
-        var initialDraft = UseMemo(() => TrayConfig.Load().ToList(), Array.Empty<object>());
+        var initialDraft = UseMemo(LoadDraftTrays, Array.Empty<object>());
         var (draft, setDraft) = UseState(initialDraft);
         var (dirty, setDirty) = UseState(false);
         var selectedId = shellNavigation.CurrentRoute is ShellEditorRoute.Configuration configurationRoute
             ? configurationRoute.InstanceId
             : null;
+        var (selectedTrayId, setSelectedTrayId) = UseState(TrayId.PrimaryLeft);
+        var (monitorPickerOpen, setMonitorPickerOpen) = UseState(false);
+        var (monitorPickerOffset, setMonitorPickerOffset) = UseState(new Point(0, 0));
         var (dragSession, setDragSession) = UseState<ShellDragSession?>(null);
         var (activeTrayDragId, setActiveTrayDragId) = UseState<string?>(null);
         var (discardDialogOpen, setDiscardDialogOpen) = UseState(false);
@@ -316,13 +319,17 @@ class SettingsView : Component
         var shellPageRef = this.UseElementRef<Grid>();
         var removalPanelRef = this.UseElementRef<Border>();
         var trayScrollerRef = this.UseElementRef<ScrollView>();
+        var monitorButtonRef = this.UseElementRef<Microsoft.UI.Xaml.Controls.Button>();
+        var windowRootRef = this.UseElementRef<Grid>();
         var activeTrayDragRef = UseRef<string?>(null);
         var draftRef = UseRef(draft);
+        var selectedTrayRef = UseRef(selectedTrayId);
         var dragSessionRef = UseRef<ShellDragSession?>(dragSession);
         var autoScrollDirectionRef = UseRef(0);
         var lastTrayPointerXRef = UseRef(0d);
         var autoScrollTickRef = UseRef<Action>(() => { });
         draftRef.Current = draft;
+        selectedTrayRef.Current = selectedTrayId;
         dragSessionRef.Current = dragSession;
 
         void OpenConfiguration(string instanceId)
@@ -362,10 +369,121 @@ class SettingsView : Component
             }
         }
 
+        // The draft is a list of per-display trays; editing always targets
+        // the tray chosen in the monitor picker. Selection never dirties the
+        // draft — only content changes do.
+        List<TrayConfig.Entry> ActiveEntries(List<DraftTray> trays) =>
+            trays.FirstOrDefault(t => t.Id == selectedTrayRef.Current)?.Entries ?? [];
+
+        IEnumerable<string> AllInstanceIds(List<DraftTray> trays) =>
+            trays.SelectMany(t => t.Entries).Select(e => e.Id);
+
+        // Replaces one tray's entry list with the mutation's result. A
+        // mutation that returns its input is a no-op (no dirty flag). The
+        // tray is created on first content change, so selecting a display is
+        // enough to start editing it.
+        bool MutateTrayEntries(TrayId trayId, Func<List<TrayConfig.Entry>, List<TrayConfig.Entry>> mutate)
+        {
+            var trays = draftRef.Current;
+            var index = trays.FindIndex(t => t.Id == trayId);
+            if (index < 0)
+            {
+                trays = [.. trays, new DraftTray { Id = trayId, Entries = [] }];
+                index = trays.Count - 1;
+            }
+            var current = trays[index].Entries;
+            var next = mutate(current);
+            if (ReferenceEquals(next, current))
+                return false;
+
+            var nextTrays = new List<DraftTray>(trays)
+            {
+                [index] = new DraftTray { Id = trayId, Entries = next },
+            };
+            draftRef.Current = nextTrays;
+            setDraft(nextTrays);
+            setDirty(true);
+            return true;
+        }
+
+        // Instance ids are globally unique, so id-addressed edits search all
+        // trays (the configuration page does not know which tray is active).
+        bool MutateTrayContaining(string instanceId, Func<List<TrayConfig.Entry>, List<TrayConfig.Entry>> mutate)
+        {
+            var tray = draftRef.Current.FirstOrDefault(t => t.Entries.Any(e => e.Id == instanceId));
+            return tray != null && MutateTrayEntries(tray.Id, mutate);
+        }
+
+        // The tray a display tile edits: the primary display uses the
+        // portable "primary" alias unless the config already owns it by
+        // hardware identity; every other display uses its EDID identity key.
+        TrayId TrayIdForDisplay(DisplayInfo display)
+        {
+            if (display.IsPrimary)
+            {
+                var identityOwned = draftRef.Current.Any(t =>
+                    t.Id.Edge == TrayEdge.Left && t.Id.MonitorKey == display.IdentityKey);
+                var aliasOwned = draftRef.Current.Any(t => t.Id.IsPrimaryAlias);
+                return identityOwned && !aliasOwned
+                    ? new TrayId(display.IdentityKey, TrayEdge.Left)
+                    : TrayId.PrimaryLeft;
+            }
+            return new TrayId(display.IdentityKey, TrayEdge.Left);
+        }
+
+        // Human-readable tray identity: the monitor's friendly name (never a
+        // display number), with connection state for the picker's extra rows.
+        string TrayLabel(TrayId id, out bool connected)
+        {
+            string name;
+            if (id.IsPrimaryAlias)
+            {
+                var primary = DisplayTopology.Displays.FirstOrDefault(d => d.IsPrimary);
+                name = primary != null ? $"{primary.FriendlyName} (Primary)" : "Primary display";
+                connected = primary != null;
+            }
+            else if (DisplayTopology.Find(id.MonitorKey) is { } live)
+            {
+                name = live.FriendlyName;
+                connected = true;
+            }
+            else if (DisplayTopology.TryGetRecorded(id.MonitorKey, out var recorded))
+            {
+                name = recorded.Name;
+                connected = false;
+            }
+            else
+            {
+                name = id.MonitorKey;
+                connected = false;
+            }
+            return id.Edge == TrayEdge.Right ? $"{name} — right edge" : name;
+        }
+
+        void SelectTray(TrayId id)
+        {
+            selectedTrayRef.Current = id;
+            setSelectedTrayId(id);
+            setMonitorPickerOpen(false);
+        }
+
+        void OpenMonitorPicker()
+        {
+            // Pick up hot-plugged displays immediately rather than waiting
+            // for the controller's throttled refresh.
+            DisplayTopology.Refresh();
+            if (monitorButtonRef.Current is { } button && windowRootRef.Current is { } root)
+            {
+                var origin = button.TransformToVisual(root).TransformPoint(new Point(0, 0));
+                setMonitorPickerOffset(new Point(origin.X, origin.Y + button.ActualHeight + 4));
+            }
+            setMonitorPickerOpen(true);
+        }
+
         UseEffect(() =>
         {
             if (shellNavigation.CurrentRoute is ShellEditorRoute.Configuration current &&
-                draft.All(entry => entry.Id != current.InstanceId))
+                draft.SelectMany(t => t.Entries).All(entry => entry.Id != current.InstanceId))
             {
                 ReturnToModules("missing-instance");
             }
@@ -436,7 +554,7 @@ class SettingsView : Component
         {
             activeTrayDragRef.Current = instanceId;
             var payload = ShellDragPayload.ForInstance(instanceId);
-            var sourceIndex = SourceIndexFor(payload, draftRef.Current);
+            var sourceIndex = SourceIndexFor(payload, ActiveEntries(draftRef.Current));
             if (sourceIndex >= 0)
             {
                 // Start in the no-op position so the source stays visible until
@@ -571,7 +689,7 @@ class SettingsView : Component
                 return false;
             }
 
-            var entries = draftRef.Current;
+            var entries = ActiveEntries(draftRef.Current);
             var originalIndex = payload.InstanceId == null
                 ? -1
                 : entries.FindIndex(entry => entry.Id == payload.InstanceId);
@@ -696,48 +814,56 @@ class SettingsView : Component
         {
             StopAutoScroll();
             EndTrayDrag();
-            var entries = draftRef.Current;
-            var next = new List<TrayConfig.Entry>(entries);
-            var changed = false;
             string? removedId = null;
+            // StartDragAsync still owns the dragged element while OnDrop runs.
+            // A keyed Spring move would claim that same Composition Visual and
+            // can leave stale offsets or opacity behind, so the mutation
+            // commits synchronously.
+            var changed = MutateTrayEntries(selectedTrayRef.Current, entries =>
+            {
+                var next = new List<TrayConfig.Entry>(entries);
+                var changedInner = false;
 
-            if (resolved.Zone == ShellDropZone.Remove &&
-                resolved.Payload.InstanceId is { } removeId)
-            {
-                changed = next.RemoveAll(entry => entry.Id == removeId) > 0;
-                removedId = changed ? removeId : null;
-            }
-            else if (resolved.Zone == ShellDropZone.Tray &&
-                resolved.Payload.KindId is { } kindId)
-            {
-                next.Insert(
-                    Math.Clamp(resolved.CandidateIndex, 0, next.Count),
-                    new TrayConfig.Entry(
-                        kindId,
-                        TrayConfig.NextId(entries.Select(entry => entry.Id)),
-                        null));
-                changed = true;
-            }
-            else if (resolved.Zone == ShellDropZone.Tray &&
-                resolved.Payload.InstanceId is { } instanceId)
-            {
-                var from = next.FindIndex(entry => entry.Id == instanceId);
-                if (from >= 0)
+                if (resolved.Zone == ShellDropZone.Remove &&
+                    resolved.Payload.InstanceId is { } removeId)
                 {
-                    var insertAt = Math.Clamp(
-                        resolved.CandidateIndex,
-                        0,
-                        next.Count - 1);
-                    if (insertAt != from)
+                    changedInner = next.RemoveAll(entry => entry.Id == removeId) > 0;
+                    removedId = changedInner ? removeId : null;
+                }
+                else if (resolved.Zone == ShellDropZone.Tray &&
+                    resolved.Payload.KindId is { } kindId)
+                {
+                    next.Insert(
+                        Math.Clamp(resolved.CandidateIndex, 0, next.Count),
+                        new TrayConfig.Entry(
+                            kindId,
+                            TrayConfig.NextId(AllInstanceIds(draftRef.Current)),
+                            null));
+                    changedInner = true;
+                }
+                else if (resolved.Zone == ShellDropZone.Tray &&
+                    resolved.Payload.InstanceId is { } instanceId)
+                {
+                    var from = next.FindIndex(entry => entry.Id == instanceId);
+                    if (from >= 0)
                     {
-                        var entry = next[from];
-                        next.RemoveAt(from);
-                        insertAt = Math.Clamp(insertAt, 0, next.Count);
-                        next.Insert(insertAt, entry);
-                        changed = true;
+                        var insertAt = Math.Clamp(
+                            resolved.CandidateIndex,
+                            0,
+                            next.Count - 1);
+                        if (insertAt != from)
+                        {
+                            var entry = next[from];
+                            next.RemoveAt(from);
+                            insertAt = Math.Clamp(insertAt, 0, next.Count);
+                            next.Insert(insertAt, entry);
+                            changedInner = true;
+                        }
                     }
                 }
-            }
+
+                return changedInner ? next : entries;
+            });
 
             if (!changed)
             {
@@ -745,21 +871,10 @@ class SettingsView : Component
                 return;
             }
 
-            draftRef.Current = next;
             dragSessionRef.Current = null;
-            void Commit()
-            {
-                if (removedId != null && selectedId == removedId)
-                    ReturnToModules("drag-remove");
-                setDraft(next);
-                setDragSession(null);
-                setDirty(true);
-            }
-
-            // StartDragAsync still owns the dragged element while OnDrop runs.
-            // A keyed Spring move would claim that same Composition Visual and
-            // can leave stale offsets or opacity behind, so commit directly.
-            Commit();
+            if (removedId != null && selectedId == removedId)
+                ReturnToModules("drag-remove");
+            setDragSession(null);
         }
 
         autoScrollTickRef.Current = () =>
@@ -790,22 +905,19 @@ class SettingsView : Component
                 CandidateIndex = CandidateIndexFor(
                     resolved.Payload,
                     lastTrayPointerXRef.Current + nextOffset,
-                    draftRef.Current),
+                    ActiveEntries(draftRef.Current)),
             });
         };
 
         void RemoveInstance(string instanceId)
         {
-            var entries = draftRef.Current;
-            var next = entries.Where(entry => entry.Id != instanceId).ToList();
-            if (next.Count == entries.Count)
-                return;
-
-            if (selectedId == instanceId)
+            var removed = MutateTrayContaining(instanceId, entries =>
+            {
+                var next = entries.Where(entry => entry.Id != instanceId).ToList();
+                return next.Count == entries.Count ? entries : next;
+            });
+            if (removed && selectedId == instanceId)
                 ReturnToModules("remove-instance");
-            draftRef.Current = next;
-            setDraft(next);
-            setDirty(true);
         }
 
         void UpdateEntrySettings(string instanceId, JsonElement? settings)
@@ -817,19 +929,19 @@ class SettingsView : Component
                 return;
             }
 
-            var entries = draftRef.Current;
-            var index = entries.FindIndex(entry => entry.Id == instanceId);
-            if (index < 0)
-                return;
-
-            var next = new List<TrayConfig.Entry>(entries);
-            next[index] = next[index] with
+            MutateTrayContaining(instanceId, entries =>
             {
-                Settings = settings is { } replacement ? replacement.Clone() : null,
-            };
-            draftRef.Current = next;
-            setDraft(next);
-            setDirty(true);
+                var index = entries.FindIndex(entry => entry.Id == instanceId);
+                if (index < 0)
+                    return entries;
+
+                var next = new List<TrayConfig.Entry>(entries);
+                next[index] = next[index] with
+                {
+                    Settings = settings is { } replacement ? replacement.Clone() : null,
+                };
+                return next;
+            });
         }
 
         void SaveDraft()
@@ -837,11 +949,13 @@ class SettingsView : Component
             if (!dirty)
                 return;
 
-            var entries = draftRef.Current;
+            var groups = draftRef.Current
+                .Select(tray => new TrayConfig.TrayGroup(tray.Id, tray.Entries.ToArray()))
+                .ToArray();
             try
             {
-                TrayConfig.Save(entries);
-                TrayShells.ApplyConfig(entries);
+                TrayConfig.Save(groups);
+                TrayManager.ApplyConfig(groups);
             }
             catch (Exception ex)
             {
@@ -853,16 +967,18 @@ class SettingsView : Component
 
             setDirty(false);
             PagurianLog.Host(
-                $"settings: applied tray configuration ({entries.Count} shells)");
+                $"settings: applied tray configuration " +
+                $"({groups.Sum(g => g.Entries.Count)} shells across {groups.Length} trays)");
         }
 
         void RevertDraft()
         {
-            var entries = TrayConfig.Load().ToList();
-            if (selectedId != null && entries.All(entry => entry.Id != selectedId))
+            var next = LoadDraftTrays();
+            if (selectedId != null &&
+                next.SelectMany(t => t.Entries).All(entry => entry.Id != selectedId))
                 ReturnToModules("revert");
-            draftRef.Current = entries;
-            setDraft(entries);
+            draftRef.Current = next;
+            setDraft(next);
             setDirty(false);
         }
 
@@ -872,14 +988,17 @@ class SettingsView : Component
             {
                 Directory.CreateDirectory(dirText.Trim());
                 HostSettings.SetConfigDir(dirText.Trim());
-                var entries = TrayConfig.Load().ToList();
-                TrayShells.ApplyConfig(entries);
+                var next = LoadDraftTrays();
+                TrayManager.ApplyConfig(next
+                    .Select(tray => new TrayConfig.TrayGroup(tray.Id, tray.Entries.ToArray()))
+                    .ToArray());
                 setAppliedDir(HostSettings.ConfigDir);
                 setDirText(HostSettings.ConfigDir);
-                if (selectedId != null && entries.All(entry => entry.Id != selectedId))
+                if (selectedId != null &&
+                    next.SelectMany(t => t.Entries).All(entry => entry.Id != selectedId))
                     ReturnToModules("config-directory-change");
-                draftRef.Current = entries;
-                setDraft(entries);
+                draftRef.Current = next;
+                setDraft(next);
                 setDirty(false);
             }
             catch (Exception ex)
@@ -902,9 +1021,10 @@ class SettingsView : Component
         // position the source remains visible at half opacity; after crossing
         // another boundary it becomes transparent and a non-layout insertion
         // marker is overlaid.
+        var activeEntries = ActiveEntries(draft);
         var trayDragAtOriginalPosition =
-            IsOriginalTrayPosition(dragSession, draft);
-        var chips = draft
+            IsOriginalTrayPosition(dragSession, activeEntries);
+        var chips = activeEntries
             .Select((entry, index) => TargetChip(
                 entry,
                 selectedId == entry.Id,
@@ -917,7 +1037,7 @@ class SettingsView : Component
                     ClearDragSession();
                 },
                 index + 1,
-                draft.Count,
+                activeEntries.Count,
                 highContrast,
                 targetVisualScale,
                 activeTrayDragId != entry.Id
@@ -936,17 +1056,17 @@ class SettingsView : Component
         var insertionIndicatorVisible = false;
         var insertionOffset = 0d;
         if (dragSession is { Zone: ShellDropZone.Tray } trayDrag &&
-            !IsOriginalTrayPosition(trayDrag, draft))
+            !IsOriginalTrayPosition(trayDrag, activeEntries))
         {
             insertionIndicatorVisible = true;
             var insertionIndex = Math.Clamp(
                 trayDrag.CandidateIndex,
                 0,
-                draft.Count - (trayDrag.Payload.InstanceId == null ? 0 : 1));
+                activeEntries.Count - (trayDrag.Payload.InstanceId == null ? 0 : 1));
             insertionOffset = InsertionOffsetFor(
                 trayDrag.Payload,
                 insertionIndex,
-                draft);
+                activeEntries);
         }
         var indicator = (Border(null) with
             {
@@ -1054,7 +1174,9 @@ class SettingsView : Component
 
         Element ConfigurationPanel(string instanceId)
         {
-            var selectedEntry = draft.FirstOrDefault(entry => entry.Id == instanceId);
+            var selectedEntry = draft
+                .SelectMany(t => t.Entries)
+                .FirstOrDefault(entry => entry.Id == instanceId);
             if (selectedEntry == null)
                 return ModulesPanel();
 
@@ -1111,7 +1233,7 @@ class SettingsView : Component
                 _ => ModulesPanel(),
             };
             var displayedRoute = route is ShellEditorRoute.Configuration selected &&
-                draft.All(entry => entry.Id != selected.InstanceId)
+                draft.SelectMany(t => t.Entries).All(entry => entry.Id != selected.InstanceId)
                 ? "Modules"
                 : DiagnosticRoute(route);
             return content
@@ -1185,8 +1307,21 @@ class SettingsView : Component
             .Margin(0, 12, 0, 0);
         var trayFooter = Border(
                 FlexColumn(
-                    Subtitle("Tray")
-                        .HeadingLevel(AutomationHeadingLevel.Level2),
+                    Grid(
+                        [GridSize.Star(), GridSize.Auto],
+                        [GridSize.Auto],
+                        [
+                            Subtitle("Tray")
+                                .HeadingLevel(AutomationHeadingLevel.Level2)
+                                .VAlign(VerticalAlignment.Center)
+                                .Grid(row: 0, column: 0),
+                            Button(TrayLabel(selectedTrayId, out _), OpenMonitorPicker)
+                                .Ref(monitorButtonRef)
+                                .AutomationName("Choose display")
+                                .HelpText("Choose which display's tray to edit.")
+                                .VAlign(VerticalAlignment.Center)
+                                .Grid(row: 0, column: 1),
+                        ]),
                     Body("Drag module icons here to add them. An insertion line shows the pending position without moving existing icons. Drop a Tray icon onto the Modules panel to remove it.")
                         .TextWrapping(TextWrapping.WrapWholeWords)
                         .Foreground(Theme.SecondaryText)
@@ -1201,6 +1336,166 @@ class SettingsView : Component
             .WithBorder(highContrast
                 ? Theme.Ref("SystemColorWindowTextColorBrush")
                 : Theme.CardStroke, highContrast ? 2 : 1);
+
+        // The monitor picker: a scaled preview of the physical display layout
+        // (friendly names, never display numbers) plus rows for configured
+        // trays whose display is currently disconnected or otherwise not
+        // reachable through a tile. Picking one switches the tray being
+        // edited; selection alone never dirties the draft.
+        Element BuildMonitorPicker()
+        {
+            var cardFill = highContrast ? Theme.Ref("SystemColorWindowColorBrush") : Theme.CardBackground;
+            var cardStroke = highContrast ? Theme.Ref("SystemColorWindowTextColorBrush") : Theme.CardStroke;
+            var tileStroke = highContrast ? Theme.Ref("SystemColorWindowTextColorBrush") : Theme.ControlStroke;
+            var selectedStroke = highContrast ? Theme.Ref("SystemColorHighlightColorBrush") : Theme.Accent;
+
+            var displays = DisplayTopology.Displays
+                .OrderBy(d => d.Rect.Left)
+                .ThenBy(d => d.Rect.Top)
+                .ToArray();
+            var content = new List<Element>();
+
+            if (displays.Length == 0)
+            {
+                content.Add(Body("No displays detected.")
+                    .Foreground(Theme.SecondaryText));
+            }
+            else
+            {
+                var originX = displays.Min(d => d.Rect.Left);
+                var originY = displays.Min(d => d.Rect.Top);
+                var virtualWidth = displays.Max(d => d.Rect.Right) - originX;
+                var virtualHeight = displays.Max(d => d.Rect.Bottom) - originY;
+                const double maxWidth = 320, maxHeight = 180;
+                var scale = Math.Min(
+                    maxWidth / Math.Max(1, virtualWidth),
+                    maxHeight / Math.Max(1, virtualHeight));
+
+                var tiles = new List<Element>();
+                foreach (var display in displays)
+                {
+                    var trayId = TrayIdForDisplay(display);
+                    var selected = trayId == selectedTrayId;
+                    var lines = new List<Element>
+                    {
+                        BodyStrong(display.FriendlyName)
+                            .FontSize(11)
+                            .MaxLines(1)
+                            .TextTrimming(Microsoft.UI.Xaml.TextTrimming.CharacterEllipsis)
+                            .HAlign(HorizontalAlignment.Center),
+                        Caption($"{display.Rect.Width}×{display.Rect.Height}")
+                            .HAlign(HorizontalAlignment.Center),
+                    };
+                    if (display.IsPrimary)
+                        lines.Add(Caption("Primary")
+                            .Foreground(selectedStroke)
+                            .HAlign(HorizontalAlignment.Center));
+                    else if (!display.HasTaskbar)
+                        lines.Add(Caption("No taskbar")
+                            .Foreground(highContrast ? Theme.PrimaryText : Theme.SystemCaution)
+                            .HAlign(HorizontalAlignment.Center));
+
+                    var tooltip = $"{display.FriendlyName} — {display.Rect.Width}×{display.Rect.Height}" +
+                        (display.IsPrimary ? " (Primary)" : "") +
+                        (display.HasTaskbar
+                            ? ""
+                            : "; its taskbar is hidden, so shells fall back to another display");
+                    tiles.Add(Border(
+                            VStack(2, lines.ToArray())
+                                .HAlign(HorizontalAlignment.Center)
+                                .VAlign(VerticalAlignment.Center)
+                                .Margin(4, 0, 4, 0))
+                        .Width(Math.Max(44, display.Rect.Width * scale))
+                        .Height(Math.Max(32, display.Rect.Height * scale))
+                        .CornerRadius(4)
+                        .Background(selected ? Theme.SubtleFill : Theme.LayerFill)
+                        .WithBorder(selected ? selectedStroke : tileStroke, selected ? 2 : 1)
+                        .Canvas(
+                            (display.Rect.Left - originX) * scale,
+                            (display.Rect.Top - originY) * scale)
+                        .AutomationName($"Edit the tray on {display.FriendlyName}")
+                        .HelpText(tooltip)
+                        .IsTabStop(true)
+                        .OnTapped((_, _) => SelectTray(trayId))
+                        .OnKeyDown((_, args) =>
+                        {
+                            if (args.Key is VirtualKey.Enter or VirtualKey.Space)
+                            {
+                                SelectTray(trayId);
+                                args.Handled = true;
+                            }
+                        }));
+                }
+                content.Add(Canvas(tiles.ToArray())
+                    .Width(virtualWidth * scale)
+                    .Height(virtualHeight * scale)
+                    .HAlign(HorizontalAlignment.Left));
+            }
+
+            // Configured trays not reachable through a tile: disconnected
+            // displays (still editable; they fall back at runtime) and
+            // identity/edge overlaps shadowed by the primary tile.
+            var tileTrays = displays.Select(TrayIdForDisplay).ToHashSet();
+            var extras = draft
+                .Where(tray => !tileTrays.Contains(tray.Id))
+                .ToArray();
+            if (extras.Length > 0)
+            {
+                content.Add(Caption("Other configured trays")
+                    .Foreground(Theme.SecondaryText));
+                foreach (var tray in extras)
+                {
+                    var trayId = tray.Id;
+                    var label = TrayLabel(trayId, out var connected);
+                    var status = connected
+                        ? trayId.Edge == TrayEdge.Right
+                            ? "Right edge (renders on the left for now)"
+                            : "Connected"
+                        : "Disconnected";
+                    var selected = trayId == selectedTrayId;
+                    var rowContent = new List<Element>
+                    {
+                        VStack(0,
+                                BodyStrong(label),
+                                Caption(status).Foreground(connected
+                                    ? Theme.SecondaryText
+                                    : highContrast ? Theme.PrimaryText : Theme.SystemCaution))
+                            .VAlign(VerticalAlignment.Center),
+                    };
+                    if (!connected)
+                        rowContent.Insert(0, BodyStrong("⚠")
+                            .Foreground(highContrast ? Theme.PrimaryText : Theme.SystemCaution)
+                            .VAlign(VerticalAlignment.Center));
+                    content.Add(Border(HStack(10, rowContent.ToArray()))
+                        .Padding(10, 6, 10, 6)
+                        .CornerRadius(4)
+                        .Background(selected ? Theme.SubtleFill : Theme.LayerFill)
+                        .WithBorder(selected ? selectedStroke : tileStroke, selected ? 2 : 1)
+                        .HAlign(HorizontalAlignment.Stretch)
+                        .AutomationName($"Edit the tray on {label} ({status})")
+                        .IsTabStop(true)
+                        .OnTapped((_, _) => SelectTray(trayId))
+                        .OnKeyDown((_, args) =>
+                        {
+                            if (args.Key is VirtualKey.Enter or VirtualKey.Space)
+                            {
+                                SelectTray(trayId);
+                                args.Handled = true;
+                            }
+                        }));
+                }
+            }
+
+            var picker = Border(FlexColumn(content.ToArray()))
+                .Padding(16)
+                .CornerRadius(8)
+                .Background(cardFill)
+                .WithBorder(cardStroke, highContrast ? 2 : 1);
+            return Popup(picker, monitorPickerOpen, () => setMonitorPickerOpen(false))
+                .Offset(monitorPickerOffset.X, monitorPickerOffset.Y)
+                .IsLightDismissEnabled(true);
+        }
+
 
         var trimmedDir = dirText.Trim();
         var dirChanged = trimmedDir.Length > 0 &&
@@ -1341,6 +1636,7 @@ class SettingsView : Component
                 {
                     EndTrayDrag();
                     ClearDragSession();
+                    setMonitorPickerOpen(false);
                 }
                 _navigationDiagnostics.Record($"page-request source=navigation-view target={nextPage}");
                 setPage(nextPage);
@@ -1362,7 +1658,9 @@ class SettingsView : Component
                         .Landmark(AutomationLandmarkType.Navigation)
                         .Grid(row: 1, column: 0),
                     discardDialog.Grid(row: 1, column: 0),
+                    BuildMonitorPicker().Grid(row: 1, column: 0),
                 ])
+            .Ref(windowRootRef)
             .OnKeyDown((_, args) =>
             {
                 if (page != SettingsPage.Shells ||
@@ -1384,6 +1682,17 @@ class SettingsView : Component
 
         return root;
     }
+
+    private sealed class DraftTray
+    {
+        internal required TrayId Id { get; init; }
+        internal required List<TrayConfig.Entry> Entries { get; set; }
+    }
+
+    private static List<DraftTray> LoadDraftTrays() =>
+        TrayConfig.Load()
+            .Select(group => new DraftTray { Id = group.Id, Entries = group.Entries.ToList() })
+            .ToList();
 
     private static Element TargetChip(
         TrayConfig.Entry entry,
