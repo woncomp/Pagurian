@@ -62,7 +62,7 @@ internal static class AppLifecycleFixture
         foreach (var client in new[] { CopilotClientKind.Cli, CopilotClientKind.VSCode, CopilotClientKind.Other })
         {
             var state = new CopilotSessionState();
-            state.Resolve([new("independent", "independent", CopilotIdentityKind.Cli, "", client)]);
+            state.Resolve([new("independent", "independent", CopilotIdentityKind.Cli, "Independent", client)]);
             state.Handle(new("sessionStart", "independent", Time, ""));
             state.Handle(new("sessionEnd", "independent", Time.AddSeconds(1), "", Reason: "complete"));
             Check(state.Sessions.Count == 0, "Independent clients retain terminal hook policy");

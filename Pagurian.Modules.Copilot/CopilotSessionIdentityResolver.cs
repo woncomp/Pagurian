@@ -265,8 +265,11 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
     private int _metadataRoundRobin;
     private IReadOnlyList<CopilotSessionIdentity> _lastPublished = Array.Empty<CopilotSessionIdentity>();
     private readonly ICopilotAppLifecycleReader? _appLifecycle;
+    private readonly CopilotSessionDirectoryReader _directoryReader;
+    private IReadOnlyList<CopilotSessionDirectoryTarget> _directoryTargets = [];
     private readonly HashSet<string> _lifecycleObserved = new(StringComparer.Ordinal);
     internal CopilotAppLifecycleSnapshot? LifecycleSnapshot { get; private set; }
+    internal CopilotSessionDirectorySnapshot? DirectorySnapshot { get; private set; }
 
     private sealed class Observation
     {
@@ -298,12 +301,14 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
     }
 
     public CopilotSessionIdentityResolver(string stateDirectory, Action<string>? diagnostic = null,
-        ICopilotAppLifecycleReader? appLifecycle = null, bool enableAppLifecycle = false)
+        ICopilotAppLifecycleReader? appLifecycle = null, bool enableAppLifecycle = false,
+        TimeProvider? time = null, Func<string, FileAttributes>? directoryAttributes = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(stateDirectory);
         _stateDirectory = Path.GetFullPath(stateDirectory);
         _diagnostic = diagnostic;
         _index = new CopilotSessionIdentityIndex(Diagnose);
+        _directoryReader = new(_stateDirectory, Diagnose, time, directoryAttributes);
         _appLifecycle = appLifecycle ?? (enableAppLifecycle
             ? CopilotAppLifecycleReader.Create(_stateDirectory, Diagnose) : null);
     }
@@ -334,6 +339,23 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
     public void StartSnapshots(Action<IReadOnlyList<CopilotSessionIdentity>, CopilotAppLifecycleSnapshot?> onResolved)
     {
         ArgumentNullException.ThrowIfNull(onResolved);
+        StartSnapshots((identities, lifecycle, _) => onResolved(identities, lifecycle));
+    }
+
+    public void SetDirectoryTargets(IReadOnlyList<CopilotSessionDirectoryTarget> targets)
+    {
+        lock (_observationsGate)
+        {
+            if (_disposed || _directoryTargets.SequenceEqual(targets)) return;
+            _directoryTargets = targets.ToArray();
+            if (targets.Any(t => t.Recover) && _wake.CurrentCount == 0) _wake.Release();
+        }
+    }
+
+    public void StartSnapshots(Action<IReadOnlyList<CopilotSessionIdentity>, CopilotAppLifecycleSnapshot?,
+        CopilotSessionDirectorySnapshot?> onResolved)
+    {
+        ArgumentNullException.ThrowIfNull(onResolved);
         lock (_observationsGate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
@@ -350,10 +372,12 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
         lock (_scanGate)
         {
             KeyValuePair<string, Observation>[] observations;
+            IReadOnlyList<CopilotSessionDirectoryTarget> directoryTargets;
             lock (_observationsGate)
             {
                 if (_disposed)
                     return Array.Empty<CopilotSessionIdentity>();
+                directoryTargets = _directoryTargets;
                 observations = _observations.Select(pair =>
                 {
                     var copy = new Observation { Overflow = pair.Value.Overflow };
@@ -397,6 +421,14 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
                     ReadMetadata(evidence.SessionId, true);
                 }
             }
+            DirectorySnapshot = _directoryReader.Scan(directoryTargets, _cancellation.Token);
+            if (DirectorySnapshot is { } directories)
+                DirectorySnapshot = directories with
+                {
+                    Sessions = directories.Sessions.Select(e =>
+                        e.Target.Recover && e.Presence == CopilotSessionDirectoryPresence.Present
+                            ? e with { Name = ReadMetadata(e.Target.SessionId, true) } : e).ToArray(),
+                };
             RefreshMetadata();
             DiscoverRoots();
             foreach (var (source, observation) in observations)
@@ -446,7 +478,8 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
             observation.Parents.Add(parent);
     }
 
-    private async Task RunAsync(Action<IReadOnlyList<CopilotSessionIdentity>, CopilotAppLifecycleSnapshot?> onResolved)
+    private async Task RunAsync(Action<IReadOnlyList<CopilotSessionIdentity>, CopilotAppLifecycleSnapshot?,
+        CopilotSessionDirectorySnapshot?> onResolved)
     {
         try
         {
@@ -462,10 +495,10 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
                 }
                 if (_cancellation.IsCancellationRequested)
                     break;
-                if (LifecycleSnapshot is not null || !identities.SequenceEqual(_lastPublished))
+                if (LifecycleSnapshot is not null || DirectorySnapshot is not null || !identities.SequenceEqual(_lastPublished))
                 {
                     _lastPublished = identities;
-                    try { onResolved(identities, LifecycleSnapshot); }
+                    try { onResolved(identities, LifecycleSnapshot, DirectorySnapshot); }
                     catch { Diagnose("identity-callback-failed"); }
                 }
                 await _wake.WaitAsync(TimeSpan.FromMilliseconds(500), _cancellation.Token).ConfigureAwait(false);
@@ -528,23 +561,23 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
         _metadataRoundRobin %= candidates.Length;
     }
 
-    private void ReadMetadata(string id, bool indexTranscript)
+    private string? ReadMetadata(string id, bool indexTranscript)
     {
         try
         {
             var directory = Path.Combine(_stateDirectory, id);
             if (!Directory.Exists(directory) || (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
-                return;
+                return null;
             var file = Path.Combine(directory, "workspace.yaml");
             if (!File.Exists(file))
-                return;
+                return null;
             if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0)
-                return;
+                return null;
             using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             if (stream.Length > MetadataBytes)
             {
                 Diagnose("identity-metadata-too-large");
-                return;
+                return null;
             }
             var bytes = new byte[MetadataBytes + 1];
             int count = stream.ReadAtLeast(bytes, 1, throwOnEndOfStream: false);
@@ -556,20 +589,22 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
                 count += read;
             }
             if (count > MetadataBytes)
-                return;
+                return null;
             var text = new UTF8Encoding(false, true).GetString(bytes, 0, count);
             if (!TryMetadata(text, out var client, out var name, out var cwd))
             {
                 Diagnose("identity-metadata-malformed");
-                return;
+                return null;
             }
             _index.SetMetadata(id, client, name, cwd);
             if (indexTranscript && _index.IsAppRoot(id))
                 _transcripts.TryAdd(id, new TranscriptCursor());
+            return name;
         }
         catch (Exception exception) when (IsFileError(exception) || exception is DecoderFallbackException)
         {
             Diagnose("identity-metadata-unavailable");
+            return null;
         }
     }
 

@@ -21,13 +21,14 @@ static class CopilotSessionTracker
     public static IReadOnlyCollection<CopilotSession> Sessions => _state?.Sessions ?? [];
     public static CopilotSession? Find(string sessionId) => _state?.Find(sessionId);
 
-    public static void Start(Logger log, string? stateDirectory = null, ICopilotAppLifecycleReader? lifecycle = null)
+    public static void Start(Logger log, string? stateDirectory = null, ICopilotAppLifecycleReader? lifecycle = null,
+        TimeProvider? time = null, Func<string, FileAttributes>? directoryAttributes = null)
     {
         if (_users++ > 0)
             return;
         var dispatcher = ReactorApp.UIDispatcher!;
         var generation = ++_generation;
-        var state = new CopilotSessionState(diagnostic: transition =>
+        var state = new CopilotSessionState(time is null ? null : time.GetUtcNow, diagnostic: transition =>
             log.Info($"session-transition source={transition.SourceId} owner={transition.OwnerId} " +
                 $"event={transition.EventName} at={transition.EventAt:o} " +
                 $"{transition.Before}->{transition.After} reason={transition.Reason}"));
@@ -36,12 +37,13 @@ static class CopilotSessionTracker
         state.SessionEnded += OnEnded;
         var directory = stateDirectory ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             ".copilot", "session-state");
-        _resolver = new(directory, log.Warn, lifecycle, enableAppLifecycle: stateDirectory is null);
-        _resolver.StartSnapshots((identities, snapshot) => dispatcher.TryEnqueue(() =>
+        _resolver = new(directory, log.Warn, lifecycle, enableAppLifecycle: stateDirectory is null,
+            time: time, directoryAttributes: directoryAttributes);
+        _resolver.StartSnapshots((identities, snapshot, directories) => dispatcher.TryEnqueue(() =>
         {
             if (_generation != generation || !ReferenceEquals(_state, state))
                 return;
-            state.Resolve(identities, snapshot);
+            state.Resolve(identities, snapshot, directories);
             NotifyChanged();
         }));
         _timer = dispatcher.CreateTimer();
@@ -98,6 +100,7 @@ static class CopilotSessionTracker
 
     private static void NotifyChanged()
     {
+        if (_state is { } state) _resolver?.SetDirectoryTargets(state.DirectoryTargets);
         Version++;
         UiChanged?.Invoke();
     }

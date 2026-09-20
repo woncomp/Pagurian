@@ -383,7 +383,14 @@ public sealed class MyShell : Shell
   App root; explicit other clients retain independent ownership. Branding is
   separate: `github/cli` → CLI, `vscode`/`vscode-agent-host` → VS Code, unsupported
   markers → Other (never guess from cwd). This is existing-hook VS Code support,
-  not built-in Chat ingestion. `name:` and `cwd:` remain source-owned; published
+  not built-in Chat ingestion. Every independent Copilot Sessions owner needs
+  its own nonblank `workspace.yaml` `name` before a cell is published, across
+  App/CLI/VS Code/Other; ID/project/task-name fallbacks do not qualify.
+  Unnamed sources still reduce hooks, blockers and details, and metadata
+  polling admits them when named. Partial name rewrites retain the last valid
+  name. Task children need no independent name to aggregate under a named root.
+  This does not change the separate Copilot SDK Shell.
+  `name:` and `cwd:` remain source-owned; published
   task nodes preserve their immediate parent and own name. Missing/partial client metadata stays unresolved (no
   cell, no timeout-based guess); reduced source state waits for resolution.
   Independently persisted App sessions, including `create_session` children,
@@ -414,6 +421,22 @@ public sealed class MyShell : Shell
   diagnostics go through the module logger. Tracker Stop invalidates queued
   callbacks, cancels background resolution, stops its timer, and clears state.
   See `docs/Copilot-Sessions.md` for discovery limits and regression coverage.
+- **Copilot icon directory cleanup**: every 10 seconds the existing resolver
+  worker checks only published owner directories using lightweight attribute
+  probes and monotonic scheduling, with no extra DB/transcript reads or UI I/O.
+  `CopilotSessionDirectoryReader` reports Missing only for explicit path
+  absence beneath an accessible non-reparse session-state root (rechecked on
+  absence); errors, root unavailability and unexpected/reparse paths are
+  Unknown, retaining visibility with throttled diagnostics. Missing individual
+  metadata/transcript/lock files or child directories does not remove a root.
+  Confirmed Missing removes that icon/billboard without a grace period or
+  sessionEnd requirement. No user files/DB/processes are modified.
+  Directory-deleted owners require a fresh own hook plus a restored directory
+  and freshly read nonblank own name before a new cell; cached identity cannot
+  restore them. Old work is fenced without discarding conversation usage/history.
+  Directory evidence versions, owner revisions and tracker generation fence
+  stale callbacks. App archive/exit and CLI terminal rules remain independent.
+  Multiple Copilot Sessions Shells share one cleanup schedule.
 - **Copilot App visibility evidence**: the existing background resolver publishes
   coherent versioned identity/lifecycle batches. `CopilotArchiveReader` opens
   `.copilot\data.db` read-only with Microsoft.Data.Sqlite (WAL-aware, one-second

@@ -1,7 +1,8 @@
 # Copilot session ownership and status
 
-The Copilot shell publishes one cell per **resolved display owner**, not per
-hook `sessionId`. No settings, hook commands, or payload formats change.
+The Copilot Sessions shell publishes one cell per **resolved, named display
+owner**, not per hook `sessionId`. No settings, hook commands, or payload
+formats change. These icon rules do not change the separate Copilot SDK shell.
 
 ## Identity
 
@@ -67,6 +68,59 @@ across transcript rotation and multi-turn child completion. Client identity
 is immutable for a session; partial rewrites cannot downgrade a known App root
 to CLI. Incomplete App-marker prefixes remain unknown. A final arbitrary CLI
 client scalar must be newline-terminated before it is trusted.
+
+## Icon admission and directory cleanup
+
+Every independent App, CLI, VS Code and Other owner must have a nonblank
+`name` read from its own `workspace.yaml` before a cell is published.
+An ID fallback, project/cwd label or a child's name does not qualify.
+There is no transcript naming-event or `rename_session` tool-call requirement.
+Sources without names still reduce hooks, blockers, task relationships and
+details; metadata polling publishes the latest state once the name arrives,
+without requiring another hook. Names alone cannot admit historical roots.
+Unnamed task children continue to aggregate under a named owner. Once a name
+is confirmed, partial/empty/malformed rewrites do not erase it; later valid
+names update the same cell.
+
+`CopilotSessionDirectoryReader` checks the **currently published owner IDs**
+every **10 seconds**, on the existing resolver worker using monotonic time.
+No extra UI timer, database query, transcript read or historical-directory
+enumeration is added for cleanup. A sweep checks all displayed owners with
+linear attribute probes; hook wakes do not accelerate its periodic cadence.
+An empty icon set performs no cleanup I/O.
+
+Only explicit file/path-not-found for that owner's entire session directory,
+under an accessible non-reparse session-state root, is **Missing**. The root
+is checked again before accepting absence, so disappearance of the common
+root does not look like deletion of every session. Access denial, other I/O
+errors, unexpected path types or reparse points are **Unknown**, preserve
+visibility and emit throttled payload-free diagnostics. Missing only
+`workspace.yaml`, `events.jsonl` or a runtime lock is not directory deletion.
+Child directories are not independent icon-cleanup targets.
+
+Confirmed Missing removes exactly that owner's cell through the existing
+`SessionEnded`/`RemoveCell` path; the host also dismisses its billboard.
+This does not require Idle, `sessionEnd`, a database check or an additional
+grace period. It never deletes Copilot files, updates its database or kills
+processes. Normal Idle/turn completion/detach with a surviving directory
+remains unchanged.
+
+Directory removal is a separate presentation fence from App archive/exit.
+Cached identity and ordinary lifecycle snapshots cannot resurrect a removed
+icon. Recovery requires a **new own hook after the deletion fence**, a present
+directory and a **fresh successful read of its own nonblank name**. A new hook
+requests verification on the resolver worker; polling can finish that
+verification if the directory/name arrives later. Mere directory recreation
+or a previously cached name is insufficient. Removed icons leave the periodic
+target set until eligible to reappear.
+Old blockers/task activity do not resume with the icon, while new hook state
+and retained conversation history/usage survive. App archive/exit and
+independent-client terminal-end constraints still apply.
+
+Worker batches carry directory versions and owner revisions. A later hook,
+ownership change or new cell lifetime invalidates an older in-flight result.
+Tracker Stop invalidates all queued batches, and multiple Shell instances
+share one resolver and cleanup schedule.
 
 ## Source state and lifecycle
 
@@ -158,7 +212,8 @@ processing only after its ID has been observed through a hook; loaded evidence
 for that observed ID has no seven-day age cutoff. Locks, workspace metadata and
 database rows alone never create a root cell. It never enumerates all
 unarchived database rows. New restoration requires positive App identity,
-current load evidence **and** known nonarchived state after hook observation.
+current load evidence **and** known nonarchived state after hook observation;
+the own-name and directory-removal gates above also apply.
 Unknown evidence keeps existing visibility and emits throttled payload-free
 reason codes, but cannot create an unobserved root. Routine detach does not
 remove an existing root.
@@ -337,6 +392,14 @@ hidden root/child hooks before delayed restoration (including deferred child
 identity and task start/stop/resume), Unknown-archive process ownership,
 process-work reset versus retained telemetry and queued lifecycle callbacks after
 Stop. No test reads a user's App database or terminates a real process.
+
+The directory/name fixture uses injected monotonic time, directory attributes
+and the existing dispatcher boundary. It checks all four client brands,
+delayed/blank names, unnamed children, exact 10-second scheduling, zero
+pre-deadline I/O, a 300-icon sweep, missing versus unavailable paths, root
+loss, deletion/recreation, fresh-name recovery, stale results, archive/terminal
+constraints and shared-tracker Stop/Start. Its real-file cases use only
+disposable repository artifacts, not user session directories.
 
 The presentation fixture mounts production cells/billboard through the host
 BillboardSession in isolated nonactivating windows, without starting the

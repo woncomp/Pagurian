@@ -114,7 +114,7 @@ internal static class PresentationFixture
         Check(CopilotProjectName.FromCwd("/") == "/", "Filesystem root label");
 
         var fallback = new CopilotSessionState();
-        fallback.Resolve([new("cli", "cli", CopilotIdentityKind.Cli, null)]);
+        fallback.Resolve([new("cli", "cli", CopilotIdentityKind.Cli, "CLI fixture")]);
         fallback.Handle(new("sessionStart", "cli", Epoch, "", Cwd: @"D:\own"));
         fallback.Handle(new("preToolUse", "cli", Epoch.AddSeconds(2), "", Cwd: @"D:\new"));
         fallback.Handle(new("agentStop", "cli", Epoch.AddSeconds(1), "", Cwd: @"D:\stale"));

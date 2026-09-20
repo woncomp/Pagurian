@@ -53,6 +53,7 @@ var tests = new (string Name, Action Run)[]
     ("local telemetry and identity detail scenarios", () => Console.WriteLine($"  {DetailsFixture.Run()} detail scenarios passed")),
     ("session presentation state scenarios", PresentationFixture.Run),
     ("App turn/archive/process generation separation", AppLifecycleFixture.Run),
+    ("named icon admission and ten-second directory cleanup", DirectoryLifecycleFixture.Run),
 };
 int passed = 0;
 foreach (var (name, run) in tests)
@@ -877,7 +878,7 @@ sealed class Rig
         new("a", "root", CopilotIdentityKind.AppTaskChild, "Fixture root"),
         new("b", "root", CopilotIdentityKind.AppTaskChild, "Fixture root")]);
     public void Resolve(string source, string owner, CopilotIdentityKind kind) =>
-        State.Resolve([new(source, owner, kind, null)]);
+        State.Resolve([new(source, owner, kind, $"Fixture {source}")]);
     public CopilotSession Cell(string id = "root") =>
         State.Find(id) ?? throw new InvalidOperationException($"Missing cell {id}");
     public CopilotHookEvent Event(string name, string id, string? agent = null)

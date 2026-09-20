@@ -157,6 +157,10 @@ sealed class CopilotSessionState
         public bool Restored;
         public DateTimeOffset VisibilityFence = DateTimeOffset.MinValue;
         public DateTimeOffset WorkEpoch = DateTimeOffset.MinValue;
+        public long DirectoryRevision;
+        public bool DirectoryDeleted;
+        public bool DirectoryRecoveryRequested;
+        public DateTimeOffset DirectoryFence = DateTimeOffset.MinValue;
     }
 
     private readonly Dictionary<string, Source> _sources = new(StringComparer.Ordinal);
@@ -166,6 +170,8 @@ sealed class CopilotSessionState
     private readonly Action<CopilotTransition>? _diagnostic;
     private long _sequence;
     private long _lifecycleVersion;
+    private long _directoryVersion;
+    private long _directoryRevision;
     private readonly Dictionary<string, (CopilotAppSessionEvidence Evidence, DateTimeOffset At)> _appEvidence = new();
     private readonly HashSet<string> _exitedApps = new(StringComparer.Ordinal);
     private const int TransitionLimit = 256;
@@ -182,6 +188,11 @@ sealed class CopilotSessionState
     public IReadOnlyCollection<CopilotSession> Sessions => _sessions.Values;
     public IReadOnlyCollection<CopilotTransition> Transitions => _transitions;
     public CopilotSession? Find(string id) => _sessions.GetValueOrDefault(id);
+    public IReadOnlyList<CopilotSessionDirectoryTarget> DirectoryTargets =>
+        _sessions.Keys.Select(id => new CopilotSessionDirectoryTarget(id, Get(id).DirectoryRevision))
+            .Concat(_sources.Values.Where(s => s.DirectoryDeleted && s.DirectoryRecoveryRequested)
+                .Select(s => new CopilotSessionDirectoryTarget(s.Identity.SourceId, s.DirectoryRevision, Recover: true)))
+            .OrderBy(t => t.SessionId, StringComparer.Ordinal).ToArray();
 
     private Source Get(string id)
     {
@@ -196,6 +207,12 @@ sealed class CopilotSessionState
             return;
         var source = Get(hook.SourceId);
         long sequence = ++_sequence;
+        var directoryOwner = Get(source.Identity.OwnerId);
+        if (directoryOwner.DirectoryFence != DateTimeOffset.MinValue && hook.At <= directoryOwner.DirectoryFence)
+        {
+            Trace(source, hook, source.Status, "session-directory-fence");
+            return;
+        }
         var appOwner = source.Identity.Kind is CopilotIdentityKind.AppRoot or CopilotIdentityKind.AppTaskChild
             ? Get(source.Identity.OwnerId) : null;
         // Hidden is a presentation gate, not an event sink. Reduce tentative
@@ -218,6 +235,9 @@ sealed class CopilotSessionState
             return;
         }
         source.HasOwnHook = true;
+        source.DirectoryRevision = directoryOwner.DirectoryRevision = ++_directoryRevision;
+        if (source == directoryOwner && source.DirectoryDeleted)
+            source.DirectoryRecoveryRequested = true;
         source.Recent.Add(new(hook.At, CopilotRecentHook.Token(hook.Name),
             CopilotRecentHook.Token(hook.ToolName), sequence));
         source.Recent.Sort((a, b) =>
@@ -247,7 +267,8 @@ sealed class CopilotSessionState
         Reconcile();
     }
 
-    public void Resolve(IReadOnlyList<CopilotSessionIdentity> identities, CopilotAppLifecycleSnapshot? snapshot = null)
+    public void Resolve(IReadOnlyList<CopilotSessionIdentity> identities, CopilotAppLifecycleSnapshot? snapshot = null,
+        CopilotSessionDirectorySnapshot? directories = null)
     {
         if (snapshot is not null)
         {
@@ -266,6 +287,11 @@ sealed class CopilotSessionState
             {
                 var source = Get(identity.SourceId);
                 bool changed = source.Identity != identity;
+                if (source.Identity.OwnerId != identity.OwnerId || source.Identity.Kind != identity.Kind)
+                {
+                    Get(source.Identity.OwnerId).DirectoryRevision = ++_directoryRevision;
+                    Get(identity.OwnerId).DirectoryRevision = ++_directoryRevision;
+                }
                 source.Identity = identity;
                 if (source.Blocker is { } blocker)
                     source.Blocker = blocker with { OwnerId = identity.OwnerId };
@@ -273,8 +299,55 @@ sealed class CopilotSessionState
                     Trace(source, latest, source.Status, "identity-attached");
             }
         }
+        if (directories is not null) ApplyDirectories(directories);
         ReconcileAppLifecycle();
         Reconcile();
+    }
+
+    private void ApplyDirectories(CopilotSessionDirectorySnapshot snapshot)
+    {
+        if (snapshot.Version <= _directoryVersion) return;
+        _directoryVersion = snapshot.Version;
+        foreach (var evidence in snapshot.Sessions)
+        {
+            var target = evidence.Target;
+            if (!_sources.TryGetValue(target.SessionId, out var owner) ||
+                owner.Identity.OwnerId != target.SessionId ||
+                owner.DirectoryRevision != target.Revision)
+                continue;
+            if (target.Recover)
+            {
+                if (!owner.DirectoryDeleted || !owner.DirectoryRecoveryRequested ||
+                    evidence.Presence != CopilotSessionDirectoryPresence.Present ||
+                    string.IsNullOrWhiteSpace(evidence.Name))
+                    continue;
+                owner.DirectoryDeleted = false;
+                owner.DirectoryRecoveryRequested = false;
+                owner.DirectoryRevision = ++_directoryRevision;
+                owner.Identity = owner.Identity with { Name = evidence.Name };
+                Trace(owner, new("directoryRestore", target.SessionId, snapshot.ObservedAt, ""),
+                    owner.Status, "session-directory-restored");
+            }
+            else if (!owner.DirectoryDeleted && _sessions.ContainsKey(target.SessionId) &&
+                evidence.Presence == CopilotSessionDirectoryPresence.Missing)
+            {
+                owner.DirectoryDeleted = true;
+                owner.DirectoryRecoveryRequested = false;
+                owner.DirectoryRevision = ++_directoryRevision;
+                owner.DirectoryFence = _clock();
+                foreach (var member in _sources.Values.Where(s => s.Identity.OwnerId == target.SessionId))
+                {
+                    if (member.StateAt > owner.DirectoryFence) owner.DirectoryFence = member.StateAt;
+                    member.Active = false;
+                    member.Status = CopilotSessionStatus.Idle;
+                    member.Blocker = null;
+                    if (member.Lifecycle is { } end) member.AppliedLifecycle = end.Sequence;
+                    if (member.LifecycleStart is { } start) member.AppliedLifecycleStart = start.Sequence;
+                }
+                Trace(owner, new("directoryRemove", target.SessionId, snapshot.ObservedAt, ""),
+                    owner.Status, "session-directory-deleted");
+            }
+        }
     }
 
     private void ReconcileAppLifecycle()
@@ -297,7 +370,7 @@ sealed class CopilotSessionState
             bool attach = loaded && !owner.Hidden && (_sessions.ContainsKey(owner.Identity.SourceId) ||
                 owner.HasOwnHook || _sources.Values.Any(s => s.Identity.OwnerId == owner.Identity.SourceId &&
                     s.Active && !s.Ended));
-            if (restore || attach)
+            if ((restore || attach) && !owner.DirectoryDeleted)
             {
                 var app = evidence!.App!;
                 if (owner.App?.Key != app.Key || owner.Hidden)
@@ -371,9 +444,11 @@ sealed class CopilotSessionState
 
     private bool InOwnerGeneration(Source source, DateTimeOffset at)
     {
+        var owner = Get(source.Identity.OwnerId);
+        if (owner.DirectoryFence != DateTimeOffset.MinValue && at <= owner.DirectoryFence)
+            return false;
         if (source.Identity.Kind != CopilotIdentityKind.AppTaskChild)
             return true;
-        var owner = Get(source.Identity.OwnerId);
         return !owner.Ended && (!owner.Hidden || at > owner.VisibilityFence) &&
             at >= owner.Epoch && at >= owner.WorkEpoch;
     }
@@ -498,7 +573,9 @@ sealed class CopilotSessionState
         foreach (var (ownerId, members) in groups)
         {
             var owner = Get(ownerId);
-            if (owner.Ended || owner.Hidden || owner.Identity.Kind is not (CopilotIdentityKind.AppRoot or CopilotIdentityKind.Cli))
+            if (owner.Ended || owner.Hidden || owner.DirectoryDeleted ||
+                string.IsNullOrWhiteSpace(owner.Identity.Name) ||
+                owner.Identity.Kind is not (CopilotIdentityKind.AppRoot or CopilotIdentityKind.Cli))
                 continue;
             var active = members.Where(s => s.Active && !s.Ended && InOwnerGeneration(s, s.StateAt)).ToArray();
             if (!owner.HasOwnHook && !owner.Restored && !_sessions.ContainsKey(ownerId) && active.Length == 0)
@@ -506,7 +583,10 @@ sealed class CopilotSessionState
             desired.Add(ownerId);
             bool created = !_sessions.TryGetValue(ownerId, out var session);
             if (created)
+            {
+                owner.DirectoryRevision = ++_directoryRevision;
                 _sessions[ownerId] = session = new() { SessionId = ownerId, Name = ownerId };
+            }
             session!.Name = owner.Identity.Name ?? ownerId;
             session.NameResolved = !string.IsNullOrWhiteSpace(owner.Identity.Name);
             session.Client = owner.Identity.Client;
@@ -592,7 +672,7 @@ sealed class CopilotSessionState
         }
     }
 
-    private static CopilotSessionNode Node(Source source, DateTimeOffset epoch, DateTimeOffset workEpoch)
+    private CopilotSessionNode Node(Source source, DateTimeOffset epoch, DateTimeOffset workEpoch)
     {
         var input = source.Identity.Details ?? CopilotSessionDetails.Empty;
         if (!ReferenceEquals(input, source.DetailsInput) || epoch != source.DetailsEpoch)
@@ -604,7 +684,7 @@ sealed class CopilotSessionState
         var details = source.DetailsOutput;
         bool hasCurrentState = source.StateAt >= epoch && source.StateAt >= workEpoch &&
             source.StateAt != DateTimeOffset.MinValue
-            && source.StateAt > source.TranscriptTerminalAt;
+            && source.StateAt > source.TranscriptTerminalAt && InOwnerGeneration(source, source.StateAt);
         string lifecycle = !hasCurrentState ? "Unknown" : source.Ended ? "Ended"
             : source.StateEvent == "subagentStop" ? "Completed"
             : source.StateAt == DateTimeOffset.MinValue ? "Unknown" : "Active";
@@ -721,6 +801,8 @@ sealed class CopilotSessionState
         _transitions.Clear();
         _sequence = 0;
         _lifecycleVersion = 0;
+        _directoryVersion = 0;
+        _directoryRevision = 0;
         _appEvidence.Clear();
         _exitedApps.Clear();
         foreach (var session in ended)
