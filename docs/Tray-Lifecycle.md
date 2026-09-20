@@ -40,17 +40,38 @@ Three layers, one-directional:
 
 A right-edge surface anchors its window to the left of the taskbar's system
 area: the notification tray (`TrayNotifyWnd`) on the primary taskbar, the
-clock on secondaries. `TaskbarInterop.TryGetTaskbarSystemAreaLeft` enumerates
-the taskbar's child windows and takes the left edge of known system-area
-classes (`TrayNotifyWnd`, `TrayClockWClass`, `TrayShowDesktopButtonWClass`),
-falling back to any right-anchored child at most half the taskbar's width; the
-enumerated child signature is logged once per structure change so the real
-secondary-clock class can be confirmed and added. When nothing is found the
-content rect's right edge stays the anchor (and the log shows why).
+clock on secondaries. Native evidence must be a visible `TrayNotifyWnd` or
+`TrayClockWClass` belonging to the taskbar's own process, with valid system-area
+geometry. An arbitrary narrow/right-anchored child is **not** evidence: our own
+injected HWND used to satisfy that heuristic, causing a width-plus-gap position
+oscillation on every environment tick. A show-desktop button alone does not
+locate the left edge of the clock/notification cluster.
 
-`TaskbarTrayPlacement` pre-clips the content rect's right edge to that
-boundary for `TrayEdge.Right` surfaces, so the mirrored placement branch ends
-beside the system area without further math.
+Each right surface owns a `TaskbarSystemAreaObserver`. When no native system
+control exists, its background MTA worker queries only that taskbar's UIA
+subtree. The supported secondary-clock structure is `SystemTrayIcon`,
+`SystemTray.OmniButton`, Button control type, and a `TimeInnerTextBlock`
+descendant, with matching process ownership and valid physical bounds.
+These are observed Windows internals, not a permanent OS contract. Full-width
+XAML bridges and localized time/date strings are never used as geometry.
+Queries have node/depth and provider timeout limits, one in-flight call per
+observer, 500 ms successful refreshes and bounded failure backoff. No UIA calls
+run in the UI/input loop. COM objects stay on the worker.
+
+The observer retains the last reliable boundary on a transient query failure
+only within the same HWND/owner/geometry/DPI context. A new context starts
+Unknown. Without a reliable boundary, the right window stays hidden (including
+its hit targets), while its Shells keep running. Recovery reuses the HWND and
+keyed content through the existing presentation gate. Closed observers reject
+late results; they do not block the UI waiting for a provider.
+
+`TaskbarTrayPlacement.Surface` retains the complete content rectangle and a
+separate `SystemAreaLeftPx` constraint. The tray ends 8 DIP before that boundary,
+scaled from the original taskbar thickness. The 50 ms environment check only
+consumes cached evidence. Stable observations never request another layout.
+Boundary source/failure/recovery diagnostics are per observer/context, deduped
+and rate limited through the existing asynchronous tray log, not synchronous
+full child-tree dumps.
 
 Cells render in **reversed config order** (`TaskbarTrayWindow` reverses the
 array for right surfaces): the first configured cell sits nearest the system
@@ -116,7 +137,9 @@ native geometry operation needs retrying. Stable color sampling does not measure
 
 Background capture runs every 250 ms. Horizontal samples cover the entire taskbar
 content edge, indexed in screen coordinates; vertical samples cover strips above
-and below the tray. A width change derives gradient stops from the same cache.
+and below the tray. A width or system-area-boundary change derives gradient
+stops from the same cache; only a change in the actual sampling geometry
+invalidates that cache.
 Results from an old environment generation or disposed session are discarded.
 Startup waits for a sample or a 500 ms deadline, then uses a system light/dark
 fallback. High contrast uses the system background and default XAML theme.
@@ -162,9 +185,20 @@ at a bounded cadence; close invalidates queued capture and first-frame callbacks
   displays and an isolated temp config; never touches user state.
 - `tests/Verify-TrayLifecycle.ps1 -Taskbar`: the same production session under
   the actual Explorer taskbar; no Explorer restart or user config/module loading.
+- `tests/Verify-TrayLifecycle.ps1 -Right`: isolated right placement, the exact
+  self-anchor regression, candidate validation, worker generation fences,
+  initial Unknown, retained transient evidence, hidden geometry invalidation,
+  recovery without remounting, live clock-width changes, and 200 continuous
+  stable environment polls through the production selector and observer.
+- `tests/Verify-TrayLifecycle.ps1 -SecondaryTaskbar <HWND>`: explicitly targets
+  a live secondary taskbar using the real native/UIA observer. Asserts clock
+  clearance and 200 stable polls, never loads user configuration. A missing or
+  primary HWND fails rather than silently substituting another taskbar.
 - `python tests/Capture-TrayLifecycle.py --taskbar`: desktop frame capture and
   contact sheet in the fixture's ignored bin output. Requires Python and Pillow.
   Omit --taskbar for the isolated parent. --exe and --output permit baseline runs.
+  `--right` and `--secondary-taskbar <HWND>` select the new right fixtures and
+  record their scan line throughout the run.
 - `tests/Verify-BillboardLifecycle.ps1`, `tests/Verify-ModuleIsolation.ps1`,
   `tests/Verify-DiagnosticLogQueue.ps1`, and an explicit x64 solution build.
 
@@ -185,6 +219,17 @@ coverage. The isolated parent-loss test exercises native child destruction but
 is not a substitute for restarting the user's Explorer. The synthetic parent
 itself may show a startup white frame; use the real-taskbar recording to assess
 tray startup. The fixture's later light-background case intentionally paints white.
+
+The secondary-clock regression recording used the real UIA clock boundary
+at x=4797 and a 66 px probe tray ending at x=4789 (8 px gap at 100%).
+All 200 stable environment polls produced no additional measurements or
+geometry commits. The final recording contained 612 frames, 588 with the probe
+visible; its teal footprint did not move/change width, and the tray border
+never flashed white. The isolated right fixture also covers unavailable/recovered
+boundaries and a clock-width change. Real minute-boundary/clock-hover transitions,
+mixed-DPI hardware changes and ARM64 execution still need manual coverage;
+x64 solution and ARM64 host compilation are covered. The solution itself only
+declares x64, so the ARM64 check targets `Pagurian\Pagurian.csproj` directly.
 
 The existing module-isolation PowerShell runner needs WinAppSDK bootstrapping:
 load the host output's runtimes/win-x64/native/Microsoft.WindowsAppRuntime.Bootstrap.dll

@@ -12,6 +12,11 @@ using static Microsoft.UI.Reactor.Factories;
 ReactorApp.Run(_ =>
 {
     ReactorApp.ShutdownPolicy = ShutdownPolicy.Explicit;
+    if (Environment.GetCommandLineArgs().Any(a => a is "--right" or "--secondary-taskbar"))
+    {
+        new RightTrayHarness().Run();
+        return;
+    }
     var harness = new Harness();
     Application.Current.UnhandledException += (_, e) => harness.Fail(e.Exception.ToString());
     harness.Run();
@@ -72,6 +77,7 @@ sealed class Harness
         try
         {
             _realTaskbar = Environment.GetCommandLineArgs().Contains("--taskbar");
+            SystemAreaTests.Run();
             _parent = ReactorApp.OpenWindow(new WindowSpec
             {
                 Title = "Tray lifecycle isolated parent", Width = 800, Height = 48,
@@ -198,6 +204,13 @@ sealed class Harness
             Step(100, () =>
             {
                 Require(_sampler!.DiscardedSamples == 1 && _samples == 1, "stale sample was applied or fresh sample was lost");
+                var captures = _captures;
+                _sampler.SetSurface(_surface with
+                {
+                    ContentRect = Shift(_surface.ContentRect, 40),
+                    Edge = TrayEdge.Right, SystemAreaLeftPx = _surface.ContentRect.Right - 83,
+                });
+                Require(_sampler.HasSample && _captures == captures, "anchor-only change discarded spatial background");
                 _sampler.Dispose();
                 _session = Create(); _session.Start();
             });

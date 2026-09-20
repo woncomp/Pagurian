@@ -17,4 +17,7 @@
     <Compile Include="../../../Pagurian/ReactorDestroyedWindow.cs;../../../Pagurian/TrayWindowSession.cs;../../../Pagurian/TrayBackgroundSampler.cs;../../../Pagurian/TaskbarTrayLayout.cs;../../../Pagurian/TaskbarTrayPlacement.cs;../../../Pagurian/TaskbarTrayWindow.cs;../../../Pagurian/TaskbarInterop.cs;../../../Pagurian/Trays/TrayId.cs;../../../Pagurian/Trays/ShellTray.cs;../../../Pagurian/Trays/TrayManager.cs;../../../Pagurian/Displays/DisplayInfo.cs;../../../Pagurian/ThemeService.cs" LinkBase="Host" />
     <Content Include="../../../Pagurian/Assets/Pagurian-256.ico" Link="Assets/Pagurian-256.ico" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../../Pagurian/TaskbarSystemArea.cs;../../../Pagurian/TaskbarSystemAreaObserver.cs;../../../Pagurian/TaskbarClockAutomation.cs" LinkBase="Host" />
+  </ItemGroup>
 </Project>

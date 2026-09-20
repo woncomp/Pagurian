@@ -10,10 +10,17 @@ static class TaskbarTrayPlacement
         TaskbarInterop.RECT ParentRect,
         bool IsHorizontal,
         double Scale,
-        TrayEdge Edge = TrayEdge.Left)
+        TrayEdge Edge = TrayEdge.Left,
+        int? SystemAreaLeftPx = null)
     {
+        internal bool CanPlace => !IsHorizontal || Edge != TrayEdge.Right ||
+            SystemAreaLeftPx is { } left && left > ContentRect.Left && left <= ContentRect.Right;
+
         public TaskbarInterop.RECT Place(double widthDip)
         {
+            if (!CanPlace)
+                throw new InvalidOperationException("Right tray placement requires a reliable system-area boundary.");
+            var right = IsHorizontal && Edge == TrayEdge.Right ? SystemAreaLeftPx!.Value : ContentRect.Right;
             var winW = Math.Max(widthDip * Scale, 1);
             var winH = (TaskbarTrayWindow.WindowHeightDip -
                         2 * TaskbarTrayWindow.WindowInsetYDip) * Scale;
@@ -21,12 +28,8 @@ static class TaskbarTrayPlacement
             double xPx, yPx;
             if (IsHorizontal)
             {
-                // Right-edge surfaces anchor left of the system area (the
-                // notification tray on the primary taskbar, the clock on
-                // secondaries); TryGetSurface pre-clips ContentRect.Right to
-                // that boundary, so the mirrored branch ends beside it.
                 xPx = Edge == TrayEdge.Right
-                    ? ContentRect.Right - winW - 8 * Scale
+                    ? right - winW - 8 * Scale
                     : ContentRect.Left + 8 * Scale;
                 yPx = ContentRect.Top + (ContentRect.Height - winH) / 2;
             }
@@ -39,7 +42,7 @@ static class TaskbarTrayPlacement
             xPx = Math.Clamp(
                 xPx,
                 ContentRect.Left,
-                Math.Max(ContentRect.Left, ContentRect.Right - winW));
+                Math.Max(ContentRect.Left, right - winW));
             yPx = Math.Clamp(
                 yPx,
                 ContentRect.Top,
@@ -70,15 +73,6 @@ static class TaskbarTrayPlacement
         }
 
         var horizontal = contentRect.Width >= contentRect.Height;
-        if (edge == TrayEdge.Right && horizontal &&
-            TaskbarInterop.TryGetTaskbarSystemAreaLeft(taskbar, contentRect, out var systemLeft) &&
-            systemLeft > contentRect.Left)
-        {
-            // The right surface lives left of the system area; everything
-            // from its left boundary rightwards is off-limits for placement.
-            contentRect.Right = systemLeft;
-        }
-
         var scale = (horizontal ? contentRect.Height : contentRect.Width) /
             TaskbarTrayWindow.WindowHeightDip;
         if (scale <= 0)

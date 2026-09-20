@@ -153,9 +153,15 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   surface). Right-edge trays bind to their display's right surface and anchor
   left of the taskbar's system area (the notification tray on the primary
   taskbar, the clock on secondaries — `TaskbarInterop
-  .TryGetTaskbarSystemAreaLeft` finds its left boundary from known child
-  classes, falling back to a right-anchored-narrow-child heuristic with a
-  bounded children-signature log); on vertical taskbars they fold to the
+  .TryGetTaskbarSystemAreaLeft` accepts only visible, valid, taskbar-process-owned
+  notification/clock windows; `TaskbarSystemAreaObserver` reads HWND-less
+  secondary clocks through a bounded background MTA UIA query). Arbitrary
+  narrow/right-anchored windows are never system-area evidence: injected
+  Pagurian windows previously made that heuristic oscillate. Initial Unknown
+  or changed taskbar/owner/geometry hides the right window until reliable
+  evidence arrives; transient failures retain evidence only within the same
+  context. Shells keep running. Boundary diagnostics are per context, deduped,
+  rate limited and asynchronous; on vertical taskbars right trays fold to the
   left surface. Right-surface cells render in reversed config order so the
   first configured cell sits nearest the system area.
 - `Displays/DisplayInterop.cs` + `Displays/DisplayTopology.cs` — the physical
@@ -246,6 +252,11 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   `TrayBackgroundSampler.cs` captures spatial taskbar strips off the UI thread;
   resizing reuses the cached strip. See `docs/Tray-Lifecycle.md` for native
   child-window requirements and the pinned Reactor native-loss adapter.
+  System-area boundaries constrain placement separately from the full taskbar
+  sampling rectangle, so clock-anchor and cell-width changes reuse the spatial
+  background cache. `tests\Verify-TrayLifecycle.ps1 -Right` exercises the
+  production boundary/observer/environment loop; `-SecondaryTaskbar <HWND>`
+  explicitly verifies a live secondary clock without loading user settings.
 - `ThemeService.cs` — host `IThemeService`, one instance per tray surface:
   `IsDark` from sampled luminance (Rec.601, threshold 140 — always matches
   that surface's taskbar), the shared live `TextBrush` (mutated in place on

@@ -131,15 +131,28 @@ internal sealed class TrayWindowSession
         nint parent = _getParent();
         if (_parent != 0 && (parent != _parent || TaskbarInterop.GetAncestor(Hwnd, TaskbarInterop.GA_PARENT) != _parent))
             return false;
-        if (_retryLayout) QueueCommit();
         var surface = _getSurface();
-        if (surface is not { } next) return true; // retain last valid position during transient failures
+        if (surface is not { } next)
+        {
+            if (_surface is { Edge: TrayEdge.Right } previous)
+            {
+                _surface = previous with { SystemAreaLeftPx = null };
+                SuspendPlacement();
+            }
+            return true;
+        }
         if (_surface != next)
         {
             _surface = next;
             _background.SetSurface(next);
             QueueCommit();
         }
+        if (!next.CanPlace)
+        {
+            SuspendPlacement();
+            return true;
+        }
+        if (_retryLayout) QueueCommit();
         if (_parent == 0 && parent != 0 && DateTime.UtcNow >= _retryInjection)
         {
             _retryInjection = DateTime.UtcNow.AddSeconds(1.25);
@@ -160,6 +173,15 @@ internal sealed class TrayWindowSession
             QueueCommit();
         }
         return true;
+    }
+    private void SuspendPlacement()
+    {
+        if (Snapshot == null && !_shown) return;
+        BeginPreparation();
+        _window!.Hide();
+        _shown = false;
+        Snapshot = null;
+        Log("placement unavailable; retaining hidden window and cells");
     }
     private void OnCellsChanged() => QueueCommit();
     private void OnDpiChanged(object? sender, uint dpi) => QueueCommit();
@@ -196,7 +218,7 @@ internal sealed class TrayWindowSession
     private void Commit(bool insideArrange = false)
     {
         _queued = false;
-        if (!Active || _committing || !_rendered || _surface is not { } surface || _window == null) return;
+        if (!Active || _committing || !_rendered || _surface is not { CanPlace: true } surface || _window == null) return;
         _committing = true;
         try
         {

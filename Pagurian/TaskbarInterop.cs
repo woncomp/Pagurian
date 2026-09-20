@@ -75,6 +75,18 @@ static class TaskbarInterop
     [DllImport("user32.dll")]
     public static extern bool IsWindow(IntPtr hWnd);
 
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    internal static uint WindowProcessId(nint hwnd) =>
+        GetWindowThreadProcessId(hwnd, out var processId) != 0 ? processId : 0;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern nint SetThreadDpiAwarenessContext(nint context);
+
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
         int X, int Y, int cx, int cy, uint uFlags);
@@ -246,6 +258,12 @@ static class TaskbarInterop
 
     public static IntPtr FindTaskbar() => FindWindowW("Shell_TrayWnd", null);
 
+    internal static bool IsSecondaryTaskbar(nint hwnd)
+    {
+        var name = new StringBuilder(256);
+        return GetClassNameW(hwnd, name, name.Capacity) > 0 && name.ToString() == "Shell_SecondaryTrayWnd";
+    }
+
     // All taskbar windows: the primary Shell_TrayWnd plus every secondary
     // taskbar (Shell_SecondaryTrayWnd, present only while "show taskbar on
     // all displays" is on), each mapped to its owning monitor.
@@ -402,26 +420,19 @@ static class TaskbarInterop
     public static bool TryGetTaskbarContentRect(out RECT rect) =>
         TryGetTaskbarContentRect(FindTaskbar(), out rect);
 
-    // Known classes of the taskbar's system-area controls: the notification
-    // tray (primary taskbar), the clock, and the show-desktop button. A
-    // right-edge tray anchors to the left of whichever is present. The
-    // secondary taskbar's clock is a XAML island whose bridging window class
-    // varies by build, so the geometry heuristic below covers whatever class
-    // it actually uses (its signature lands in the log for confirmation).
-    private static readonly string[] SystemAreaClassNames =
-        ["TrayNotifyWnd", "TrayClockWClass", "TrayShowDesktopButtonWClass"];
-
-    private static string? _loggedSystemAreaChildren;
-
-    // Left physical-pixel boundary of the taskbar's system area — where a
-    // right-edge tray's cells must end. Returns false when no system-area
-    // control is found; the caller then keeps the content rect's right edge.
+    // Only Explorer-owned, positively identified native system controls are
+    // evidence. Modern secondary clocks need the background UIA observer.
     public static bool TryGetTaskbarSystemAreaLeft(nint taskbar, in RECT contentRect, out int leftPx)
     {
-        var content = contentRect;
-        var knownMin = int.MaxValue;
-        var rightAnchoredMin = int.MaxValue;
-        var signature = new StringBuilder();
+        var left = TaskbarSystemArea.SelectNative(WindowProcessId(taskbar), contentRect,
+            ReadTaskbarSystemAreaCandidates(taskbar));
+        leftPx = left.GetValueOrDefault();
+        return left.HasValue;
+    }
+
+    internal static IReadOnlyList<TaskbarSystemArea.Candidate> ReadTaskbarSystemAreaCandidates(nint taskbar)
+    {
+        var candidates = new List<TaskbarSystemArea.Candidate>();
         EnumChildWindows(taskbar, (child, _) =>
         {
             if (!TryGetWindowRect(child, out var rect))
@@ -429,39 +440,11 @@ static class TaskbarInterop
             var name = new StringBuilder(256);
             var length = GetClassNameW(child, name, name.Capacity);
             var className = length > 0 ? name.ToString() : "";
-            signature.Append(' ').Append(className)
-                .Append('@').Append(rect.Left).Append(',').Append(rect.Top)
-                .Append(',').Append(rect.Width).Append('x').Append(rect.Height);
-            if (SystemAreaClassNames.Contains(className))
-                knownMin = Math.Min(knownMin, rect.Left);
-            // Fallback: children docked at the taskbar's right end and at
-            // most half as wide as the taskbar — the system-area cluster.
-            if (rect.Right >= content.Right - 8 && rect.Width <= content.Width / 2)
-                rightAnchoredMin = Math.Min(rightAnchoredMin, rect.Left);
+            if (className is "TrayNotifyWnd" or "TrayClockWClass")
+                candidates.Add(new(WindowProcessId(child), IsWindowVisible(child), className, rect));
             return true;
         }, IntPtr.Zero);
-
-        // One log line per taskbar structure change; the child list is short
-        // and stable, so this stays bounded (Explorer restarts re-log).
-        var signatureText = signature.ToString();
-        if (signatureText != _loggedSystemAreaChildren)
-        {
-            _loggedSystemAreaChildren = signatureText;
-            PagurianLog.Host($"taskbar {taskbar}: children[{signatureText}]");
-        }
-
-        if (knownMin != int.MaxValue)
-        {
-            leftPx = knownMin;
-            return true;
-        }
-        if (rightAnchoredMin != int.MaxValue)
-        {
-            leftPx = rightAnchoredMin;
-            return true;
-        }
-        leftPx = 0;
-        return false;
+        return candidates;
     }
 
     public static bool TryGetTaskbarContentRect(IntPtr taskbar, out RECT rect)

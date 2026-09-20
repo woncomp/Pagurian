@@ -14,10 +14,12 @@ namespace Pagurian;
 internal sealed class TraySurface
 {
     private readonly TrayWindowSession _session;
+    private readonly TaskbarSystemAreaObserver? _systemArea;
 
     internal TraySurface(SurfaceKey key)
     {
         Key = key;
+        if (key.Edge == TrayEdge.Right) _systemArea = new();
         _session = new TrayWindowSession(
             getSurface: GetSurface,
             getParent: () => DisplayTopology.TaskbarHwndFor(Key.DisplayKey),
@@ -48,6 +50,7 @@ internal sealed class TraySurface
 
     internal void Close()
     {
+        _systemArea?.Dispose();
         TrayManager.UnregisterSurfaceTheme(Key);
         _session.Close();
     }
@@ -64,8 +67,11 @@ internal sealed class TraySurface
     private TaskbarTrayPlacement.Surface? GetSurface()
     {
         var taskbar = DisplayTopology.TaskbarHwndFor(Key.DisplayKey);
-        return taskbar != 0 && TaskbarTrayPlacement.TryGetSurface(taskbar, Key.Edge, out var surface)
-            ? surface
-            : null;
+        if (taskbar != 0 && TaskbarTrayPlacement.TryGetSurface(taskbar, Key.Edge, out var surface))
+            return _systemArea != null && surface.IsHorizontal
+                ? _systemArea.Observe(taskbar, TaskbarInterop.WindowProcessId(taskbar), surface)
+                : surface;
+        _systemArea?.Invalidate();
+        return null;
     }
 }

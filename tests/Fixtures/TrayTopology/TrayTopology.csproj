@@ -19,4 +19,7 @@
          Reactor dispatcher is pumping. -->
     <Compile Include="../../../Pagurian/TrayConfig.cs;../../../Pagurian/Trays/TrayId.cs;../../../Pagurian/Trays/ShellTray.cs;../../../Pagurian/Trays/TrayManager.cs;../../../Pagurian/Displays/DisplayInfo.cs;../../../Pagurian/TaskbarInterop.cs;../../../Pagurian/ThemeService.cs" LinkBase="Host" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../../Pagurian/TaskbarSystemArea.cs" LinkBase="Host" />
+  </ItemGroup>
 </Project>
