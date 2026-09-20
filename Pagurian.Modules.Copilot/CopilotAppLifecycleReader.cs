@@ -39,8 +39,9 @@ internal sealed class CopilotAppLifecycleReader : ICopilotAppLifecycleReader
         for (int i = 0; i < Math.Min(128, known.Length); i++)
             ids.Add(known[_roundRobin++ % known.Length]);
         if (known.Length > 0) _roundRobin %= known.Length;
-        // Positive loaded-session discovery has no age cutoff. Enumeration is
-        // resumable, bounded, and never queries every historical DB row.
+        // Loaded evidence has no age cutoff for IDs already observed through
+        // hooks. Directory enumeration remains resumable and bounded, but an
+        // unobserved session is never admitted from a lock alone.
         try
         {
             _directories ??= Directory.EnumerateDirectories(_stateDirectory).GetEnumerator();
@@ -72,8 +73,10 @@ internal sealed class CopilotAppLifecycleReader : ICopilotAppLifecycleReader
                 if (LoadedAt(id, app) is { } loaded) loads[id] = loaded;
             }
         }
-        // Unknown/unloaded historical directories must not become restoration candidates.
-        var candidates = ids.Where(id => observed.Contains(id) || loads.ContainsKey(id)).ToArray();
+        // A session must be observed through a hook before any lifecycle or
+        // archive evidence can process it. Locks and database rows alone are
+        // not conversation evidence.
+        var candidates = ids.Where(observed.Contains).ToArray();
         var archive = _database.Read(candidates, cancellation);
         if (candidates.Any(id => archive.GetValueOrDefault(id, CopilotArchiveState.Unknown) == CopilotArchiveState.Unknown))
             _diagnostic?.Invoke("app-archive-unavailable");

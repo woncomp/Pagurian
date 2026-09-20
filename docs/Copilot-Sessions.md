@@ -153,12 +153,15 @@ Three independent sources now describe a positively identified App root:
 
 `CopilotAppLifecycleReader` runs inside the existing resolver worker. Each
 pass examines up to 128 known IDs plus 128 resumably enumerated directories,
-and at most 16 runtime locks per directory. Loaded IDs go straight to metadata
-resolution, including older-than-seven-day roots. It never enumerates all
+and at most 16 runtime locks per directory. A session is admitted to lifecycle
+processing only after its ID has been observed through a hook; loaded evidence
+for that observed ID has no seven-day age cutoff. Locks, workspace metadata and
+database rows alone never create a root cell. It never enumerates all
 unarchived database rows. New restoration requires positive App identity,
-current load evidence **and** known nonarchived state. Unknown evidence keeps
-existing visibility and emits throttled payload-free reason codes, but cannot
-create an unobserved root. Routine detach does not remove an existing root.
+current load evidence **and** known nonarchived state after hook observation.
+Unknown evidence keeps existing visibility and emits throttled payload-free
+reason codes, but cannot create an unobserved root. Routine detach does not
+remove an existing root.
 Verified loaded-process ownership attaches to an already hook-visible root
 even when archive state is Unknown, so a later confirmed App Exit can remove
 it despite an unavailable database. This binding does not restore hidden or

@@ -425,9 +425,11 @@ public sealed class MyShell : Shell
   GitHub company metadata and process creation time; inuse locks must correlate
   to live SDK processes and verified App ancestry. Retained handles prove exit;
   missing hints, denied queries, SDK detach/survival and UI closure do not.
-  Loaded-session discovery bypasses the seven-day metadata cutoff but restores
-  only positively identified, loaded, known-nonarchived App roots, never all DB
-  rows. Archive/unarchive and exit/restart have monotonic visibility/work fences;
+  Loaded-session evidence bypasses the seven-day metadata cutoff only for IDs
+  already observed through hooks; locks, metadata and DB rows alone never
+  restore a root. It restores only positively identified, loaded,
+  known-nonarchived App roots, never all DB rows. Archive/unarchive and
+  exit/restart have monotonic visibility/work fences;
   unarchive requires a new positive load, not a late hook or old lock.
   A new App work epoch resets stale blockers/active tasks/debounce to Idle without
   overwriting fresh hooks or discarding conversation usage/history.

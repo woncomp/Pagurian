@@ -15,6 +15,7 @@
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSessionIdentityResolver.cs" />
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSessionState.cs" />
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSessionDetails.cs" />
+    <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSdkModels.cs" />
     <Compile Include="..\CopilotSessions\AppLifecycleFixture.cs" />
     <Compile Include="..\..\..\Pagurian\ModuleLoadContext.cs" />
   </ItemGroup>

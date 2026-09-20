@@ -171,9 +171,13 @@ try
     using var resolver = new CopilotSessionIdentityResolver(stateDirectory, appLifecycle: lifecycle);
     var state = new CopilotSessionState();
     for (int i = 0; i < 3; i++) state.Resolve(resolver.Scan(), resolver.LifecycleSnapshot);
-    Check(state.Find("direct") is not null, "Loaded metadata older than seven days restored");
+    Check(state.Find("direct") is null, "Unobserved loaded session stays hidden");
+    resolver.Observe("direct");
+    state.Handle(new("sessionStart", "direct", epoch.AddSeconds(16), ""));
+    for (int i = 0; i < 3; i++) state.Resolve(resolver.Scan(), resolver.LifecycleSnapshot);
+    Check(state.Find("direct") is not null, "Observed loaded session is restored");
     Check(state.Find("alias") is null && state.Find("history") is null, "Archived and historical rows stay hidden");
-    Check(state.Find("direct")!.Status == CopilotSessionStatus.Idle, "No-hook initial attachment is Idle");
+    Check(state.Find("direct")!.Status == CopilotSessionStatus.Idle, "Initial attachment is Idle");
     fakeProcesses.Loaded = false;
     state.Resolve(resolver.Scan(), resolver.LifecycleSnapshot);
     Check(state.Find("direct") is not null, "Runtime-only detach is not archive");
@@ -188,8 +192,13 @@ try
     Sql("INSERT INTO sessions VALUES('late-loaded','chat',NULL,0),('foreign','chat',NULL,0);");
     fakeProcesses.Loaded = true;
     for (int i = 0; i < 8; i++) state.Resolve(resolver.Scan(), resolver.LifecycleSnapshot);
+    Check(state.Find("late-loaded") is null && state.Find("foreign") is null,
+        "Unobserved loaded metadata never creates roots");
+    resolver.Observe("late-loaded");
+    state.Handle(new("sessionStart", "late-loaded", epoch.AddSeconds(21), ""));
+    for (int i = 0; i < 8; i++) state.Resolve(resolver.Scan(), resolver.LifecycleSnapshot);
     Check(state.Find("late-loaded") is not null && state.Find("foreign") is null,
-        "Bounded discovery eventually restores old loaded App metadata, never a foreign client");
+        "Observed loaded metadata restores only the matching App root");
     fakeProcesses.ConfirmedExit = true;
     state.Resolve(resolver.Scan(), resolver.LifecycleSnapshot);
     Check(state.Sessions.Count == 0, "Coherent worker snapshot observes App exit without hooks");
