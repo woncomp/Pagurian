@@ -23,17 +23,28 @@ $stdout = Join-Path $output "smoke.stdout.log"
 $stderr = Join-Path $output "smoke.stderr.log"
 $process = Start-Process -FilePath $executable -WorkingDirectory $output `
     -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+# Force Process to retain its native handle so ExitCode remains available
+# after the app tears down its WinUI dispatcher and exits.
+$null = $process.Handle
 if (-not $process.WaitForExit(30000)) {
     # Only the exact fixture process created above is eligible for termination.
     $process.Kill()
     throw "Navigation diagnostics smoke fixture timed out after 30 seconds."
 }
-$standardOutput = Get-Content -LiteralPath $stdout
+$process.WaitForExit()
+$process.Refresh()
+$marker = "Configuration transition passed:"
+$outputDeadline = [DateTime]::UtcNow.AddSeconds(2)
+do {
+    $standardOutput = Get-Content -LiteralPath $stdout
+    if ($standardOutput | Select-String -SimpleMatch $marker) { break }
+    Start-Sleep -Milliseconds 50
+} while ([DateTime]::UtcNow -lt $outputDeadline)
 $standardOutput
 Get-Content -LiteralPath $stderr
 if ($process.ExitCode -ne 0) {
     throw "Navigation diagnostics smoke fixture failed with exit code $($process.ExitCode)."
 }
-if (-not ($standardOutput | Select-String -SimpleMatch "Live navigation diagnostics passed:")) {
+if (-not ($standardOutput | Select-String -SimpleMatch $marker)) {
     throw "Navigation diagnostics fixture exited before its final assertions completed."
 }

@@ -7,6 +7,15 @@ versioned `Pagurian.Sdk` package. See
 [External modules](docs/External-Modules.md) for the SDK, project, bundle,
 dependency-isolation, and installation contract.
 
+## Shell configuration transitions
+
+The Shell editor keeps its Modules catalog fixed beneath configuration pages.
+Each Shell configuration slides in from the right as an independent opaque
+overlay and exits to the right. Selecting another Shell while an overlay is
+still entering reverses that overlay from its current position immediately,
+so rapid selections do not queue stale pages or make an old configuration
+flash back later. Windows Reduce Motion disables these transitions.
+
 ## Copilot Usage workday calendar
 
 Each Copilot Usage shell has its own compact, Sunday-first calendar in Settings,

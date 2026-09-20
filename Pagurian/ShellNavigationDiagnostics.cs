@@ -96,7 +96,7 @@ internal sealed class ShellNavigationDiagnostics
             }
             if (_renderedRoute != route || _reduceMotion != reduceMotion)
             {
-                Write($"render-observed route={route} transition={(reduceMotion ? "None" : "Spring")}");
+                Write($"render-observed route={route} transition={(reduceMotion ? "None" : "SmoothOverlay")}");
                 _renderedRoute = route;
                 _reduceMotion = reduceMotion;
             }
@@ -236,17 +236,46 @@ internal sealed class ShellNavigationDiagnostics
         }
         var children = host.Children.ToArray();
         var descriptions = string.Join(" | ", children.Select((child, index) =>
-            $"slot={index} {Describe(child)} parentIsHost={ReferenceEquals(VisualTreeHelper.GetParent(child), host)}"));
+        {
+            var page = FindPageNode(child);
+            return $"slot={index} {Describe(child)} pageRoute={page?.Route ?? "none"} " +
+                $"pageMounted={page?.Mounted} parentIsHost={ReferenceEquals(VisualTreeHelper.GetParent(child), host)}";
+        }));
         Write($"snapshot phase={phase} expected={_route} host={Identity(host)} children={children.Length} [{descriptions}]");
-        var mismatch = children.Length != 1 || children.Any(child =>
-            child is not FrameworkElement fe || !_nodes.TryGetValue(fe, out var node) ||
-            node.Role != "page" || node.Route != _route || !node.Mounted);
-        // Multiple children are expected during Spring. Even at 2s this is a
-        // suspicion, not proof of a permanent leak or a compositor failure.
+        var pages = children
+            .Select(child => FindPageNode(child))
+            .Where(node => node?.Mounted == true)
+            .ToArray();
+        var expectedPageCount = _route == "Modules" ? 1 : 2;
+        var mismatch = children.Length != expectedPageCount ||
+            pages.Length != expectedPageCount ||
+            pages.Count(node => node!.Route == "Modules") != 1 ||
+            (_route != "Modules" && pages.Count(node => node!.Route == _route) != 1) ||
+            pages.Any(node => node!.Route != "Modules" && node.Route != _route);
+        // Extra configuration layers are expected only while their independent
+        // exit animations are active. At 2s they indicate incomplete cleanup.
         if (settled && _page == SettingsPage.Shells && host.IsLoaded && mismatch)
         {
             Write($"suspected-residue expected={_route} host={Identity(host)} children={children.Length} tree={TreeSummary(host)}", "WARN");
         }
+    }
+
+    private Node? FindPageNode(DependencyObject root, int depth = 0)
+    {
+        if (root is FrameworkElement element &&
+            _nodes.TryGetValue(element, out var node) &&
+            node.Role == "page")
+        {
+            return node;
+        }
+        if (depth >= 3)
+            return null;
+        for (var index = 0; index < VisualTreeHelper.GetChildrenCount(root); index++)
+        {
+            if (FindPageNode(VisualTreeHelper.GetChild(root, index), depth + 1) is { } child)
+                return child;
+        }
+        return null;
     }
 
     private string Identity(DependencyObject? element)

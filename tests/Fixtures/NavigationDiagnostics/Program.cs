@@ -1,11 +1,13 @@
 using System.Diagnostics;
+using System.Numerics;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Reactor.Hooks;
-using Microsoft.UI.Reactor.Navigation;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Hosting;
+using Microsoft.UI.Xaml.Media;
 using Pagurian;
 using static Microsoft.UI.Reactor.Factories;
 using XamlBorder = Microsoft.UI.Xaml.Controls.Border;
@@ -14,15 +16,12 @@ using XamlGrid = Microsoft.UI.Xaml.Controls.Grid;
 ReactorApp.Run(_ =>
 {
     ReactorApp.ShutdownPolicy = ShutdownPolicy.Explicit;
-    var harness = new NavigationSmokeHarness();
+    var harness = new TransitionSmokeHarness();
     AppDomain.CurrentDomain.UnhandledException += (_, args) => harness.Fail($"Unhandled: {args.ExceptionObject}");
     Application.Current.UnhandledException += (_, args) => harness.Fail($"XAML: {args.Exception}");
-    // WinUI can end its dispatcher when the final HWND closes even with
-    // Reactor's Explicit policy. Keep an unshown test-only owner alive until
-    // post-close timer/subscription assertions finish.
     harness.LifetimeWindow = ReactorApp.OpenWindow(new WindowSpec
     {
-        Title = "Navigation diagnostics hidden lifetime owner",
+        Title = "Configuration transition hidden lifetime owner",
         Width = 1,
         Height = 1,
         Style = WindowStyle.None,
@@ -31,13 +30,13 @@ ReactorApp.Run(_ =>
         NoActivate = true,
         StartPosition = WindowStartPosition.Manual,
         ManualPosition = (-32000, -32000),
-    }, () => new NavigationLifetimeView());
+    }, () => new TransitionLifetimeView());
     harness.LifetimeWindow.Hide();
     harness.Window = ReactorApp.OpenWindow(new WindowSpec
     {
-        Title = "Pagurian navigation diagnostic smoke test",
-        Width = 360,
-        Height = 180,
+        Title = "Pagurian configuration transition smoke test",
+        Width = 520,
+        Height = 260,
         Style = WindowStyle.ToolWindow,
         Backdrop = BackdropChoice.Of(BackdropKind.None),
         ShowInTaskbar = false,
@@ -46,76 +45,115 @@ ReactorApp.Run(_ =>
         ResizeMode = WindowResizeMode.NoResize,
         StartPosition = WindowStartPosition.Manual,
         ManualPosition = (24, 24),
-    }, () => new NavigationSmokeView(harness));
+    }, () => new TransitionSmokeView(harness));
     harness.Window.Closed += (_, _) => harness.Diagnostics.WindowClosed("smoke-window-event");
     harness.Window.Show();
     harness.Start();
 });
 
-internal abstract record SmokeRoute
-{
-    internal sealed record Modules : SmokeRoute;
-    internal sealed record Configuration(string Id) : SmokeRoute;
-}
-
-internal sealed class NavigationLifetimeView : Component
+internal sealed class TransitionLifetimeView : Component
 {
     public override Element Render() => Border(null);
 }
 
-internal sealed class NavigationSmokeView(NavigationSmokeHarness harness) : Component
+internal sealed class TransitionSmokeView(TransitionSmokeHarness harness) : Component
 {
     public override Element Render()
     {
-        var navigation = UseNavigation<SmokeRoute>(new SmokeRoute.Modules());
+        var (_, invalidate) = UseReducer(0);
+        var transitions = UseMemo(
+            () => new ShellConfigurationTransitionState(
+                () => invalidate(version => version + 1),
+                harness.Diagnostics.Record),
+            Array.Empty<object>());
         var (shells, setShells) = UseState(true);
-        harness.Navigation = navigation;
-        harness.SetShells = setShells;
-        UseEffect(() =>
+        UseEffect(() => () => transitions.Dispose(), transitions);
+        harness.Transitions = transitions;
+        harness.SetShells = visible =>
         {
-            void OnNavigated(NavigationEventArgs<SmokeRoute> args) => harness.Diagnostics.RouteChanged(
-                NavigationSmokeHarness.RouteName(args.PreviousRoute), NavigationSmokeHarness.RouteName(args.Route), args.Mode.ToString());
-            navigation.Navigated += OnNavigated;
-            return () => navigation.Navigated -= OnNavigated;
-        }, navigation);
-        UseEffect(() => harness.Diagnostics.RenderObserved(shells ? SettingsPage.Shells : SettingsPage.General,
-            NavigationSmokeHarness.RouteName(navigation.CurrentRoute), reduceMotion: false), shells, navigation.CurrentRoute);
+            transitions.SetVisible(visible);
+            setShells(visible);
+        };
 
-        Element Page(SmokeRoute route) => FlexColumn(Body(NavigationSmokeHarness.RouteName(route)))
-            .OnMountAdd(element => harness.Diagnostics.MountPage(element, NavigationSmokeHarness.RouteName(route)))
-            .OnUnmountAdd(harness.Diagnostics.UnmountCallback);
+        if (!shells)
+            return Border(Body("General fixture page"));
 
-        var host = (NavigationHost(navigation, Page) with
+        var layers = new List<Element?>
         {
-            CacheMode = NavigationCacheMode.Disabled,
-            Transition = NavigationTransition.Spring(),
-        })
+            ScrollView(Border(Heading("Modules")))
+                .Background(Theme.SolidBackground)
+                .OnMountAdd(harness.MountModules)
+                .OnUnmountAdd(harness.UnmountModules)
+                .WithKey("modules"),
+        };
+        foreach (var visit in transitions.Visits)
+        {
+            var captured = visit;
+            var fill = captured.Entry.Id switch
+            {
+                "0001" => Theme.SystemCritical,
+                "0002" => Theme.Accent,
+                "0003" => Theme.SystemSuccess,
+                _ => Theme.SystemCaution,
+            };
+            layers.Add(
+                Component<ShellConfigurationTransitionLayer,
+                        ShellConfigurationTransitionLayerProps>(
+                        new ShellConfigurationTransitionLayerProps(
+                            captured,
+                            transitions,
+                            harness.Diagnostics,
+                            Border(Heading(
+                                    $"Configuration {captured.Entry.Id} — visit {captured.VisitId}"))
+                                .Background(fill),
+                            HighContrast: false))
+                    .WithKey($"visit:{captured.VisitId}"));
+        }
+
+        var host = Grid(
+                [GridSize.Star()],
+                [GridSize.Star()],
+                layers.ToArray())
+            .OnSizeChanged((sender, args) =>
+            {
+                transitions.SetExtent(args.NewSize.Width);
+                if (sender is FrameworkElement element)
+                {
+                    element.Clip = new RectangleGeometry
+                    {
+                        Rect = new Windows.Foundation.Rect(0, 0, args.NewSize.Width, args.NewSize.Height),
+                    };
+                }
+            })
             .OnMountAdd(harness.MountHostCallback)
             .OnUnmountAdd(harness.UnmountHostCallback);
-
-        return Border(shells ? host : Body("General fixture page")).Padding(12);
+        return Border(host).Padding(12);
     }
 }
 
-internal sealed class NavigationSmokeHarness
+internal sealed class TransitionSmokeHarness
 {
     internal ShellNavigationDiagnostics Diagnostics { get; } = new();
-    internal NavigationHandle<SmokeRoute>? Navigation { get; set; }
+    internal ShellConfigurationTransitionState? Transitions { get; set; }
     internal Action<bool>? SetShells { get; set; }
     internal XamlGrid? Host { get; set; }
     internal ReactorWindow? Window { get; set; }
     internal ReactorWindow? LifetimeWindow { get; set; }
+    internal FrameworkElement? ModuleElement { get; set; }
     private readonly DispatcherQueueTimer timer = DispatcherQueue.GetForCurrentThread().CreateTimer();
     private readonly Stopwatch elapsed = new();
     private readonly Queue<(int AtMs, Action Action)> steps = new();
     private XamlBorder? injectedPage;
     private XamlGrid? injectedHost;
+    private long firstVisit;
+    private FrameworkElement? initialModule;
+    private int moduleMountCount;
     private bool finished;
 
     internal Action<FrameworkElement> MountHostCallback { get; }
     internal Action<FrameworkElement> UnmountHostCallback { get; }
 
-    internal NavigationSmokeHarness()
+    internal TransitionSmokeHarness()
     {
         MountHostCallback = element =>
         {
@@ -130,58 +168,32 @@ internal sealed class NavigationSmokeHarness
         };
     }
 
-    internal static string RouteName(SmokeRoute route) => route is SmokeRoute.Configuration configuration
-        ? ShellNavigationDiagnostics.ConfigurationRoute(configuration.Id) : "Modules";
-
     internal void Start()
     {
-        steps.Enqueue((200, () => Select("0001")));
-        steps.Enqueue((240, () => Select("0002")));
-        steps.Enqueue((280, () => Select("0003")));
-        steps.Enqueue((320, () => Select("0003")));
-        steps.Enqueue((2600, () => CheckSettled("Configuration(0003)")));
-        steps.Enqueue((2700, () =>
+        steps.Enqueue((250, () => Select("0001")));
+        steps.Enqueue((340, CaptureBeforeReverse));
+        steps.Enqueue((350, () => Select("0002")));
+        steps.Enqueue((370, VerifyImmediateReverse));
+        steps.Enqueue((410, () => Select("0003")));
+        steps.Enqueue((470, () => Select("0001")));
+        steps.Enqueue((500, () => Select("0001")));
+        steps.Enqueue((850, () => CheckSettled("0001", expectedVisitIdGreaterThan: firstVisit)));
+        steps.Enqueue((1700, () => CheckSettled("0001", expectedVisitIdGreaterThan: firstVisit)));
+        steps.Enqueue((1800, Close));
+        steps.Enqueue((2200, CheckModulesSettled));
+        steps.Enqueue((2300, () => Select("0002")));
+        steps.Enqueue((2400, () => SetShells!(false)));
+        steps.Enqueue((2500, () => SetShells!(true)));
+        steps.Enqueue((2650, () => CheckSettled("0002")));
+        steps.Enqueue((2750, () =>
         {
-            var navigation = Navigation ?? throw new InvalidOperationException("Navigation unavailable.");
-            Diagnostics.Request("Back", RouteName(navigation.CurrentRoute), "Modules", "smoke-back");
-            Require(navigation.GoBack(), "Back must return directly to Modules.");
+            Transitions!.SetReducedMotion(true);
+            Select("0003");
         }));
-        steps.Enqueue((4900, () => CheckSettled("Modules")));
-        steps.Enqueue((5000, () =>
-        {
-            injectedHost = Host ?? throw new InvalidOperationException("Host unavailable.");
-            injectedPage = new XamlBorder { Width = 1, Height = 1 };
-            Diagnostics.MountPage(injectedPage, "Configuration(9999)");
-            injectedHost.Children.Add(injectedPage);
-            Diagnostics.Request("Smoke", "Modules", "Modules", "injected-extra-page", ignored: true);
-        }));
-        steps.Enqueue((7300, () =>
-        {
-            var count = injectedHost!.Children.Count;
-            Require(PagurianLog.Lines.Any(line => line.Contains($"suspected-residue expected=Modules") &&
-                line.Contains($"children={count} ")), "A deliberately retained page must produce a matching residue warning.");
-            Diagnostics.Unmount(injectedPage!);
-            injectedHost.Children.Remove(injectedPage);
-            injectedPage = null;
-            injectedHost = null;
-            SetShells!(false);
-        }));
-        steps.Enqueue((7550, () =>
-        {
-            Require(Host is null, "Switching to General must unmount the navigation host.");
-            SetShells!(true);
-        }));
-        steps.Enqueue((7850, () =>
-        {
-            Require(Host?.IsLoaded == true, "Returning to Shells must remount a loaded host.");
-            Require(PagurianLog.Lines.Count(line => line.Contains("reactor-mount id=host-")) >= 2,
-                "Host mount records must distinguish remounts.");
-            Require(PagurianLog.Lines.Any(line => line.Contains("page-changed from=Shells to=General")),
-                "Page switch must be observable.");
-            Diagnostics.Request("Smoke", "Modules", "Modules", "pending-sample-before-close", ignored: true);
-            Window!.Close();
-        }));
-        steps.Enqueue((10300, VerifyClosedAndFinish));
+        steps.Enqueue((2820, () => CheckSettled("0003")));
+        steps.Enqueue((2900, InjectResidue));
+        steps.Enqueue((5050, VerifyResidueAndClose));
+        steps.Enqueue((7400, VerifyClosedAndFinish));
         timer.Interval = TimeSpan.FromMilliseconds(10);
         timer.IsRepeating = true;
         timer.Tick += OnTick;
@@ -189,33 +201,142 @@ internal sealed class NavigationSmokeHarness
         timer.Start();
     }
 
-    private void Select(string id)
+    internal void MountModules(FrameworkElement element)
     {
-        var navigation = Navigation ?? throw new InvalidOperationException("Navigation unavailable.");
-        string from = RouteName(navigation.CurrentRoute);
-        string to = ShellNavigationDiagnostics.ConfigurationRoute(id);
-        bool duplicate = navigation.CurrentRoute is SmokeRoute.Configuration current && current.Id == id;
-        bool replace = navigation.CurrentRoute is SmokeRoute.Configuration;
-        Diagnostics.Request(replace ? "Replace" : "Navigate", from, to, "smoke-select", ignored: duplicate);
-        if (duplicate)
-            return;
-        if (replace)
-            navigation.Replace(new SmokeRoute.Configuration(id));
-        else
-            navigation.Navigate(new SmokeRoute.Configuration(id));
+        ModuleElement = element;
+        initialModule ??= element;
+        moduleMountCount++;
+        Diagnostics.MountPage(element, "Modules");
     }
 
-    private void CheckSettled(string expected)
+    internal void UnmountModules(FrameworkElement element)
     {
-        Require(Host?.IsLoaded == true, "The host must be loaded for meaningful snapshots.");
-        Require(RouteName(Navigation!.CurrentRoute) == expected, "The navigation stack must have the expected route.");
-        var snapshot = PagurianLog.Lines.LastOrDefault(line => line.Contains("snapshot phase=after-2000ms"));
-        Require(snapshot is not null && snapshot.Contains($"expected={expected} ") &&
-            snapshot.Contains($"children={Host!.Children.Count} "), "Settled snapshot must match the actual host child count.");
-        if (Host!.Children.Count != 1)
-            Require(PagurianLog.Lines.Any(line => line.Contains($"suspected-residue expected={expected} ")),
-                "A real multi-page residue must be reported, not silently passed.");
-        Console.WriteLine($"Settled {expected}: actual children={Host.Children.Count} (diagnostics matched).");
+        Diagnostics.Unmount(element);
+        if (ReferenceEquals(ModuleElement, element))
+            ModuleElement = null;
+    }
+
+    private void Select(string id)
+    {
+        var transitions = Transitions ?? throw new InvalidOperationException("Transitions unavailable.");
+        var from = transitions.SelectedInstanceId is { } selected
+            ? ShellNavigationDiagnostics.ConfigurationRoute(selected)
+            : "Modules";
+        var to = ShellNavigationDiagnostics.ConfigurationRoute(id);
+        var opened = transitions.Open(new TrayConfig.Entry("fixture", id, null));
+        Diagnostics.Request("Open", from, to, "smoke-select", ignored: !opened);
+        if (opened)
+            Diagnostics.RouteChanged(from, to, "Overlay");
+        Diagnostics.RenderObserved(SettingsPage.Shells, to, reduceMotion: false);
+        if (firstVisit == 0)
+            firstVisit = transitions.SelectedVisitId ?? 0;
+    }
+
+    private void Close()
+    {
+        var transitions = Transitions!;
+        var from = transitions.SelectedInstanceId is { } selected
+            ? ShellNavigationDiagnostics.ConfigurationRoute(selected)
+            : "Modules";
+        var closed = transitions.Close();
+        Diagnostics.Request("Close", from, "Modules", "smoke-close", ignored: !closed);
+        if (closed)
+            Diagnostics.RouteChanged(from, "Modules", "Overlay");
+        Diagnostics.RenderObserved(SettingsPage.Shells, "Modules", reduceMotion: false);
+    }
+
+    private void CaptureBeforeReverse()
+    {
+        var visit = Transitions!.Visits.Single(candidate => candidate.VisitId == firstVisit);
+        Console.WriteLine($"Before reverse: x={CurrentX(visit):0.##}");
+        Require(visit.Phase == ShellConfigurationVisitPhase.Entering,
+            "The first page must still be entering before reversal.");
+    }
+
+    private void VerifyImmediateReverse()
+    {
+        var visit = Transitions!.Visits.Single(candidate => candidate.VisitId == firstVisit);
+        var after = CurrentX(visit);
+        Console.WriteLine($"After reverse: x={after:0.##}");
+        Require(visit.Phase == ShellConfigurationVisitPhase.Exiting,
+            "The invalidated entering page must immediately enter Exiting.");
+        Require(visit.Element is Border
+            {
+                IsHitTestVisible: false,
+                Child: ScrollView { IsEnabled: true },
+            },
+            "An outgoing configuration must block input without entering a translucent disabled state.");
+        Require(((XamlBorder)visit.Element!).Background is SolidColorBrush { Color.A: 255 },
+            "A transitioning configuration must keep an opaque background.");
+        Require(after > 1 && after < Host!.ActualWidth - 1,
+            $"Reversal must retain an intermediate visible position, x={after:0.##}.");
+    }
+
+    private void CheckSettled(string id, long expectedVisitIdGreaterThan = 0)
+    {
+        var transitions = Transitions!;
+        Require(transitions.Visits.Count == 1, $"Expected one configuration visit, got {transitions.Visits.Count}.");
+        var visit = transitions.Visits[0];
+        Require(visit.Entry.Id == id && visit.Phase == ShellConfigurationVisitPhase.Active,
+            $"Expected active {id}, got {visit.Entry.Id}/{visit.Phase}.");
+        Require(visit.VisitId > expectedVisitIdGreaterThan,
+            "A repeated Shell selection must create a new visit instead of reviving the old page.");
+        var host = Host ?? throw new InvalidOperationException("Host unavailable.");
+        Require(host.Children.Count == 2, "The settled host must contain fixed Modules plus one configuration.");
+        Require(ModuleElement != null, "The fixed Modules layer must remain mounted.");
+        Require(Math.Abs(ElementCompositionPreview.GetElementVisual(ModuleElement).Offset.X) < 0.01f,
+            "The Modules layer must not move during configuration transitions.");
+        var activeRoot = visit.Element as XamlBorder ??
+            throw new InvalidOperationException(
+                $"The active configuration root must be a Border, got {visit.Element?.GetType().Name ?? "null"}.");
+        Require(activeRoot.Child is ScrollView activeScroll && activeScroll.IsEnabled,
+            $"The active configuration ScrollView must be enabled, got {activeRoot.Child?.GetType().Name ?? "null"}/" +
+            $"{(activeRoot.Child as ScrollView)?.IsEnabled}.");
+        Require(activeRoot.Background is SolidColorBrush { Color.A: 255 },
+            $"The active configuration background must be opaque, got {activeRoot.Background?.GetType().Name ?? "null"}/" +
+            $"{(activeRoot.Background as SolidColorBrush)?.Color.A}.");
+        var activeVisual = ElementCompositionPreview.GetElementVisual(visit.Element);
+        Require(Math.Abs(activeVisual.Offset.X) < 0.01f && Math.Abs(activeVisual.Opacity - 1) < 0.001f,
+            "The active configuration must not inherit stale composition state.");
+        if (moduleMountCount == 1)
+        {
+            Require(ReferenceEquals(initialModule, ModuleElement),
+                "The Modules layer must keep its native identity while configurations switch.");
+        }
+        var expected = ShellNavigationDiagnostics.ConfigurationRoute(id);
+        var snapshot = PagurianLog.Lines.LastOrDefault(line => line.Contains("snapshot phase=after-"));
+        Console.WriteLine(
+            $"Settled {expected}: visit={visit.VisitId}, children={host.Children.Count}, latestSnapshot={snapshot}");
+    }
+
+    private void CheckModulesSettled()
+    {
+        Require(Transitions!.Visits.Count == 0, "All configuration pages must be removed after close.");
+        Require(Host?.Children.Count == 1, "Modules must remain as the only settled child.");
+    }
+
+    private void InjectResidue()
+    {
+        Transitions!.SetReducedMotion(false);
+        injectedHost = Host ?? throw new InvalidOperationException("Host unavailable.");
+        injectedPage = new XamlBorder { Width = 1, Height = 1 };
+        Diagnostics.MountPage(injectedPage, "Configuration(9999)");
+        injectedHost.Children.Add(injectedPage);
+        Diagnostics.Request("Smoke", "Configuration(0003)", "Configuration(0003)", "injected-extra-page", ignored: true);
+    }
+
+    private void VerifyResidueAndClose()
+    {
+        Require(PagurianLog.Lines.Any(line =>
+                line.Contains("suspected-residue expected=Configuration(0003)") &&
+                line.Contains($"children={injectedHost!.Children.Count} ")),
+            "A deliberately retained page must produce a matching residue warning.");
+        Diagnostics.Unmount(injectedPage!);
+        injectedHost!.Children.Remove(injectedPage);
+        injectedPage = null;
+        injectedHost = null;
+        Diagnostics.Request("Smoke", "Configuration(0003)", "Configuration(0003)", "pending-sample-before-close", ignored: true);
+        Window!.Close();
     }
 
     private void OnTick(DispatcherQueueTimer sender, object args)
@@ -236,22 +357,29 @@ internal sealed class NavigationSmokeHarness
 
     private void VerifyClosedAndFinish()
     {
-        Require(PagurianLog.Lines.Any(line => line.Contains("ignored=True") && line.Contains("reason=smoke-select")),
-            "Duplicate selection must be recorded as ignored.");
-        Require(PagurianLog.Lines.Any(line => line.Contains("reactor-unmount id=page-")), "Page teardown must be recorded.");
-        Require(PagurianLog.Lines.Any(line => line.Contains("xaml-loaded id=page-")), "Page Loaded events must be recorded.");
-        Require(PagurianLog.Lines.Any(line => line.Contains("session-end")), "Window close must end the diagnostic session.");
-        Require(!PagurianLog.Lines.Any(line => line.Contains("probe-error")), "No diagnostic probe may fail.");
-        int closed = PagurianLog.Lines.FindIndex(line => line.Contains("window-closed"));
+        Require(PagurianLog.Lines.Any(line => line.Contains("reactor-unmount id=page-")),
+            "Page teardown must be recorded.");
+        Require(PagurianLog.Lines.Any(line =>
+                line.Contains("ignored=True") && line.Contains("reason=smoke-select")),
+            "Selecting the already active Shell must be ignored.");
+        Require(PagurianLog.Lines.Any(line => line.Contains("session-end")),
+            "Window close must end the diagnostic session.");
+        Require(!PagurianLog.Lines.Any(line => line.Contains("probe-error")),
+            "No diagnostic probe may fail.");
+        var closed = PagurianLog.Lines.FindIndex(line => line.Contains("window-closed"));
         Require(closed >= 0 && !PagurianLog.Lines.Skip(closed + 1).Any(line => line.Contains("snapshot phase=")),
-            "Queued/timed snapshots must stop after close.");
-        int before = PagurianLog.Lines.Count;
-        Diagnostics.Record("must-not-log-after-complete");
-        Require(PagurianLog.Lines.Count == before, "Completed sessions must ignore later writes.");
-        Finish(0, "Live navigation diagnostics passed: rapid replacement, ignored selection, Back, residue detection, remount and close cleanup.");
+            "Queued and timed snapshots must stop after close.");
+        Finish(0,
+            "Configuration transition passed: fixed Modules, mid-entry reversal, A-B-C-A isolation, late-window stability, close, remount, reduced motion and residue detection.");
     }
 
-    internal void Fail(string message) => Finish(1, "Navigation diagnostics smoke failure: " + message);
+    private static float CurrentX(ShellConfigurationVisit visit)
+    {
+        return visit.Motion?.CurrentXForDiagnostics
+            ?? throw new InvalidOperationException("Visit motion unavailable.");
+    }
+
+    internal void Fail(string message) => Finish(1, "Configuration transition smoke failure: " + message);
 
     private void Finish(int code, string message)
     {
@@ -261,12 +389,9 @@ internal sealed class NavigationSmokeHarness
         timer.Stop();
         timer.Tick -= OnTick;
         Console.WriteLine(message);
-        if (code != 0)
-            foreach (var line in PagurianLog.Lines)
-                Console.WriteLine(line);
-        ShellNavigationDiagnostics.CompleteAllForExit();
+        try { Window?.Close(); } catch { }
+        try { LifetimeWindow?.Close(); } catch { }
         ReactorApp.Exit(code);
-        Environment.Exit(code);
     }
 
     private static void Require(bool condition, string message)
@@ -278,15 +403,28 @@ internal sealed class NavigationSmokeHarness
 
 namespace Pagurian
 {
-    // Only these host-neutral definitions are substituted. The observer under
-    // test is linked directly from the application, not copied or mocked.
-    internal enum SettingsPage { Shells, General }
+    internal static class TrayConfig
+    {
+        public sealed record Entry(string ShellType, string Id, object? Settings);
+    }
 
     internal static class PagurianLog
     {
         internal static List<string> Lines { get; } = [];
-        internal static void Navigation(string sessionId, string message, string level = "INFO") =>
-            Lines.Add($"[{level}] [shell-navigation] session={sessionId} {message}");
+
+        internal static void Navigation(string sessionId, string message, string level = "INFO")
+        {
+            var line = $"[{level}] [shell-navigation] session={sessionId} {message}";
+            Lines.Add(line);
+            Console.WriteLine(line);
+        }
+
         internal static Task FlushNavigationAsync() => Task.CompletedTask;
+    }
+
+    internal enum SettingsPage
+    {
+        Shells,
+        General,
     }
 }

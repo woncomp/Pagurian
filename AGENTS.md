@@ -210,12 +210,18 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   names, never display numbers; disconnected configured displays listed
   below, one row per display covering both edges)
   and switches which display's trays are being edited. Selecting a display
-  alone never dirties the draft. The center uses a nested
-  `NavigationHost` with `Modules` and per-instance `ShellConfiguration`
-  routes: configurations enter from the right with
-  `NavigationTransition.Spring()`, and Back plays the reverse transition.
-  Reduce Motion uses `NavigationTransition.None`. Only the scrollable center
-  participates; the Tray/footer remains fixed outside the transition. Module
+  alone never dirties the draft. The center keeps the Modules page mounted
+  and fixed while each `ShellConfiguration` visit uses its own opaque,
+  clipped overlay and smooth horizontal motion. A configuration enters from
+  the right and exits to the right; selecting another shell during entry
+  reverses the old visit from its current position while the new visit enters
+  independently. Re-selecting a shell after another selection creates a new
+  visit rather than reviving the exiting one. Reduce Motion swaps and removes
+  overlays immediately. Overlay mount reasserts its opaque native background
+  because pooled Borders can return with a cleared dynamic-resource property;
+  unmount resets Composition offset, opacity and hit testing before pooling.
+  Only the scrollable center participates; the
+  Tray/footer remains fixed outside the transition. Module
   Shells are drag-only:
   any drag movement starts the native drag immediately, and dropping it into the Tray
   adds it. Drag a Tray icon within the Tray to reorder it, or drop it onto the
@@ -267,11 +273,12 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
 - `ShellNavigationDiagnostics.cs` — passive Shell configuration navigation
   probes on the existing host/page controls (no wrappers or Composition access).
   The unified log's `shell-navigation` tag correlates session, PID, event sequence,
-  navigation requests, accepted routes, Reactor mount/unmount and XAML
+  selection requests, accepted overlay routes, visit lifecycle,
+  Reactor mount/unmount and XAML
   Loaded/Unloaded. Coalesced snapshots after navigation and at 250ms/1s/2s list
-  native host children; `suspected-residue` at the final check is a diagnostic
-  hint, not proof of compositor state. XAML opacity is explicitly not animated
-  Composition opacity. Payloads contain IDs and structural metadata, never
+  the fixed Modules layer and configuration overlays; `suspected-residue` at
+  the final check is a diagnostic hint, not proof of compositor state.
+  Payloads contain IDs and structural metadata, never
   configuration values or control text. A bounded asynchronous writer reports
   queue overflow and flushes on close/exit. Reproduce rapid A→B→C selection,
   wait at least 2 seconds, then inspect this tag before closing Settings.

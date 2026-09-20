@@ -13,5 +13,8 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.UI.Reactor" Version="0.1.0-preview.12" />
     <Compile Include="..\..\..\Pagurian\ShellNavigationDiagnostics.cs" Link="ShellNavigationDiagnostics.cs" />
+    <Compile Include="..\..\..\Pagurian\ShellConfigurationPageMotion.cs" Link="ShellConfigurationPageMotion.cs" />
+    <Compile Include="..\..\..\Pagurian\ShellConfigurationTransitionState.cs" Link="ShellConfigurationTransitionState.cs" />
+    <Compile Include="..\..\..\Pagurian\ShellConfigurationTransitionLayer.cs" Link="ShellConfigurationTransitionLayer.cs" />
   </ItemGroup>
 </Project>

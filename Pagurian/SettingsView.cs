@@ -6,11 +6,11 @@ using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Reactor.Hooks;
 using Microsoft.UI.Reactor.Input;
 using Microsoft.UI.Reactor.Layout;
-using Microsoft.UI.Reactor.Navigation;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Pagurian.Sdk;
 using Windows.Foundation;
 using Windows.Storage.Pickers;
@@ -240,57 +240,52 @@ class SettingsView : Component
         int CandidateIndex,
         TrayId Tray);
 
-    private abstract record ShellEditorRoute
-    {
-        public sealed record Modules : ShellEditorRoute;
-        public sealed record Configuration(string InstanceId) : ShellEditorRoute;
-    }
-
-    private static readonly ShellEditorRoute ModulesRoute = new ShellEditorRoute.Modules();
-
-    private static string DiagnosticRoute(ShellEditorRoute route) => route switch
-    {
-        ShellEditorRoute.Configuration configuration =>
-            ShellNavigationDiagnostics.ConfigurationRoute(configuration.InstanceId),
-        _ => "Modules",
-    };
-
     public override Element Render()
     {
         var (page, setPage) = UseState(SettingsWindow.RequestedPage);
-        var shellNavigation = UseNavigation<ShellEditorRoute>(ModulesRoute);
-        UseEffect(() =>
-        {
-            void OnNavigated(NavigationEventArgs<ShellEditorRoute> args) =>
-                _navigationDiagnostics.RouteChanged(
-                    DiagnosticRoute(args.PreviousRoute), DiagnosticRoute(args.Route), args.Mode.ToString());
-            shellNavigation.Navigated += OnNavigated;
-            return () => shellNavigation.Navigated -= OnNavigated;
-        }, shellNavigation);
+        var (_, invalidateTransitions) = UseReducer(0);
+        var configurationTransitions = UseMemo(
+            () => new ShellConfigurationTransitionState(
+                () => invalidateTransitions(version => version + 1),
+                _navigationDiagnostics.Record),
+            Array.Empty<object>());
+        UseEffect(() => () => configurationTransitions.Dispose(), configurationTransitions);
         UseEffect(() =>
         {
             void OnPageRequested(SettingsPage requested)
             {
                 _navigationDiagnostics.Record($"page-request source=tray-menu target={requested}");
+                configurationTransitions.SetVisible(requested == SettingsPage.Shells);
                 setPage(requested);
             }
             SettingsWindow.PageRequested += OnPageRequested;
             return () => SettingsWindow.PageRequested -= OnPageRequested;
-        }, Array.Empty<object>());
+        }, configurationTransitions);
 
         var colorScheme = UseColorScheme();
         var highContrastScheme = UseHighContrastScheme();
         var reduceMotion = UseReducedMotion();
+        UseEffect(
+            () => configurationTransitions.SetReducedMotion(reduceMotion),
+            configurationTransitions,
+            reduceMotion);
+        UseEffect(
+            () => configurationTransitions.SetVisible(page == SettingsPage.Shells),
+            configurationTransitions,
+            page);
+        var selectedId = configurationTransitions.SelectedInstanceId;
+        var diagnosticRoute = selectedId == null
+            ? "Modules"
+            : ShellNavigationDiagnostics.ConfigurationRoute(selectedId);
         UseEffect(() => _navigationDiagnostics.RenderObserved(
-            page, DiagnosticRoute(shellNavigation.CurrentRoute), reduceMotion),
-            page, shellNavigation.CurrentRoute, reduceMotion);
+            page, diagnosticRoute, reduceMotion),
+            page, diagnosticRoute, reduceMotion);
         var (initialFocusRef, requestInitialFocus) = this.UseElementFocus();
         UseEffect(() =>
         {
-            if (page == SettingsPage.Shells &&
-                shellNavigation.CurrentRoute is ShellEditorRoute.Modules)
+            if (page == SettingsPage.Shells && selectedId == null)
                 requestInitialFocus();
-        }, page, shellNavigation.CurrentRoute);
+        }, page, selectedId);
         var highContrast = colorScheme == ColorScheme.HighContrast;
 
         var configurationTheme = UseMemo(
@@ -304,9 +299,6 @@ class SettingsView : Component
         var initialDraft = UseMemo(LoadDraftTrays, Array.Empty<object>());
         var (draft, setDraft) = UseState(initialDraft);
         var (dirty, setDirty) = UseState(false);
-        var selectedId = shellNavigation.CurrentRoute is ShellEditorRoute.Configuration configurationRoute
-            ? configurationRoute.InstanceId
-            : null;
         var (selectedTrayId, setSelectedTrayId) = UseState(TrayId.PrimaryLeft);
         var (monitorPickerOpen, setMonitorPickerOpen) = UseState(false);
         var (monitorPickerOffset, setMonitorPickerOffset) = UseState(new Point(0, 0));
@@ -334,42 +326,48 @@ class SettingsView : Component
         draftRef.Current = draft;
         selectedTrayRef.Current = selectedTrayId;
         dragSessionRef.Current = dragSession;
+        if (selectedId != null &&
+            draft.SelectMany(tray => tray.Entries).FirstOrDefault(entry => entry.Id == selectedId) is { } activeEntry)
+        {
+            configurationTransitions.RefreshCurrent(activeEntry);
+        }
 
         void OpenConfiguration(string instanceId)
         {
-            var from = DiagnosticRoute(shellNavigation.CurrentRoute);
+            var currentId = configurationTransitions.SelectedInstanceId;
+            var from = currentId == null
+                ? "Modules"
+                : ShellNavigationDiagnostics.ConfigurationRoute(currentId);
             var to = ShellNavigationDiagnostics.ConfigurationRoute(instanceId);
-            if (shellNavigation.CurrentRoute is ShellEditorRoute.Configuration current)
-            {
-                if (current.InstanceId == instanceId)
-                {
-                    _navigationDiagnostics.Request("Replace", from, to, "tray-select", ignored: true);
-                    return;
-                }
+            var entry = draftRef.Current
+                .SelectMany(tray => tray.Entries)
+                .FirstOrDefault(candidate => candidate.Id == instanceId);
+            if (entry == null)
+                return;
 
-                _navigationDiagnostics.Request("Replace", from, to, "tray-select");
-                shellNavigation.Replace(new ShellEditorRoute.Configuration(instanceId));
+            if (currentId == instanceId)
+            {
+                _navigationDiagnostics.Request("Open", from, to, "tray-select", ignored: true);
                 return;
             }
 
-            _navigationDiagnostics.Request("Navigate", from, to, "tray-select");
-            shellNavigation.Navigate(new ShellEditorRoute.Configuration(instanceId));
+            _navigationDiagnostics.Request("Open", from, to, "tray-select");
+            configurationTransitions.Open(entry);
+            _navigationDiagnostics.RouteChanged(from, to, "Overlay");
         }
 
         void BackToModules() => ReturnToModules("back-button");
 
         void ReturnToModules(string reason)
         {
-            _navigationDiagnostics.Request("Back", DiagnosticRoute(shellNavigation.CurrentRoute), "Modules", reason,
-                ignored: shellNavigation.CurrentRoute is ShellEditorRoute.Modules);
-            if (shellNavigation.CurrentRoute is ShellEditorRoute.Modules)
+            var currentId = configurationTransitions.SelectedInstanceId;
+            var from = currentId == null
+                ? "Modules"
+                : ShellNavigationDiagnostics.ConfigurationRoute(currentId);
+            _navigationDiagnostics.Request("Close", from, "Modules", reason, ignored: currentId == null);
+            if (!configurationTransitions.Close())
                 return;
-
-            if (!shellNavigation.GoBack())
-            {
-                _navigationDiagnostics.Record("back-fallback operation=Reset target=Modules");
-                shellNavigation.Reset(ModulesRoute);
-            }
+            _navigationDiagnostics.RouteChanged(from, "Modules", "Overlay");
         }
 
         // The draft is a list of per-display trays; editing targets the tray
@@ -532,12 +530,12 @@ class SettingsView : Component
 
         UseEffect(() =>
         {
-            if (shellNavigation.CurrentRoute is ShellEditorRoute.Configuration current &&
-                draft.SelectMany(t => t.Entries).All(entry => entry.Id != current.InstanceId))
+            if (selectedId != null &&
+                draft.SelectMany(t => t.Entries).All(entry => entry.Id != selectedId))
             {
                 ReturnToModules("missing-instance");
             }
-        }, shellNavigation.CurrentRoute, draft);
+        }, selectedId, draft);
 
         var autoScrollTimer = UseMemo(() =>
         {
@@ -980,7 +978,8 @@ class SettingsView : Component
             }
 
             dragSessionRef.Current = null;
-            if ((removedId ?? crossTrayRemovedId) != null && selectedId == (removedId ?? crossTrayRemovedId))
+            if ((removedId ?? crossTrayRemovedId) != null &&
+                configurationTransitions.SelectedInstanceId == (removedId ?? crossTrayRemovedId))
                 ReturnToModules("drag-remove");
             setDragSession(null);
         }
@@ -1032,7 +1031,7 @@ class SettingsView : Component
                 var next = entries.Where(entry => entry.Id != instanceId).ToList();
                 return next.Count == entries.Count ? entries : next;
             });
-            if (removed && selectedId == instanceId)
+            if (removed && configurationTransitions.SelectedInstanceId == instanceId)
                 ReturnToModules("remove-instance");
         }
 
@@ -1090,8 +1089,9 @@ class SettingsView : Component
         void RevertDraft()
         {
             var next = LoadDraftTrays();
-            if (selectedId != null &&
-                next.SelectMany(t => t.Entries).All(entry => entry.Id != selectedId))
+            var currentId = configurationTransitions.SelectedInstanceId;
+            if (currentId != null &&
+                next.SelectMany(t => t.Entries).All(entry => entry.Id != currentId))
                 ReturnToModules("revert");
             draftRef.Current = next;
             setDraft(next);
@@ -1110,8 +1110,9 @@ class SettingsView : Component
                     .ToArray());
                 setAppliedDir(HostSettings.ConfigDir);
                 setDirText(HostSettings.ConfigDir);
-                if (selectedId != null &&
-                    next.SelectMany(t => t.Entries).All(entry => entry.Id != selectedId))
+                var currentId = configurationTransitions.SelectedInstanceId;
+                if (currentId != null &&
+                    next.SelectMany(t => t.Entries).All(entry => entry.Id != currentId))
                     ReturnToModules("config-directory-change");
                 draftRef.Current = next;
                 setDraft(next);
@@ -1340,14 +1341,9 @@ class SettingsView : Component
                     .Margin(0, 4, 0, 0),
                 catalogContent.Margin(0, 16, 0, 0));
 
-        Element ConfigurationPanel(string instanceId)
+        Element ConfigurationPanel(ShellConfigurationVisit visit)
         {
-            var selectedEntry = draft
-                .SelectMany(t => t.Entries)
-                .FirstOrDefault(entry => entry.Id == instanceId);
-            if (selectedEntry == null)
-                return ModulesPanel();
-
+            var selectedEntry = visit.Entry;
             var selectedName = NameFor(selectedEntry.ShellType);
             var removeBackground = highContrast
                 ? Theme.Ref("SystemColorHighlightColorBrush")
@@ -1368,7 +1364,11 @@ class SettingsView : Component
                                     .Foreground(Theme.SecondaryText)
                                     .Margin(0, 4, 0, 0))
                             .Grid(row: 0, column: 0),
-                        Button("Remove", () => RemoveInstance(selectedEntry.Id))
+                        Button("Remove", () =>
+                            {
+                                if (configurationTransitions.IsCurrent(visit.VisitId))
+                                    RemoveInstance(selectedEntry.Id);
+                            })
                             .Resources(resources => resources
                                 .Set("ButtonBackground", removeBackground)
                                 .Set("ButtonBackgroundPointerOver", removeBackground)
@@ -1380,7 +1380,11 @@ class SettingsView : Component
                                 .Set("ButtonForegroundPointerOver", removeForeground)
                                 .Set("ButtonForegroundPressed", removeForeground))
                             .Grid(row: 0, column: 1),
-                        Button("Back to modules", BackToModules)
+                        Button("Back to modules", () =>
+                            {
+                                if (configurationTransitions.IsCurrent(visit.VisitId))
+                                    BackToModules();
+                            })
                             .Margin(8, 0, 0, 0)
                             .Grid(row: 0, column: 2),
                     ]),
@@ -1388,39 +1392,60 @@ class SettingsView : Component
                         selectedEntry,
                         configurationTheme,
                         highContrast,
-                        settings => UpdateEntrySettings(selectedEntry.Id, settings))
+                        settings =>
+                        {
+                            if (configurationTransitions.IsCurrent(visit.VisitId))
+                                UpdateEntrySettings(selectedEntry.Id, settings);
+                            else
+                                _navigationDiagnostics.Record(
+                                    $"stale-edit ignored visit={visit.VisitId} route={ShellNavigationDiagnostics.ConfigurationRoute(selectedEntry.Id)}");
+                        },
+                        visit.VisitId)
                     .Margin(0, 16, 0, 0));
         }
 
-        Element PanelForRoute(ShellEditorRoute route)
+        Element ConfigurationLayer(ShellConfigurationVisit visit)
         {
-            var content = route switch
-            {
-                ShellEditorRoute.Configuration configuration =>
-                    ConfigurationPanel(configuration.InstanceId),
-                _ => ModulesPanel(),
-            };
-            var displayedRoute = route is ShellEditorRoute.Configuration selected &&
-                draft.SelectMany(t => t.Entries).All(entry => entry.Id != selected.InstanceId)
-                ? "Modules"
-                : DiagnosticRoute(route);
-            return content
-                .OnMountAdd(element => _navigationDiagnostics.MountPage(element, displayedRoute))
-                .OnUnmountAdd(_navigationDiagnostics.UnmountCallback);
+            return Component<ShellConfigurationTransitionLayer,
+                    ShellConfigurationTransitionLayerProps>(
+                    new ShellConfigurationTransitionLayerProps(
+                        visit,
+                        configurationTransitions,
+                        _navigationDiagnostics,
+                        ConfigurationPanel(visit),
+                        highContrast))
+                .WithKey($"configuration-visit:{visit.VisitId}");
         }
 
-        var panelBody = (NavigationHost(shellNavigation, PanelForRoute) with
+        var editorLayers = new List<Element?>
         {
-            CacheMode = NavigationCacheMode.Disabled,
-            Transition = reduceMotion
-                ? NavigationTransition.None
-                : NavigationTransition.Spring(),
-        })
+            ScrollView(Border(ModulesPanel()).Padding(24))
+                .HorizontalContentAlignment(HorizontalAlignment.Stretch)
+                .Set(element =>
+                    element.IsHitTestVisible = configurationTransitions.Visits.Count == 0)
+                .OnMountAdd(element => _navigationDiagnostics.MountPage(element, "Modules"))
+                .OnUnmountAdd(_navigationDiagnostics.UnmountCallback)
+                .WithKey("modules"),
+        };
+        editorLayers.AddRange(configurationTransitions.Visits.Select(ConfigurationLayer));
+
+        var panelBody = Grid(
+                [GridSize.Star()],
+                [GridSize.Star()],
+                editorLayers.ToArray())
+            .OnSizeChanged((sender, args) =>
+            {
+                configurationTransitions.SetExtent(args.NewSize.Width);
+                if (sender is FrameworkElement element)
+                {
+                    element.Clip = new RectangleGeometry
+                    {
+                        Rect = new Rect(0, 0, args.NewSize.Width, args.NewSize.Height),
+                    };
+                }
+            })
             .OnMountAdd(_navigationDiagnostics.MountHostCallback)
             .OnUnmountAdd(_navigationDiagnostics.UnmountCallback);
-
-        var scrollBody = ScrollView(Border(panelBody).Padding(24))
-            .HorizontalContentAlignment(HorizontalAlignment.Stretch);
 
         var header = Grid(
                 [GridSize.Star(), GridSize.Auto, GridSize.Auto, GridSize.Auto],
@@ -1461,7 +1486,7 @@ class SettingsView : Component
             ? highContrast ? Theme.Ref("SystemColorHighlightColorBrush") : Theme.SystemCritical
             : cardStroke;
 
-        var panel = (Border(scrollBody) with { CornerRadius = 8 })
+        var panel = (Border(panelBody) with { CornerRadius = 8 })
             .Background(panelBackground)
             .WithBorder(panelStroke, removeHot || highContrast ? 2 : 1)
             .AutomationName("Shell editor")
@@ -1835,6 +1860,7 @@ class SettingsView : Component
                     setMonitorPickerOpen(false);
                 }
                 _navigationDiagnostics.Record($"page-request source=navigation-view target={nextPage}");
+                configurationTransitions.SetVisible(nextPage == SettingsPage.Shells);
                 setPage(nextPage);
             },
             PaneDisplayMode = NavigationViewPaneDisplayMode.Left,
@@ -1974,7 +2000,8 @@ class SettingsView : Component
         TrayConfig.Entry entry,
         IThemeService configurationTheme,
         bool highContrast,
-        Action<JsonElement?> setSettings)
+        Action<JsonElement?> setSettings,
+        long visitId)
     {
         Element content;
         if (!ModuleLoader.TryGetKind(entry.ShellType, out var kind))
@@ -2001,7 +2028,7 @@ class SettingsView : Component
                 configurationTheme,
                 Logger.For($"{entry.ShellType}#{entry.Id}"));
             content = new ComponentElement(kind.ConfigurationView, props)
-                .WithKey($"configuration:{entry.ShellType}:{entry.Id}");
+                .WithKey($"configuration:{entry.ShellType}:{entry.Id}:{visitId}");
         }
 
         return Border(content)
