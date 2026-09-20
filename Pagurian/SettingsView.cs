@@ -474,10 +474,51 @@ class SettingsView : Component
             DisplayTopology.Refresh();
             if (monitorButtonRef.Current is { } button && windowRootRef.Current is { } root)
             {
+                var (width, height) = EstimatePickerSize();
                 var origin = button.TransformToVisual(root).TransformPoint(new Point(0, 0));
-                setMonitorPickerOffset(new Point(origin.X, origin.Y + button.ActualHeight + 4));
+                // The button sits at the bottom edge of the window: open the
+                // picker fully above it (right-aligned), clamped inside the
+                // window — like FlyoutPlacementMode.TopEdgeAlignedRight.
+                var x = Math.Clamp(
+                    origin.X + button.ActualWidth - width,
+                    8,
+                    Math.Max(8, root.ActualWidth - width - 8));
+                var y = Math.Clamp(
+                    origin.Y - height - 4,
+                    8,
+                    Math.Max(8, root.ActualHeight - height - 8));
+                setMonitorPickerOffset(new Point(x, y));
             }
             setMonitorPickerOpen(true);
+        }
+
+        // Mirrors the BuildMonitorPicker layout math so OpenMonitorPicker can
+        // place the popup without a measure pass. Slightly overestimates
+        // height, which only shifts the popup further into the window.
+        (double Width, double Height) EstimatePickerSize()
+        {
+            var displays = DisplayTopology.Displays;
+            double canvasWidth = 0, canvasHeight = 0;
+            if (displays.Count > 0)
+            {
+                var originX = displays.Min(d => d.Rect.Left);
+                var originY = displays.Min(d => d.Rect.Top);
+                var virtualWidth = displays.Max(d => d.Rect.Right) - originX;
+                var virtualHeight = displays.Max(d => d.Rect.Bottom) - originY;
+                const double maxWidth = 320, maxHeight = 180;
+                var scale = Math.Min(
+                    maxWidth / Math.Max(1, virtualWidth),
+                    maxHeight / Math.Max(1, virtualHeight));
+                canvasWidth = virtualWidth * scale;
+                canvasHeight = virtualHeight * scale;
+            }
+            var tileTrays = displays.Select(TrayIdForDisplay).ToHashSet();
+            var extras = draftRef.Current.Count(tray => !tileTrays.Contains(tray.Id));
+            // 16 padding per side; extras cost ~22 for the header caption and
+            // ~50 per row; 24 slack for borders and estimate drift.
+            var width = Math.Max(canvasWidth, 200) + 32;
+            var height = canvasHeight + (extras > 0 ? 22 + extras * 50 : 0) + 32 + 24;
+            return (width, height);
         }
 
         UseEffect(() =>
