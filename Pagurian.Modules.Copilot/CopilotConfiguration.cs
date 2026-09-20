@@ -47,12 +47,45 @@ class CopilotConfiguration : ShellConfiguration
 
 class UsageConfiguration : ShellConfiguration
 {
-    public override Element Render() =>
-        FlexColumn(
+    public override Element Render()
+    {
+        var injected = UseContext(UsageConfigurationContext.Source);
+        var model = UseMemo(() => injected is not null
+            ? injected.CreateModel(Settings, message => Log.Warn(message))
+            : new CopilotUsageModel(CopilotModule.Instance.Usage, Settings,
+                message => Log.Warn(message),
+                action => ReactorApp.UIDispatcher!.TryEnqueue(() => action())),
+            injected, InstanceId);
+        var (_, setVersion) = UseState(0);
+        var tick = UseRef(0);
+        var scheme = UseColorScheme();
+        var theme = Theme;
+        UseEffect(() =>
+        {
+            void Changed() => setVersion(++tick.Current);
+            model.Changed += Changed;
+            return () => { model.Changed -= Changed; model.Dispose(); };
+        }, model);
+        UseEffect(() =>
+        {
+            void Changed() => setVersion(++tick.Current);
+            theme.Changed += Changed;
+            return () => theme.Changed -= Changed;
+        }, theme);
+        UseEffect(() => model.ApplySettings(Settings), model, Settings?.GetRawText());
+
+        return FlexColumn(
             BodyStrong("Account")
                 .HeadingLevel(AutomationHeadingLevel.Level2),
-            Component<CopilotAccountPanel>()
-                .Margin(0, 8, 0, 0));
+            CopilotAccountPanel.AccountCard(model.State,
+                    injected?.Login ?? CopilotModule.Instance.Usage.Login,
+                    scheme == ColorScheme.HighContrast)
+                .Margin(0, 8, 0, 0),
+            UsageCalendarView.Render(model.Pace, date =>
+                SetSettings(model.Schedule.Toggle(date).Write(Settings)),
+                theme.IsDark, scheme == ColorScheme.HighContrast)
+                .Margin(0, 16, 0, 0));
+    }
 }
 
 class CopilotAccountPanel : Component
@@ -77,7 +110,7 @@ class CopilotAccountPanel : Component
             colorScheme == ColorScheme.HighContrast);
     }
 
-    private static BorderElement AccountCard(
+    internal static BorderElement AccountCard(
         CopilotUsageState state,
         Action login,
         bool highContrast)

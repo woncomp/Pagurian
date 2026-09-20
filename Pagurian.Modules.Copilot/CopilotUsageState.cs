@@ -20,7 +20,10 @@ internal sealed record CopilotUsageQuota(
     long EntitlementRequests,
     bool IsUnlimited,
     double? UsedPercentage,
-    DateTimeOffset? ResetDate)
+    DateTimeOffset? ResetDate,
+    DateTimeOffset? RawResetDate = null,
+    bool ResetIsEstimated = false,
+    DateTimeOffset? ReadStartedAt = null)
 {
     public string PercentageText =>
         UsedPercentage is { } percentage
@@ -155,7 +158,10 @@ internal static class CopilotUsageNormalizer
             entitlement,
             unlimited,
             usedPercentage,
-            NormalizeResetDate(resetAt, now));
+            NormalizeResetDate(resetAt, now),
+            resetAt,
+            resetAt is null || resetAt <= now,
+            now);
     }
 
     private static DateTimeOffset NormalizeResetDate(
@@ -165,9 +171,10 @@ internal static class CopilotUsageNormalizer
         if (resetAt is { } value && value > now)
             return value;
 
+        var utc = now.ToUniversalTime();
         var currentMonth = new DateTimeOffset(
-            now.Year,
-            now.Month,
+            utc.Year,
+            utc.Month,
             1,
             0,
             0,

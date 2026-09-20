@@ -14,7 +14,7 @@ namespace Pagurian.Modules.Copilot;
 // threads; immutable snapshots are published through Reactor's UI dispatcher.
 // Refreshes and logins are each coalesced, and a shared gate serializes the two
 // operations so account changes cannot race a quota read.
-internal sealed class CopilotUsageService
+internal sealed class CopilotUsageService : ICopilotUsageSource
 {
     private static readonly TimeSpan RefreshInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan OperationShutdownTimeout =
@@ -300,12 +300,21 @@ internal sealed class CopilotUsageService
         }
 
         Publish(generation, state => state.WithAccount(account));
-        var quota = await client.Rpc.Account
-            .GetQuotaAsync(null, null, token)
-            .ConfigureAwait(false);
-        var snapshots = quota.QuotaSnapshots;
+        var readStartedAt = DateTimeOffset.UtcNow;
+        var quota = await client.Rpc.Account.GetQuotaAsync(null, null, token).ConfigureAwait(false);
+        var premium = NormalizePremiumInteractions(quota.QuotaSnapshots);
+        if (premium?.ResetDate is { } reset && readStartedAt < reset.AddMonths(-1))
+        {
+            // A request spanning reset can normalize into the next fallback
+            // cycle. Read once more *after* the boundary, within the existing
+            // serialized operation; do not rely on a coalesced Refresh request
+            // to start another read while this task is still completing.
+            readStartedAt = DateTimeOffset.UtcNow;
+            quota = await client.Rpc.Account.GetQuotaAsync(null, null, token).ConfigureAwait(false);
+            premium = NormalizePremiumInteractions(quota.QuotaSnapshots);
+        }
         var usage = new CopilotUsageSnapshot(
-            NormalizePremiumInteractions(snapshots));
+            premium is null ? null : premium with { ReadStartedAt = readStartedAt });
 
         Publish(
             generation,

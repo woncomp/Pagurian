@@ -10,12 +10,12 @@ using ReactorTheme = Microsoft.UI.Reactor.Core.Theme;
 
 namespace Pagurian.Modules.Copilot;
 
-// Account and quota details for the module-wide Copilot usage service.
+// Account/quota remain shared; the workday comparison belongs to this shell.
 class UsageBillboard : Billboard
 {
-    private readonly CopilotUsageService _service;
+    private readonly CopilotUsageModel _service;
 
-    public UsageBillboard(CopilotUsageService service) => _service = service;
+    public UsageBillboard(CopilotUsageModel service) => _service = service;
 
     public override double WidthDip => 440;
 
@@ -57,7 +57,9 @@ class UsageBillboard : Billboard
                 ? StatusCard(state, highContrast)
                 : null,
             AccountCard(state.Account, highContrast),
-            PremiumInteractionsCard(usage.PremiumInteractions, highContrast));
+            PremiumInteractionsCard(usage.PremiumInteractions, highContrast),
+            Component<UsagePaceCard, UsagePaceCardProps>(
+                new(_service.Pace, Theme.IsDark, highContrast)));
 
         var content = FlexColumn(
             Subtitle("Copilot Usage")
@@ -71,7 +73,7 @@ class UsageBillboard : Billboard
             })
                 .Margin(0, 8, 0, 0)
                 .HorizontalContentAlignment(HorizontalAlignment.Stretch)
-                .Flex(1));
+                .Flex(grow: 1, basis: 0));
 
         return Page(content, highContrast)
             .RequestedTheme(requestedTheme);
@@ -223,11 +225,6 @@ class UsageBillboard : Billboard
                 $"{FormatCount(category.UsedRequests)} / " +
                 FormatCount(category.EntitlementRequests),
         };
-        var percentage = category switch
-        {
-            null => "--",
-            _ => category.PercentageText,
-        };
         var reset = category switch
         {
             null => "--",
@@ -246,7 +243,6 @@ class UsageBillboard : Billboard
                             .Foreground(ReactorTheme.SecondaryText)
                         : null,
                 ValueRow("Used / entitlement", usedAndEntitlement),
-                ValueRow("Used percentage", percentage),
                 ValueRow("Reset time", reset)),
             highContrast);
     }
