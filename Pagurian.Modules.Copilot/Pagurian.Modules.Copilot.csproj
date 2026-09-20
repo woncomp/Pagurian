@@ -28,7 +28,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include="Assets\icons8-github-64.png;Assets\icons8-pulse-50.png;Assets\copilot-app.png;Assets\copilot-cli.png;Assets\vscode.png">
+    <Content Include="Assets\copilot-unknown.png;Assets\copilot-unknown.svg;Assets\icons8-pulse-50.png;Assets\copilot-app.png;Assets\copilot-cli.png;Assets\vscode.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>

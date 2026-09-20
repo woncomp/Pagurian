@@ -27,7 +27,7 @@ public sealed class CopilotModule : PagurianModule
     // Asset path helper: the module loads from the modules folder, so its
     // assets resolve next to the module dll, not next to the host exe.
     public static string GitHubIconPath =>
-        ModuleAssets.Resolve(typeof(CopilotModule), "Assets/icons8-github-64.png");
+        ModuleAssets.Resolve(typeof(CopilotModule), "Assets/copilot-unknown.png");
 
     public static string UsageIconPath =>
         ModuleAssets.Resolve(typeof(CopilotModule), "Assets/icons8-pulse-50.png");
