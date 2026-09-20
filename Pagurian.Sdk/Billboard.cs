@@ -26,7 +26,7 @@ public abstract class Billboard : Component
     public abstract double WidthDip { get; }
 
     // Initial/fallback height used until the host completes the first content
-    // layout. The shown billboard then adopts the content's desired height,
+    // layout before reveal. The shown billboard adopts the natural content height,
     // capped to the owner cell's monitor work area, and keeps that height for
     // the rest of this open instance.
     public abstract double HeightDip { get; }
@@ -35,7 +35,10 @@ public abstract class Billboard : Component
     // accessibility and debugging).
     public virtual string Title => "Pagurian";
 
-    // Called on the UI thread after the billboard window is shown / closed.
+    // Called on the UI thread after the prepared window is shown / closed.
+    // Initial XAML rendering may run in a DWM-cloaked window before reveal.
+    // Dismissal hides the intact window before teardown. An opening cancelled
+    // before reveal receives neither hook; Render effects still unmount normally.
     // Self-report hooks: e.g. the metrics billboards switch their tracker to
     // fast sampling in OnOpened and back in OnClosed.
     public virtual void OnOpened() { }
