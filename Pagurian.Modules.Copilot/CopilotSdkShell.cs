@@ -17,7 +17,7 @@ public sealed class CopilotSdkShell : Shell
         _service.SessionStarted += OnSessionStarted;
         _service.SessionEnded += OnSessionEnded;
         _service.SessionChanged += OnSessionChanged;
-        _service.Acquire(Log);
+        _service.Acquire(InstanceId, Log, CopilotSdkPollingSettings.Read(Settings));
         foreach (var session in _service.Sessions)
             OnSessionStarted(session);
     }
@@ -37,11 +37,14 @@ public sealed class CopilotSdkShell : Shell
                 RemoveCell(cell);
         }
         _service = null;
-        service.Release();
+        service.Release(InstanceId);
     }
 
     public override void OnMessage(ShellMessage message) =>
         Log.Warn($"ignoring post message with command \"{message.Command}\"");
+
+    public override void OnSettingsChanged() =>
+        _service?.Configure(InstanceId, CopilotSdkPollingSettings.Read(Settings));
 
     private void OnSessionStarted(CopilotSession session)
     {

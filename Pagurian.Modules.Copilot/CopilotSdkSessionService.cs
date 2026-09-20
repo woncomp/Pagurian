@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Reactor;
 using Pagurian.Sdk;
@@ -9,13 +8,12 @@ namespace Pagurian.Modules.Copilot;
 // only its read-only runtime and never resumes or attaches to a target session.
 internal sealed class CopilotSdkSessionService
 {
-    private static readonly TimeSpan DiscoveryInterval = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan StatusInterval = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan BlockedConfirmationDelay = TimeSpan.FromSeconds(2);
 
     private readonly object _sync = new();
     private readonly Dictionary<string, SdkState> _states = new(StringComparer.Ordinal);
-    private readonly SemaphoreSlim _lifetimeGate = new(1, 1);
+    private readonly Dictionary<string, CopilotSdkPollingSettings> _configurations =
+        new(StringComparer.Ordinal);
     private CancellationTokenSource? _lifetime;
     private ICopilotSdkSessionSource? _source;
     private Task? _discoveryTask;
@@ -23,7 +21,6 @@ internal sealed class CopilotSdkSessionService
     private TaskCompletionSource<bool>? _ready;
     private Logger? _log;
     private DispatcherQueue? _dispatcher;
-    private int _references;
     private long _generation;
 
     public event Action<CopilotSession>? SessionStarted;
@@ -40,11 +37,14 @@ internal sealed class CopilotSdkSessionService
         }
     }
 
-    public void Acquire(Logger log)
+    public void Acquire(
+        string instanceId,
+        Logger log,
+        CopilotSdkPollingSettings settings)
     {
         lock (_sync)
         {
-            _references++;
+            _configurations[instanceId] = settings.Normalize();
             if (_lifetime is not null)
                 return;
             _dispatcher = ReactorApp.UIDispatcher
@@ -66,16 +66,43 @@ internal sealed class CopilotSdkSessionService
         }
     }
 
-    public void Release()
+    public void Configure(string instanceId, CopilotSdkPollingSettings settings)
+    {
+        lock (_sync)
+        {
+            if (_configurations.ContainsKey(instanceId))
+                _configurations[instanceId] = settings.Normalize();
+        }
+    }
+
+    public void Release(string instanceId)
+    {
+        lock (_sync)
+        {
+            _configurations.Remove(instanceId);
+            if (_configurations.Count != 0 || _lifetime is null)
+                return;
+        }
+        ReleaseCore();
+    }
+
+    public void Shutdown()
+    {
+        lock (_sync)
+        {
+            _configurations.Clear();
+        }
+        ReleaseCore();
+    }
+
+    private void ReleaseCore()
     {
         CancellationTokenSource? lifetime = null;
         Task[] tasks = [];
         ICopilotSdkSessionSource? source = null;
         lock (_sync)
         {
-            if (_references > 0)
-                _references--;
-            if (_references != 0 || _lifetime is null)
+            if (_lifetime is null)
                 return;
             lifetime = _lifetime;
             _lifetime = null;
@@ -89,7 +116,6 @@ internal sealed class CopilotSdkSessionService
             _ready = null;
             _states.Clear();
         }
-
         lifetime.Cancel();
         try { Task.WaitAll(tasks, TimeSpan.FromSeconds(3)); }
         catch (AggregateException exception)
@@ -104,20 +130,6 @@ internal sealed class CopilotSdkSessionService
         lifetime.Dispose();
     }
 
-    public void Shutdown()
-    {
-        lock (_sync)
-        {
-            if (_lifetime is null)
-            {
-                _references = 0;
-                return;
-            }
-            _references = 1;
-        }
-        Release();
-    }
-
     private async Task RunDiscoveryAsync(long generation, CancellationToken token)
     {
         try
@@ -126,8 +138,7 @@ internal sealed class CopilotSdkSessionService
             await source.StartAsync(token).ConfigureAwait(false);
             _ready?.TrySetResult(true);
             var first = true;
-            using var timer = new PeriodicTimer(DiscoveryInterval);
-            while (first || await timer.WaitForNextTickAsync(token).ConfigureAwait(false))
+            while (first || await DelayAsync(GetDiscoveryInterval(), token).ConfigureAwait(false))
             {
                 first = false;
                 if (!IsCurrent(generation))
@@ -153,8 +164,7 @@ internal sealed class CopilotSdkSessionService
             var ready = _ready?.Task;
             if (ready is not null)
                 await ready.WaitAsync(token).ConfigureAwait(false);
-            using var timer = new PeriodicTimer(StatusInterval);
-            while (await timer.WaitForNextTickAsync(token).ConfigureAwait(false))
+            while (await DelayAsync(GetStatusInterval(), token).ConfigureAwait(false))
             {
                 if (!IsCurrent(generation))
                     return;
@@ -432,6 +442,30 @@ internal sealed class CopilotSdkSessionService
     {
         lock (_sync)
             return _lifetime is not null && _generation == generation;
+    }
+
+    private TimeSpan GetDiscoveryInterval()
+    {
+        lock (_sync)
+            return TimeSpan.FromSeconds(_configurations.Values
+                .Select(settings => settings.DiscoverySeconds)
+                .DefaultIfEmpty(5).Min());
+    }
+
+    private TimeSpan GetStatusInterval()
+    {
+        lock (_sync)
+            return TimeSpan.FromSeconds(_configurations.Values
+                .Select(settings => settings.StatusSeconds)
+                .DefaultIfEmpty(3).Min());
+    }
+
+    private static async Task<bool> DelayAsync(
+        TimeSpan delay,
+        CancellationToken token)
+    {
+        await Task.Delay(delay, token).ConfigureAwait(false);
+        return true;
     }
 
     private void PublishOnUi(Action action)

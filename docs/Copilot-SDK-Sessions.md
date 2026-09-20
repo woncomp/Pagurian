@@ -12,9 +12,12 @@ An occupied session remains a cell even when its inferred state is Idle. A
 successful membership scan that no longer reports the lock removes the cell;
 failed scans retain the cell and mark its data stale.
 
-The shell scans membership every five seconds and reads each active session's
-persisted event journal every three seconds. A separate read is started two
-seconds after a possible blocker is first observed. The same blocker must be
+The shell scans membership every five seconds by default and reads each active
+session's persisted event journal every three seconds by default. Both
+intervals are configurable in the shell settings and are stored as
+`polling.discoverySeconds` and `polling.statusSeconds` (1–3600 seconds). A
+separate read is started two seconds after a possible blocker is first
+observed. The same blocker must be
 present after that fresh read before the shell displays **Blocked**. This
 delay prevents a transient permission or tool event from flashing as a
 blocker; it is not a real-time state guarantee.
