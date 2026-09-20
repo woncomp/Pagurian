@@ -18,15 +18,22 @@ internal enum CopilotIdentityKind
 }
 
 internal sealed record CopilotSessionIdentity(
-    string SourceId, string OwnerId, CopilotIdentityKind Kind, string? Name);
+    string SourceId, string OwnerId, CopilotIdentityKind Kind, string? Name,
+    CopilotClientKind Client = CopilotClientKind.Unknown, string? ClientMarker = null,
+    string? ParentId = null, string? Cwd = null, CopilotSessionDetails? Details = null);
+
+internal enum CopilotClientKind { Unknown, App, Cli, VSCode, Other }
 
 // Pure evidence index. No filesystem, clock, dispatcher, or lifecycle reduction.
 // The resolver serializes access; fixtures can use this directly.
 internal sealed class CopilotSessionIdentityIndex
 {
     private readonly HashSet<string> _observed = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, (CopilotIdentityKind Kind, string? Name)> _metadata = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (CopilotIdentityKind Kind, string? Name, string? Client, string? Cwd)> _metadata = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, CopilotSessionDetails> _details = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (string Name, DateTimeOffset At)> _taskNames = new(StringComparer.Ordinal);
     private readonly Dictionary<string, HashSet<string>> _parents = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, HashSet<string>> _ownerHints = new(StringComparer.Ordinal);
     private readonly HashSet<string> _conflicted = new(StringComparer.Ordinal);
     private readonly Action<string>? _diagnostic;
 
@@ -38,7 +45,7 @@ internal sealed class CopilotSessionIdentityIndex
             _observed.Add(sourceId);
     }
 
-    public void SetMetadata(string sourceId, string? clientName, string? name = null)
+    public void SetMetadata(string sourceId, string? clientName, string? name = null, string? cwd = null)
     {
         if (!ValidId(sourceId))
             return;
@@ -57,8 +64,28 @@ internal sealed class CopilotSessionIdentityIndex
                 kind = CopilotIdentityKind.Cli;
         }
         // Missing/partially rewritten metadata cannot erase positive evidence.
-        _metadata[sourceId] = (kind, string.IsNullOrWhiteSpace(name) ? previous.Name : name);
+        _metadata[sourceId] = (kind, string.IsNullOrWhiteSpace(name) ? previous.Name : name,
+            previous.Client ?? (kind == CopilotIdentityKind.Unknown ? null : client),
+            string.IsNullOrWhiteSpace(cwd) ? previous.Cwd : cwd);
     }
+
+    public void SetDetails(string sourceId, CopilotSessionDetails details) => _details[sourceId] = details;
+
+    public void SetTaskName(string sourceId, string name, DateTimeOffset at)
+    {
+        if (ValidId(sourceId) && name.Length is > 0 and <= 512
+            && (!_taskNames.TryGetValue(sourceId, out var previous) || at >= previous.At))
+            _taskNames[sourceId] = (name, at);
+    }
+
+    internal static CopilotClientKind ClassifyClient(string? marker) =>
+        string.IsNullOrWhiteSpace(marker) ? CopilotClientKind.Unknown
+        : string.Equals(marker, "github/autopilot", StringComparison.OrdinalIgnoreCase) ? CopilotClientKind.App
+        // Verified against the local 1.0.83 native producer:
+        // sessionConstantsCliClientName() and github_telemetry/core.rs's client allowlist.
+        : string.Equals(marker, "github/cli", StringComparison.OrdinalIgnoreCase) ? CopilotClientKind.Cli
+        : marker is "vscode" or "vscode-agent-host" ? CopilotClientKind.VSCode
+        : CopilotClientKind.Other;
 
     public void Claim(string childId, string parentId)
     {
@@ -73,6 +100,18 @@ internal sealed class CopilotSessionIdentityIndex
             _conflicted.Add(childId);
         else
             parents.Add(parentId);
+    }
+
+    public void HintOwner(string childId, string ownerId)
+    {
+        if (!ValidId(childId) || !ValidId(ownerId) || childId == ownerId)
+            return;
+        if (!_ownerHints.TryGetValue(childId, out var owners))
+            _ownerHints[childId] = owners = new(StringComparer.Ordinal);
+        if (owners.Count < 8)
+            owners.Add(ownerId);
+        else if (!owners.Contains(ownerId))
+            _conflicted.Add(childId);
     }
 
     public bool IsAppRoot(string sourceId) =>
@@ -99,6 +138,15 @@ internal sealed class CopilotSessionIdentityIndex
             if (identity.Kind == CopilotIdentityKind.AppTaskChild)
                 result[identity.OwnerId] = Resolve(identity.OwnerId, new HashSet<string>(StringComparer.Ordinal), cache);
         }
+        var owners = result.Values.Where(identity => identity.Kind == CopilotIdentityKind.AppRoot)
+            .Select(identity => identity.SourceId).ToHashSet(StringComparer.Ordinal);
+        // Discovery enriches an already-observed group, never creates historical cells.
+        foreach (var source in _parents.Keys.Concat(_ownerHints.Keys).Distinct(StringComparer.Ordinal))
+        {
+            var identity = Resolve(source, new HashSet<string>(StringComparer.Ordinal), cache);
+            if (identity.Kind == CopilotIdentityKind.AppTaskChild && owners.Contains(identity.OwnerId))
+                result[source] = identity;
+        }
         return result.Values.OrderBy(identity => identity.SourceId, StringComparer.Ordinal).ToArray();
     }
 
@@ -108,23 +156,30 @@ internal sealed class CopilotSessionIdentityIndex
         if (cache.TryGetValue(source, out var cached))
             return cached;
         _metadata.TryGetValue(source, out var metadata);
+        var ownName = metadata.Name ?? (_taskNames.TryGetValue(source, out var taskName) ? taskName.Name : null);
+        _details.TryGetValue(source, out var details);
         // A separately persisted session is independent, even if a task or UI parent claims it.
         if (metadata.Kind is CopilotIdentityKind.AppRoot or CopilotIdentityKind.Cli)
-            return cache[source] = new(source, source, metadata.Kind, metadata.Name);
-        var unknown = new CopilotSessionIdentity(source, source, CopilotIdentityKind.Unknown, metadata.Name);
+            return cache[source] = new(source, source, metadata.Kind, metadata.Name,
+                ClassifyClient(metadata.Client), metadata.Client, Cwd: metadata.Cwd, Details: details);
+        var unknown = new CopilotSessionIdentity(source, source, CopilotIdentityKind.Unknown, ownName,
+            ClassifyClient(metadata.Client), metadata.Client, Cwd: metadata.Cwd, Details: details);
         if (_conflicted.Contains(source) || path.Count >= 64 || !path.Add(source))
         {
             _diagnostic?.Invoke("identity-conflict");
             return unknown;
         }
         string? owner = null;
-        string? ownerName = null;
+        string? immediateParent = null;
         bool conflict = false;
         bool cli = false;
         if (_parents.TryGetValue(source, out var parents))
         {
             foreach (var parent in parents.OrderBy(id => id, StringComparer.Ordinal))
             {
+                if (immediateParent is not null && immediateParent != parent)
+                    conflict = true;
+                immediateParent = parent;
                 var candidate = Resolve(parent, path, cache);
                 if (candidate.Kind == CopilotIdentityKind.Cli)
                 {
@@ -139,17 +194,33 @@ internal sealed class CopilotSessionIdentityIndex
                 if (owner is not null && owner != candidate.OwnerId)
                     conflict = true;
                 owner = candidate.OwnerId;
-                ownerName = candidate.Name;
+            }
+        }
+        else if (_ownerHints.TryGetValue(source, out var hints))
+        {
+            foreach (var hint in hints)
+            {
+                var candidate = Resolve(hint, path, cache);
+                if (candidate.Kind != CopilotIdentityKind.AppRoot
+                    || (owner is not null && owner != candidate.OwnerId))
+                    conflict = true;
+                else
+                    owner = candidate.OwnerId;
             }
         }
         path.Remove(source);
+        if (owner is not null && _ownerHints.TryGetValue(source, out var claimedOwners)
+            && claimedOwners.Any(hint => IsAppRoot(hint) && hint != owner))
+            conflict = true;
         if (cli && owner is not null)
             conflict = true;
         if (conflict)
             _diagnostic?.Invoke("identity-conflict");
         return cache[source] = conflict ? unknown
-            : owner is not null ? new(source, owner, CopilotIdentityKind.AppTaskChild, ownerName)
-            : cli ? new(source, source, CopilotIdentityKind.Cli, metadata.Name) : unknown;
+            : owner is not null ? new(source, owner, CopilotIdentityKind.AppTaskChild, ownName,
+                CopilotClientKind.App, metadata.Client, immediateParent, metadata.Cwd, details)
+            : cli ? new(source, source, CopilotIdentityKind.Cli, metadata.Name,
+                ClassifyClient(metadata.Client), metadata.Client, Cwd: metadata.Cwd, Details: details) : unknown;
     }
 
     internal static bool ValidId(string? id) => !string.IsNullOrEmpty(id) && id.Length <= 128
@@ -165,7 +236,9 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
     private const int TranscriptsPerScan = 16;
     private const int BytesPerTranscriptScan = 256 * 1024;
     private const int LinesPerTranscriptScan = 512;
-    private const int MaxLineBytes = 64 * 1024;
+    private const int MaxLineBytes = 2 * 1024 * 1024;
+    private const int MaximumTelemetrySources = 512;
+    private const int MaximumTelemetryObservations = 65536;
     private static readonly TimeSpan DiscoveryAge = TimeSpan.FromDays(7);
     private readonly string _stateDirectory;
     private readonly Action<string>? _diagnostic;
@@ -175,6 +248,8 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
     private readonly CopilotSessionIdentityIndex _index;
     private readonly HashSet<string> _metadataCandidates = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TranscriptCursor> _transcripts = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, CopilotSessionDetailsReducer> _telemetry = new(StringComparer.Ordinal);
+    private readonly CopilotSessionDetailsReducer _discardedTelemetry = new("", 0);
     private readonly Dictionary<string, DateTime> _diagnosticTimes = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _cancellation = new();
     private readonly SemaphoreSlim _wake = new(0, 1);
@@ -306,15 +381,21 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
                     if (owner is null)
                         continue;
                     if (_index.IsAppRoot(owner))
-                        _index.Claim(source, owner);
+                        _index.HintOwner(source, owner);
                 }
             }
             foreach (var (source, _) in observations)
             {
-                if (_index.Resolve(source).Kind == CopilotIdentityKind.AppTaskChild)
+                if (_index.Resolve(source).Kind != CopilotIdentityKind.Unknown)
                     _transcripts.TryAdd(source, new TranscriptCursor());
             }
             ScanTranscripts();
+            foreach (var (source, telemetry) in _telemetry)
+            {
+                if (telemetry.TrimToBudget(MaximumTelemetryObservations / Math.Max(1, _telemetry.Count)))
+                    Diagnose("details-observation-budget");
+                _index.SetDetails(source, telemetry.ForIdentity(_index.Resolve(source).Kind == CopilotIdentityKind.AppTaskChild));
+            }
             var identities = _index.ResolveObserved();
             if (identities.Any(identity => identity.Kind == CopilotIdentityKind.Unknown))
                 Diagnose("identity-unresolved");
@@ -451,12 +532,12 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
             if (count > MetadataBytes)
                 return;
             var text = new UTF8Encoding(false, true).GetString(bytes, 0, count);
-            if (!TryMetadata(text, out var client, out var name))
+            if (!TryMetadata(text, out var client, out var name, out var cwd))
             {
                 Diagnose("identity-metadata-malformed");
                 return;
             }
-            _index.SetMetadata(id, client, name);
+            _index.SetMetadata(id, client, name, cwd);
             if (indexTranscript && _index.IsAppRoot(id))
                 _transcripts.TryAdd(id, new TranscriptCursor());
         }
@@ -496,7 +577,7 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
         for (int i = 0; i < Math.Min(TranscriptsPerScan, roots.Length) && !_cancellation.IsCancellationRequested; i++)
         {
             var root = roots[_transcriptRoundRobin++ % roots.Length];
-            if (_index.Resolve(root).Kind is CopilotIdentityKind.AppRoot or CopilotIdentityKind.AppTaskChild)
+            if (_index.Resolve(root).Kind != CopilotIdentityKind.Unknown)
                 ReadTranscript(root, _transcripts[root]);
         }
         _transcriptRoundRobin %= roots.Length;
@@ -522,7 +603,12 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
                 || !Matches(stream, 0, cursor.Prefix)
                 || !Matches(stream, cursor.Offset - cursor.Tail.Length, cursor.Tail);
             if (replaced)
+            {
                 cursor.Reset();
+                foreach (var reducer in _telemetry.Values)
+                    reducer.RemoveOrigin(root);
+                Diagnose("details-transcript-replaced");
+            }
             cursor.Creation = info.CreationTimeUtc;
             cursor.LastWrite = info.LastWriteTimeUtc;
             cursor.Length = length;
@@ -546,6 +632,8 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
                         if (!cursor.SkipLine && cursor.Line.Length > 0)
                             ReadIdentityLine(root, cursor.Line.GetBuffer().AsMemory(0, (int)cursor.Line.Length));
                         cursor.Line.SetLength(0);
+                        if (cursor.Line.Capacity > MetadataBytes)
+                            cursor.Line.Capacity = MetadataBytes;
                         cursor.SkipLine = false;
                         if (++lines >= LinesPerTranscriptScan)
                             break;
@@ -556,6 +644,7 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
                         {
                             cursor.Line.SetLength(0);
                             cursor.SkipLine = true;
+                            Telemetry(root).MarkPartial();
                             Diagnose("identity-transcript-line-too-large");
                         }
                         else
@@ -582,6 +671,17 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
                 line = line[3..];
             using var document = JsonDocument.Parse(line, new JsonDocumentOptions { MaxDepth = 32 });
             var record = document.RootElement;
+            if (record.ValueKind != JsonValueKind.Object)
+                return;
+            var target = root;
+            if (record.TryGetProperty("agentId", out var agent) && agent.ValueKind == JsonValueKind.String
+                && CopilotSessionIdentityIndex.ValidId(agent.GetString()))
+            {
+                // Attribution is not relationship evidence. Keep the projection
+                // isolated until an explicit task relationship resolves it.
+                target = agent.GetString()!;
+            }
+            Telemetry(target).Observe(record, root);
             if (record.ValueKind != JsonValueKind.Object
                 || !record.TryGetProperty("type", out var type) || type.ValueKind != JsonValueKind.String
                 || type.GetString() is not ("subagent.started" or "subagent.completed")
@@ -590,15 +690,52 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
             var childId = child.GetString();
             if (!CopilotSessionIdentityIndex.ValidId(childId))
                 return;
-            // Top-level agentId is the child. Do not inspect prompts, tool output,
-            // names, cwd, trace IDs, or arbitrary nested data for relationships.
-            _index.Claim(childId!, root);
+            // Only subagent.started.data.parentId is a documented task parent;
+            // the event's top-level parentId is merely the preceding event.
+            var owner = _index.Resolve(root).OwnerId;
+            var started = type.GetString() == "subagent.started";
+            if (started && record.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object
+                && data.TryGetProperty("parentId", out var parent) && parent.ValueKind == JsonValueKind.String
+                && CopilotSessionIdentityIndex.ValidId(parent.GetString()))
+            {
+                var parentId = parent.GetString()!;
+                _index.Claim(childId!, parentId);
+                _metadataCandidates.Add(parentId);
+                if (_index.IsAppRoot(owner))
+                    _index.HintOwner(parentId, owner);
+            }
+            else if (started)
+                _index.Claim(childId!, root);
+            else if (_index.IsAppRoot(owner))
+                _index.HintOwner(childId!, owner);
             _metadataCandidates.Add(childId!);
+            if (record.TryGetProperty("data", out var nameData) && nameData.ValueKind == JsonValueKind.Object
+                && (nameData.TryGetProperty("agentDisplayName", out var name) || nameData.TryGetProperty("agentName", out name))
+                && name.ValueKind == JsonValueKind.String && name.GetString() is { Length: > 0 and <= 512 } ownName
+                && record.TryGetProperty("timestamp", out var timestamp) && timestamp.ValueKind == JsonValueKind.String
+                && DateTimeOffset.TryParse(timestamp.GetString(), out var at))
+                _index.SetTaskName(childId!, ownName, at);
+            Telemetry(childId!).ObserveLifecycle(record, started ? "Active" : "Completed", root);
         }
         catch (JsonException)
         {
+            Telemetry(root).MarkPartial();
             Diagnose("identity-transcript-malformed");
         }
+    }
+
+    private CopilotSessionDetailsReducer Telemetry(string source)
+    {
+        if (!_telemetry.TryGetValue(source, out var reducer))
+        {
+            if (_telemetry.Count >= MaximumTelemetrySources)
+            {
+                Diagnose("details-source-budget");
+                return _discardedTelemetry;
+            }
+            _telemetry[source] = reducer = new(source);
+        }
+        return reducer;
     }
 
     private static bool Matches(FileStream stream, long position, byte[] expected) =>
@@ -612,12 +749,14 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
         return read == count ? bytes : bytes[..read];
     }
 
-    private static bool TryMetadata(string text, out string? client, out string? name)
+    private static bool TryMetadata(string text, out string? client, out string? name, out string? cwd)
     {
         client = null;
         name = null;
+        cwd = null;
         bool hasClient = false;
         bool hasName = false;
+        bool hasCwd = false;
         var lines = text.TrimStart('\ufeff').Split('\n');
         for (int lineIndex = 0; lineIndex < lines.Length; lineIndex++)
         {
@@ -629,7 +768,7 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
             if (separator < 0)
                 continue;
             string key = line[..separator];
-            if (key is not ("client_name" or "name"))
+            if (key is not ("client_name" or "name" or "cwd"))
                 continue;
             if (!TryScalar(line[(separator + 1)..], out var value))
                 return false;
@@ -643,12 +782,19 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
                     ? null : value;
                 hasClient = true;
             }
-            else
+            else if (key == "name")
             {
                 if (hasName)
                     return false;
                 name = value;
                 hasName = true;
+            }
+            else
+            {
+                if (hasCwd)
+                    return false;
+                cwd = value;
+                hasCwd = true;
             }
         }
         return true;

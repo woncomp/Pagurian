@@ -48,6 +48,8 @@ var tests = new (string Name, Action Run)[]
     ("tracker shared consumers retain state until final stop", TrackerConsumers),
     ("hook events rotate into exclusive local app-data JSONL files", HookEventLogRotation),
     ("usage normalization preserves unavailable and unlimited states", UsageFixture.Run),
+    ("local telemetry and identity detail scenarios", () => Console.WriteLine($"  {DetailsFixture.Run()} detail scenarios passed")),
+    ("session presentation state scenarios", PresentationFixture.Run),
 };
 int passed = 0;
 foreach (var (name, run) in tests)
@@ -626,8 +628,9 @@ static void IncrementalTranscript()
     f.Resolver.Observe("a");
     Check(f.Identity("a").Kind == CopilotIdentityKind.Unknown);
     Check(f.Identity("a").OwnerId == "root"); // next bounded pass continues, not restarts
-    f.Append("root", new string('x', 70_000) + "\n" + Files.Line("subagent.started", "b"));
+    f.Append("root", new string('x', 2 * 1024 * 1024 + 1) + "\n" + Files.Line("subagent.started", "b"));
     f.Resolver.Observe("b");
+    for (int i = 0; i < 12; i++) f.Resolver.Scan();
     Check(f.Identity("b").OwnerId == "root");
     Check(f.Diagnostics.Contains("identity-transcript-line-too-large"));
 }

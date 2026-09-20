@@ -13,6 +13,31 @@ sealed record CopilotTransition(
     string SourceId, string OwnerId, string EventName, DateTimeOffset EventAt,
     CopilotSessionStatus Before, CopilotSessionStatus After, string Reason);
 
+sealed record CopilotSessionNode(
+    string SessionId, string? ParentId, string Name, CopilotSessionStatus? Status,
+    string Lifecycle, CopilotBlocker? Blocker, CopilotSessionDetails Details);
+
+sealed record CopilotRecentHook(DateTimeOffset At, string Name, string ToolName, long Sequence)
+{
+    public string Line => $"{At.ToLocalTime():HH:mm:ss} {Name} {ToolName}";
+    internal static string Token(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? "-" :
+        string.Concat(value.Take(256).Select(c => char.IsWhiteSpace(c) || char.IsControl(c) ? '_' : c));
+}
+
+static class CopilotProjectName
+{
+    // Windows paths must also work in the dependency-free fixture on other OSes.
+    public static string FromCwd(string? cwd)
+    {
+        if (string.IsNullOrWhiteSpace(cwd)) return "Project unavailable";
+        var trimmed = cwd.TrimEnd('\\', '/');
+        if (trimmed.Length == 0) return cwd[0].ToString();
+        int separator = Math.Max(trimmed.LastIndexOf('\\'), trimmed.LastIndexOf('/'));
+        return trimmed[(separator + 1)..];
+    }
+}
+
 // Stable display-owner model. Source state and visual debounce deliberately
 // live separately: a pending visual change must never lose a permission owner.
 sealed class CopilotSession
@@ -28,13 +53,22 @@ sealed class CopilotSession
     public string LastEventSourceId { get; set; } = "";
     public IReadOnlyList<CopilotBlocker> BlockingSources { get; set; } = [];
     public IReadOnlyList<CopilotTransition> Transitions { get; set; } = [];
+    public CopilotClientKind Client { get; set; }
+    public string? ClientMarker { get; set; }
+    public string? Cwd { get; set; }
+    public string ProjectName => CopilotProjectName.FromCwd(Cwd);
+    public IReadOnlyList<CopilotSessionNode> Nodes { get; set; } = [];
+    public IReadOnlyList<CopilotRecentHook> RecentHooks { get; set; } = [];
+    public CopilotSessionDetails Details { get; set; } = CopilotSessionDetails.Empty;
+    public CopilotSessionDetails GroupDetails { get; set; } = CopilotSessionDetails.Empty;
 }
 
 // Only the identity fields and timestamp are interpreted. Dump retains the
 // original payload, notably sessionId on child events and agentId on stops.
 sealed record CopilotHookEvent(
     string Name, string SourceId, DateTimeOffset At, string Dump,
-    string? AgentId = null, string? ParentId = null, string? TranscriptPath = null)
+    string? AgentId = null, string? ParentId = null, string? TranscriptPath = null,
+    string? ToolName = null, string? Cwd = null)
 {
     public static CopilotHookEvent? Parse(string name, string? json, DateTimeOffset receivedAt)
     {
@@ -63,7 +97,8 @@ sealed record CopilotHookEvent(
             var dump = JsonSerializer.Serialize(new { loggedAt = receivedAt, @event = name, payload },
                 new JsonSerializerOptions { WriteIndented = true });
             return new(name, source!, at, dump, Text(payload, "agentId"),
-                Text(payload, "parentSessionId"), Text(payload, "transcriptPath"));
+                Text(payload, "parentSessionId"), Text(payload, "transcriptPath"),
+                Text(payload, "toolName"), Text(payload, "cwd"));
         }
         catch (JsonException) { return null; }
     }
@@ -101,6 +136,13 @@ sealed class CopilotSessionState
         public (CopilotHookEvent Event, long Sequence)? LifecycleStart;
         public long AppliedLifecycle;
         public long AppliedLifecycleStart;
+        public readonly List<CopilotRecentHook> Recent = [];
+        public string? Cwd;
+        public DateTimeOffset CwdAt = DateTimeOffset.MinValue;
+        public CopilotSessionDetails? DetailsInput;
+        public CopilotSessionDetails DetailsOutput = CopilotSessionDetails.Empty;
+        public DateTimeOffset DetailsEpoch;
+        public DateTimeOffset TranscriptTerminalAt = DateTimeOffset.MinValue;
     }
 
     private readonly Dictionary<string, Source> _sources = new(StringComparer.Ordinal);
@@ -149,6 +191,19 @@ sealed class CopilotSessionState
             return;
         }
         source.HasOwnHook = true;
+        source.Recent.Add(new(hook.At, CopilotRecentHook.Token(hook.Name),
+            CopilotRecentHook.Token(hook.ToolName), sequence));
+        source.Recent.Sort((a, b) =>
+        {
+            int time = b.At.CompareTo(a.At);
+            return time != 0 ? time : b.Sequence.CompareTo(a.Sequence);
+        });
+        if (source.Recent.Count > 5) source.Recent.RemoveRange(5, source.Recent.Count - 5);
+        if (!string.IsNullOrWhiteSpace(hook.Cwd) && hook.At >= source.CwdAt)
+        {
+            source.Cwd = hook.Cwd;
+            source.CwdAt = hook.At;
+        }
         SetLatest(source, hook, sequence);
         Apply(source, hook);
         if (hook.Name is "subagentStart" or "subagentStop" &&
@@ -278,6 +333,7 @@ sealed class CopilotSessionState
         {
             if (source.Identity.Kind != CopilotIdentityKind.AppTaskChild)
                 continue;
+            ReconcileTranscriptTerminal(source);
             if (!InOwnerGeneration(source, source.StateAt))
             {
                 if (source.Active || source.Blocker is not null)
@@ -322,6 +378,36 @@ sealed class CopilotSessionState
                 _sessions[ownerId] = session = new() { SessionId = ownerId, Name = ownerId };
             session!.Name = owner.Identity.Name ?? ownerId;
             session.NameResolved = !string.IsNullOrWhiteSpace(owner.Identity.Name);
+            session.Client = owner.Identity.Client;
+            session.ClientMarker = owner.Identity.ClientMarker;
+            session.Cwd = owner.Identity.Cwd ?? (owner.CwdAt >= owner.Epoch ? owner.Cwd : null);
+            var visible = members.Where(s => s == owner || owner.Epoch == DateTimeOffset.MinValue
+                    || s.StateAt >= owner.Epoch || s.Latest?.At >= owner.Epoch
+                    || s.Identity.Details?.Observations.Any(o => o.At >= owner.Epoch) == true)
+                .Select(s => s.Identity.SourceId).ToHashSet(StringComparer.Ordinal);
+            // A current descendant still needs its immediate ancestors, but
+            // their previous-generation status/details must not leak back in.
+            foreach (var member in members.Where(s => visible.Contains(s.Identity.SourceId)).ToArray())
+            {
+                var parent = member.Identity.ParentId;
+                for (int depth = 0; parent is not null && depth < 64; depth++)
+                {
+                    var ancestor = members.FirstOrDefault(s => s.Identity.SourceId == parent);
+                    if (ancestor is null || !visible.Add(parent)) break;
+                    parent = ancestor.Identity.ParentId;
+                }
+            }
+            var nodes = members.Where(s => visible.Contains(s.Identity.SourceId)).Select(s => Node(s, owner.Epoch))
+                .OrderBy(n => n.SessionId == ownerId ? 0 : 1)
+                .ThenBy(n => n.SessionId, StringComparer.Ordinal).ToArray();
+            bool detailChange = session.Nodes.Count != nodes.Length || nodes.Any(n =>
+                !ReferenceEquals(session.Nodes.FirstOrDefault(old => old.SessionId == n.SessionId)?.Details, n.Details));
+            session.Nodes = nodes;
+            session.Details = nodes.Single(n => n.SessionId == ownerId).Details;
+            if (detailChange)
+                session.GroupDetails = CopilotSessionDetails.Aggregate(nodes.Select(n => n.Details));
+            session.RecentHooks = members.SelectMany(s => s.Recent).Where(h => h.At >= owner.Epoch)
+                .OrderByDescending(h => h.At).ThenByDescending(h => h.Sequence).Take(5).ToArray();
             session.BlockingSources = active.Where(s => s.Blocker is not null)
                 .Select(s => s.Blocker! with { OwnerId = ownerId }).OrderBy(b => b.BlockedSince).ToArray();
             var latest = members.Where(s => s.Latest is not null && InOwnerGeneration(s, s.Latest.At))
@@ -347,6 +433,56 @@ sealed class CopilotSessionState
             _sessions.Remove(id);
             SessionEnded?.Invoke(ended);
         }
+    }
+
+    private void ReconcileTranscriptTerminal(Source source)
+    {
+        if (source.Identity.Details?.TerminalAt is not { } at ||
+            at <= source.TranscriptTerminalAt || !InOwnerGeneration(source, at))
+            return;
+        // Keep the completion fence even after a newer transcript start replaces
+        // the displayed lifecycle. Starting again cannot revive an old permission.
+        source.TranscriptTerminalAt = at;
+        if (source.StateAt <= at)
+        {
+            source.Active = false;
+            source.Status = CopilotSessionStatus.Idle;
+            source.Blocker = null;
+            source.StateAt = at;
+        }
+        else if (source.Blocker is { } blocker && blocker.BlockedSince <= at)
+        {
+            source.Blocker = blocker with
+            {
+                BlockedSince = source.StateAt,
+                EventAt = source.StateAt,
+                EventName = source.StateEvent,
+            };
+        }
+    }
+
+    private static CopilotSessionNode Node(Source source, DateTimeOffset epoch)
+    {
+        var input = source.Identity.Details ?? CopilotSessionDetails.Empty;
+        if (!ReferenceEquals(input, source.DetailsInput) || epoch != source.DetailsEpoch)
+        {
+            source.DetailsInput = input;
+            source.DetailsEpoch = epoch;
+            source.DetailsOutput = input.ForGeneration(epoch);
+        }
+        var details = source.DetailsOutput;
+        bool hasCurrentState = source.StateAt >= epoch && source.StateAt != DateTimeOffset.MinValue
+            && source.StateAt > source.TranscriptTerminalAt;
+        string lifecycle = !hasCurrentState ? "Unknown" : source.Ended ? "Ended"
+            : source.StateEvent == "subagentStop" ? "Completed"
+            : source.StateAt == DateTimeOffset.MinValue ? "Unknown" : "Active";
+        if (details.LifecycleAt is { } at && at >= source.StateAt &&
+            details.Lifecycle is "Completed" or "Ended")
+            lifecycle = details.Lifecycle;
+        return new(source.Identity.SourceId, source.Identity.ParentId,
+            source.Identity.Name ?? source.Identity.SourceId,
+            hasCurrentState ? source.Status : null,
+            lifecycle, !hasCurrentState || lifecycle is "Completed" or "Ended" ? null : source.Blocker, details);
     }
 
     private void ReconcileOwnerLifecycle(Source source)

@@ -8,16 +8,27 @@ hook `sessionId`. No settings, hook commands, or payload formats change.
 - Own `workspace.yaml` with `client_name: github/autopilot` identifies an
   independently persisted Copilot App session. Even a `create_session`
   child remains independent; App UI ancestry is not task ancestry.
-- An explicit other client identifies CLI behavior. An explicit relationship
-  to a confirmed CLI parent likewise keeps the task source standalone.
+- Display ownership and client branding are separate. `github/cli` selects
+  the CLI icon; `vscode` and `vscode-agent-host` select VS Code. These exact
+  markers were checked against the local CLI 1.0.83 native producer
+  (`sessionConstantsCliClientName()` and the telemetry client allowlist).
+  Unsupported explicit markers select **Other**, not a CLI brand. All explicit
+  non-App clients retain independent/CLI ownership behavior. This supports
+  only VS Code sessions already sending these hooks, not built-in Chat ingestion.
 - App task relationships come from explicit lifecycle fields or the owning
   App session's `events.jsonl` records: `subagent.started` and
   `subagent.completed` carry the child in the **top-level `agentId`**.
-  Nested tasks resolve to the independently persisted App owner.
+  Nested tasks resolve to the independently persisted App owner. Published
+  nodes retain their immediate task parent and their **own** name. The
+  documented `subagent.started.data.parentId` is a task parent; top-level
+  event `parentId` is an event-chain link and is never session ancestry.
+  `agentDisplayName` / `agentName` supplies task names; missing names use IDs.
 - A `transcriptPath` hint is accepted only for an `events.jsonl` under the
   configured local session-state directory whose owner is a confirmed App
   session. Shared cwd, trace ID, name, and missing workspace files prove
-  nothing. Conflicting/cyclic claims stay unresolved.
+  nothing. A hint identifies an owner, not an immediate parent; it cannot
+  flatten a nested tree. Conflicting immediate parents (even within the same
+  owner) and cyclic claims stay unresolved.
 - Unknown sources wait **without a cell or timeout fallback**. Their latest
   event and reduced status (including permission ownership) are retained,
   not an unbounded queue of raw events. A resolution batch attaches that
@@ -35,10 +46,15 @@ Discovery alone does not publish unrelated root cells.
 Each pass examines up to 256 discovery directories and 256 candidate metadata
 files, and advances up to 16 transcripts by at most 256 KiB / 512 lines each.
 Transcript offsets retain partial lines and detect truncation/replacement.
-Metadata is limited to 64 KiB; transcript lines above 64 KiB are skipped.
-Consequently large histories need multiple passes, and an oversized identity
-record may need later lifecycle evidence. Only identity metadata is extracted;
-prompts, tool results, cwd and trace content are not used for inference.
+Metadata is limited to 64 KiB. Transcript lines can span passes and are now
+bounded at **2 MiB**, accommodating current model-call records over 500 KB.
+JSON parsing is background-only, depth-limited to 32; the bounded line/document
+is released after scalar projection. Prompts, messages and tool results are
+not retained in telemetry models. Oversized/malformed records yield throttled
+reason codes and Partial coverage, never payload logging. Large histories need
+multiple passes. Telemetry is bounded to 512 sources and 65,536 observations
+overall (at most 8,192 per source); eviction is explicitly Partial.
+cwd is display metadata only, never ownership evidence.
 Positive identity evidence is cached for the resolver lifetime, including
 across transcript rotation and multi-turn child completion. Client identity
 is immutable for a session; partial rewrites cannot downgrade a known App root
@@ -59,7 +75,7 @@ Each source owns its current permission blocker independently:
 | App `subagentStop` with `agentId` | Deactivates that child; keeps its identity for resume |
 | Child `sessionEnd` | Ends that source, never removes the root cell |
 | Root `sessionEnd` | Removes its cell and deactivates the group |
-| Other hooks | Latest-event details only |
+| Other hooks | Received-hook summaries only; no status transition |
 
 For CLI, subagent lifecycle hooks remain details-only; they do not clear or
 remove another independently displayed session.
@@ -88,17 +104,95 @@ whereas its own `sessionEnd` requires a newer explicit `sessionStart` or App
 `subagentStart`. Pending unknown-identity lifecycle evidence and own events
 retain child timestamp ordering, so an older child exit cannot hide a newer permission.
 
-## Existing UI and diagnostics
+Tree snapshots retain completed and ended children for the current root
+generation. These nodes continue contributing attributable usage, not active
+status. `agentStop` means Idle, never Completed. Hookless known tasks show
+Unknown status. Timestamped local transcript completion/shutdown can mark a
+confirmed App task node terminal and exclude it from active aggregation when
+at least as recent as its hook state. Completion permanently fences the old
+permission, even after a later transcript start; transcript activity does not
+replay Working/Idle or reopen roots. A fresh hook supersedes older transcript
+lifecycle and starts a new blocker history if needed. At root restart,
+old status, detail observations and recent hooks are fenced out; ancestry
+needed by new descendants is retained as Unknown placeholders.
+
+## Local details and accounting
+
+The shared incremental transcript reader projects `session.model_change`,
+`model.model_call_started`, `model.model_call_success`, `assistant.usage`,
+`session.usage_info`, successful `session.compaction_complete`, and
+`session.usage_checkpoint`. Main-session model, reasoning, context tier,
+context occupancy and limits remain main-session values, not group sums.
+Each node's breakdown uses its own data.
+
+- `modelInfo.capabilities.limits.max_context_window_tokens` and
+  `max_prompt_tokens` are limits only. A model switch invalidates stale limits.
+  Last-request `responseUsage.prompt_tokens` is input usage, **not current
+  context occupancy**. Occupancy requires an explicit usage-info/compaction
+  record. Missing values display Unavailable, not numeric zero.
+- Input/output and cache read/creation tokens come from per-call usage.
+  `copilotUsage.total_nano_aiu` (or SDK `totalNanoAiu`) is retained as an exact
+  integer, displayed explicitly in **nano-AIU**.
+- Stable provider request, API-call and service-request aliases deduplicate
+  mirrored root/child events and overlapping SDK/model-call projections.
+  Top-level `agentId` attributes a record to its source, but does not itself
+  establish a task relationship. Independent roots reject foreign lifecycle
+  projections. Records without sufficient call identity are not guessed.
+- `totalNanoAiu` / `totalPremiumRequests` checkpoints are cumulative and can
+  include children. The latest checkpoint replaces earlier checkpoints.
+  They are shown separately as **reported session counters, not added**;
+  they are neither own-agent usage nor attributable group totals. In particular,
+  taking the maximum checkpoint is not proof of a disjoint group total.
+- Group totals deduplicate the disjoint known call observations of all nodes,
+  including completed/ended nodes. Persisted call coverage is conservatively
+  **Partial**, not a claim of lifetime accounting. Conflicting mirrors,
+  missing fields, eviction, replacement, overflow and unavailable nodes cannot
+  silently become complete totals.
+- Append/partial-line handling shares the identity cursor. Replacement removes
+  projections from that transcript origin before rebuilding. Generation
+  filtering discards older observations; a newly timestamped checkpoint alone
+  cannot prove a new accounting interval.
+
+There are no network, quota, account or resume calls. `CopilotUsageService`
+and the separate account Usage shell are unrelated and unchanged. Unchanged
+background detail snapshots reuse their identity publication; hook-only UI
+updates reuse filtered details and computed totals.
+
+## Session presentation and diagnostics
 
 The tracker owns stable root `CopilotSession` objects. Shell notifications
 concern owners only, so child activity, completion and exit do not replace
 the owner's cell or close its billboard.
 
-Latest-event JSON retains the received payload verbatim in its original
-envelope shape, including the child's `sessionId` or the parent's
-`sessionId` plus `agentId` on a stop. Current blockers are stored independently
-(source, owner, blocked-since, triggering event/time) and shown in the existing
-details text, so later sibling details cannot erase the reason for Blocked.
+Cells show two centered rows: packaged client icon plus aggregate status,
+then the cwd basename. All statuses/clients use one width measured from the
+longest Idle/Working/Blocked caption with WinUI's actual caption style, plus
+icon/spacing/padding, rounded to four DIPs. Text-scale changes remeasure.
+Project text occupies a finite star column with ellipsis; drive/share roots
+have meaningful labels. The host's tooltip callback exposes full name/cwd.
+The three icons deploy with the module and resolve with `ModuleAssets`,
+never from developer installation/download paths.
+
+The billboard has a 600-DIP width and 640-DIP content ceiling with a bounded
+scroll viewport below the header. Its overview/header uses aggregate status;
+its keyed expandable tree shows **local** node status and lifecycle. Expansion
+survives snapshot updates. One breakdown Card below the tree shows **all**
+nodes regardless of expansion. Blocker provenance includes blocked-since and
+source. Copy ID buttons copy the complete ID through the clicked window's
+HWND-owned native clipboard and show checked success/failure feedback,
+including contention. The host remains `NoActivate=true`.
+
+At the very bottom, at most five received-hook rows show exactly
+`HH:mm:ss eventType toolName`, local time, newest first, with `-` for missing
+tool names. Each is a bounded single line; no JSON, prompts, arguments, dates
+or source IDs appear in these rows. Whitespace/control characters in labels
+are normalized to keep the three fields on one line. Each unresolved source
+retains five summaries; attachment merges member buffers by parsed timestamp,
+then arrival sequence for ties. Completion preserves summaries; generation
+reset and teardown do not leak them. These are hooks, not transcript replay.
+
+Raw latest-hook compatibility fields remain internal, and hook-file logging
+is unchanged; the billboard no longer renders raw payloads.
 The reducer retains at most 256 transitions globally and exposes at most 64
 per display owner. The module logger records source-attributed transitions
 without payload values; resolver warning reason codes are throttled.
@@ -123,6 +217,9 @@ on the UI thread. No process is killed or relaunched.
 ```powershell
 .\tests\Verify-CopilotSessions.ps1 -Platform x64
 dotnet build Pagurian.Modules.Copilot\Pagurian.Modules.Copilot.csproj -p:Platform=x64
+.\tests\Verify-CopilotSessionPresentation.ps1 -Platform x64
+# Optional real clipboard roundtrip + contention; replaces clipboard contents:
+.\tests\Verify-CopilotSessionPresentation.ps1 -Platform x64 -Clipboard
 .\tests\Verify-ModuleIsolation.ps1 -Platform x64
 ```
 
@@ -135,3 +232,15 @@ member blockers, stable root lifecycle, resume, duplicate/out-of-order events,
 debounce, partial/rotated transcripts, and stop/start callbacks. It does not
 read user transcripts, install a test framework, launch a WinUI window,
 publish, or replace any active Pagurian bundle.
+
+The presentation fixture mounts production cells/billboard through the host
+BillboardSession in isolated nonactivating windows, without starting the
+Copilot tracker, loading user configuration or installing hooks. It checks
+two-row bounds, equal four-DIP-rounded widths for all statuses/clients,
+ellipsis, bounded scrolling, local-vs-group state, all-node breakdown,
+expansion preservation, exact recent rows, integer display and (when opted
+in) clipboard readback/contention without activation. `-BuildOnly` skips UI.
+The recorded interactive run used 100% display scale and exercised sampled
+Light/Dark changes. High Contrast, other DPI settings and maximum system text
+scale still require manual validation; the fixture does not change user
+accessibility settings.

@@ -27,6 +27,23 @@ public sealed class CopilotModule : PagurianModule
     public static string UsageIconPath =>
         ModuleAssets.Resolve(typeof(CopilotModule), "Assets/icons8-pulse-50.png");
 
+    internal static string ClientIconPath(CopilotClientKind client) => client switch
+    {
+        CopilotClientKind.App => ModuleAssets.Resolve(typeof(CopilotModule), "Assets/copilot-app.png"),
+        CopilotClientKind.Cli => ModuleAssets.Resolve(typeof(CopilotModule), "Assets/copilot-cli.png"),
+        CopilotClientKind.VSCode => ModuleAssets.Resolve(typeof(CopilotModule), "Assets/vscode.png"),
+        _ => GitHubIconPath,
+    };
+
+    internal static string ClientLabel(CopilotClientKind client) => client switch
+    {
+        CopilotClientKind.App => "GitHub Copilot App",
+        CopilotClientKind.Cli => "GitHub Copilot CLI",
+        CopilotClientKind.VSCode => "VS Code",
+        CopilotClientKind.Other => "Other client",
+        _ => "Unknown client",
+    };
+
     internal static string CopilotRuntimePath =>
         ModuleAssets.Resolve(
             typeof(CopilotModule),

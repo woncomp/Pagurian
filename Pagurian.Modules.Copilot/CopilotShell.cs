@@ -10,7 +10,7 @@ namespace Pagurian.Modules.Copilot;
 // the host's post pipeline ("Pagurian.exe post {id} hook <event>").
 [Shell(
     DisplayName = "Copilot Sessions",
-    PreviewIcon = "Assets/icons8-github-64.png",
+    PreviewIcon = "Assets/copilot-app.png",
     ConfigurationView = typeof(CopilotConfiguration))]
 public sealed class CopilotShell : Shell
 {
@@ -58,7 +58,7 @@ public sealed class CopilotShell : Shell
             return;
         _cells[session.SessionId] = AddCell<SessionCell>(
             model: session,
-            tooltip: () => session.Name,
+            tooltip: () => $"{session.Name}\n{(string.IsNullOrWhiteSpace(session.Cwd) ? "Working directory unavailable" : session.Cwd)}",
             billboard: () => new SessionBillboard(session));
     }
 
