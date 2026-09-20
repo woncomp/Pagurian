@@ -46,6 +46,14 @@ static class TrayConfig
                                 s.ValueKind == JsonValueKind.String
                     ? s.GetString() ?? ""
                     : "";
+                // The Hello clock kind became the World Clock kind; remap
+                // legacy entries in memory so existing trays keep their clock
+                // (the file itself is only rewritten on the next Save).
+                if (shellType == "Pagurian.Modules.Hello.HelloShell")
+                {
+                    shellType = "Pagurian.Modules.Hello.WorldClockShell";
+                    PagurianLog.Host("config: remapped legacy Hello clock entry to World Clock");
+                }
                 var id = item.TryGetProperty("id", out var i) &&
                          i.ValueKind == JsonValueKind.String
                     ? i.GetString() ?? ""
@@ -124,8 +132,8 @@ static class TrayConfig
         return id;
     }
 
-    // Seed config: just the Hello shell with a fresh random id. Only written
-    // when no config exists at all.
+    // Seed config: just the World Clock shell (tracking local time) with a
+    // fresh random id. Only written when no config exists at all.
     private static void Seed()
     {
         try
@@ -134,7 +142,7 @@ static class TrayConfig
             {
                 tray = new object[]
                 {
-                    new { shell = "Pagurian.Modules.Hello.HelloShell", id = NextId(Array.Empty<string>()) },
+                    new { shell = "Pagurian.Modules.Hello.WorldClockShell", id = NextId(Array.Empty<string>()) },
                 },
             };
             Directory.CreateDirectory(Path.GetDirectoryName(ConfigPath)!);

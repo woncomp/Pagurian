@@ -182,13 +182,13 @@ sealed class Harness
                     "cancellation during cloaked rendering failed");
                 Require(_current!.Opens == 0 && _current.Closes == 0, "cancelled rendering invoked lifecycle hooks");
                 Require(_preparingFrameChecks > 0, "cloaked preparation was never observed");
-                _current = OpenProduction(new Pagurian.Modules.Hello.HelloShell(), "HelloBillboard");
+                _current = OpenProduction(new Pagurian.Modules.Hello.WorldClockShell(), "WorldClockBillboard");
             });
             Step(800, () =>
             {
                 CheckVisible(_current!, null);
                 Require(_current!.Session.BoundsPx.Height / _current.Session.Window!.DipScale < 288,
-                    "Hello's flexible layout expanded to the monitor instead of fitting content");
+                    "World Clock's flexible layout expanded to the monitor instead of fitting content");
                 Dismiss(_current!);
                 SeedMetrics();
                 _current = OpenProduction(new Pagurian.Modules.Metrics.CpuShell(), "CpuBillboard"); });
@@ -453,7 +453,7 @@ sealed class Harness
         _finished = true;
         Microsoft.UI.Xaml.Media.CompositionTarget.Rendering -= CheckPreparingFrame;
         _timer.Stop();
-        Console.WriteLine($"Billboard lifecycle passed: {_checks} assertions; fit, scrolling, theme, cancellation, timeout, rapid switching, hidden teardown, real Hello/CPU/Memory components; Compass={_compassAssembly is not null}.");
+        Console.WriteLine($"Billboard lifecycle passed: {_checks} assertions; fit, scrolling, theme, cancellation, timeout, rapid switching, hidden teardown, real WorldClock/CPU/Memory components; Compass={_compassAssembly is not null}.");
         ReactorApp.Exit(0);
         Environment.Exit(0);
     }

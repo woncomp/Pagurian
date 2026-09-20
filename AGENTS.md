@@ -69,7 +69,8 @@ Concepts:
   `%LOCALAPPDATA%\Pagurian\modules\<name>\<name>.dll`. The matching
   `.deps.json`, private dependencies, and assets live in the same folder.
 
-Current modules: **Hello** (clock cell + Hello billboard), **Metrics** (CPU
+Current modules: **World Clock** (per-city clock cell + World Clock billboard;
+one city per shell instance, chosen in its configuration), **Metrics** (CPU
 and MEM shells, each standalone, sharing one sampler), **Copilot** (CLI hook
 installer + per-session dynamic cells).
 
@@ -84,7 +85,11 @@ installer + per-session dynamic cells).
   the host infrastructure members from modules.
 - `Pagurian.Modules.Hello` / `.Metrics` / `.Copilot` — the first-party
   modules. Each has a `DeployToHostModules` post-build target creating its
-  self-contained folder under the host output's `modules\` folder.
+  self-contained folder under the host output's `modules\` folder. The
+  `Pagurian.Modules.Hello` project (kept under its historical name so the
+  module bundle identity is stable) ships the **World Clock** module: types
+  `WorldClockModule`/`WorldClockShell`/etc. under the `Pagurian.Modules.Hello`
+  namespace, kind id `Pagurian.Modules.Hello.WorldClockShell`.
 
 All projects target `net10.0-windows10.0.22621.0`, `UseWinUI`, platforms
 x64;ARM64, Microsoft.UI.Reactor 0.1.0-preview.12. Each module loads in a
@@ -126,7 +131,8 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   Order = tray order. Ids are 4-digit, globally unique; duplicates are logged
   and skipped. The same kind twice = two instances. `settings` passes through
   to `Shell.Settings` verbatim (reserved). A missing file is seeded with only
-  the Hello shell and a random id; an existing file is only ever modified
+  the World Clock shell (tracking local time) and a random id; an existing
+  file is only ever modified
   through `Save(entries)` (temp file + atomic move, called by the Shell
   editor), and the host never auto-adds discovered shells. `NextId(taken)`
   allocates a fresh 4-digit id.
