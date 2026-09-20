@@ -18,6 +18,9 @@ user configuration writes, or main Pagurian process are involved.
 The fake source supplies September 2026 in China. The in-memory host-style
 draft supplies `ShellConfigurationProps` and exercises native UIA toggles,
 Save, Revert, discard/reopen, per-shell independence, and disposal.
+The Usage configuration Account section is collapsible; signed-in fixtures
+show the account login in the expander header, omit the Login button, and keep
+the expanded details free of the duplicate login row/card.
 Other probes cover raw/endpoint marker coordinates, label clamping,
 long/scaled labels, Sunday-first padding, measured equal calendar columns,
 stable content width on toggles/parent growth/month labels, two reserved text

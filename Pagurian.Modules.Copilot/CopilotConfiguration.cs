@@ -15,8 +15,6 @@ class CopilotConfiguration : ShellConfiguration
         var clients = CopilotSettings.Clients(Settings);
 
         return FlexColumn(
-            BodyStrong("Account")
-                .HeadingLevel(AutomationHeadingLevel.Level2),
             Component<CopilotAccountPanel>()
                 .Margin(0, 8, 0, 0),
             BodyStrong("Enabled Copilot clients")
@@ -75,11 +73,8 @@ class UsageConfiguration : ShellConfiguration
         UseEffect(() => model.ApplySettings(Settings), model, Settings?.GetRawText());
 
         return FlexColumn(
-            BodyStrong("Account")
-                .HeadingLevel(AutomationHeadingLevel.Level2),
-            CopilotAccountPanel.AccountCard(model.State,
-                    injected?.Login ?? CopilotModule.Instance.Usage.Login,
-                    scheme == ColorScheme.HighContrast)
+            CopilotAccountPanel.AccountSection(model.State,
+                    injected?.Login ?? CopilotModule.Instance.Usage.Login)
                 .Margin(0, 8, 0, 0),
             UsageCalendarView.Render(model.Pace, date =>
                 SetSettings(model.Schedule.Toggle(date).Write(Settings)),
@@ -95,8 +90,6 @@ class CopilotAccountPanel : Component
         var service = CopilotModule.Instance.Usage;
         var (_, setVersion) = UseState(0);
         var tick = UseRef(0);
-        var colorScheme = UseColorScheme();
-
         UseEffect(() =>
         {
             void OnChanged() => setVersion(++tick.Current);
@@ -104,46 +97,76 @@ class CopilotAccountPanel : Component
             return () => service.Changed -= OnChanged;
         }, service);
 
-        return AccountCard(
-            service.State,
-            service.Login,
-            colorScheme == ColorScheme.HighContrast);
+        return AccountSection(service.State, service.Login);
     }
 
-    internal static BorderElement AccountCard(
+    internal static Element AccountSection(
         CopilotUsageState state,
-        Action login,
-        bool highContrast)
+        Action login) =>
+        Component<AccountSectionView, AccountSectionProps>(
+            new(state, login));
+}
+
+internal sealed record AccountSectionProps(
+    CopilotUsageState State,
+    Action Login);
+
+internal sealed class AccountSectionView : Component<AccountSectionProps>
+{
+    public override Element Render()
+    {
+        var (expanded, setExpanded) = UseState(false);
+        var state = Props.State;
+        var account = state.Account;
+        var signedInAs = string.IsNullOrWhiteSpace(account?.Login)
+            ? null
+            : account.Login;
+        var header = FlexRow(
+                BodyStrong("Account")
+                    .HeadingLevel(AutomationHeadingLevel.Level2)
+                    .Flex(grow: 1, basis: 0),
+                signedInAs is null
+                    ? null
+                    : BodyStrong($"Signed in as: {signedInAs}"))
+            .HorizontalAlignment(HorizontalAlignment.Stretch);
+
+        return Expander(
+                header: "",
+                content: AccountDetails(state, Props.Login),
+                isExpanded: expanded,
+                onIsExpandedChanged: setExpanded)
+            .HeaderTemplate(header)
+            .AutomationName(signedInAs is null
+                ? "Account"
+                : $"Account, signed in as {signedInAs}")
+            .HorizontalAlignment(HorizontalAlignment.Stretch);
+    }
+
+    private static Element AccountDetails(
+        CopilotUsageState state,
+        Action login)
     {
         var status = AccountStatus(state);
         var statusTitle = BodyStrong(status.Title);
         if (status.IsError)
             statusTitle = statusTitle.Foreground(ReactorTheme.SystemCritical);
 
-        return Border(
-                VStack(8,
-                    statusTitle,
-                    Body(status.Message)
-                        .Foreground(ReactorTheme.SecondaryText)
-                        .TextWrapping(TextWrapping.WrapWholeWords),
-                    ValueRow("Login", Display(state.Account?.Login)),
-                    ValueRow("Host", Display(state.Account?.Host)),
-                    ValueRow("Auth type", Display(state.Account?.AuthType)),
-                    Button("Login", login)
+        return VStack(8,
+                statusTitle,
+                Body(status.Message)
+                    .Foreground(ReactorTheme.SecondaryText)
+                    .TextWrapping(TextWrapping.WrapWholeWords),
+                ValueRow("Host", Display(state.Account?.Host)),
+                ValueRow("Auth type", Display(state.Account?.AuthType)),
+                string.IsNullOrWhiteSpace(state.Account?.Login)
+                    ? Button("Login", login)
                         .AccessKey("L")
                         .IsEnabled(!state.IsLoggingIn)
                         .HorizontalAlignment(HorizontalAlignment.Left)
-                        .Margin(0, 4, 0, 0)))
+                        .Margin(0, 4, 0, 0)
+                    : null)
             .Padding(12)
-            .CornerRadius(8)
-            .Background(highContrast
-                ? ReactorTheme.Ref("SystemColorWindowColorBrush")
-                : ReactorTheme.CardBackground)
-            .WithBorder(
-                highContrast
-                    ? ReactorTheme.Ref("SystemColorWindowTextColorBrush")
-                    : ReactorTheme.CardStroke,
-                highContrast ? 2 : 1);
+            .HorizontalAlignment(HorizontalAlignment.Stretch);
     }
 
     private static (

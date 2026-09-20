@@ -474,12 +474,12 @@ sealed class Harness
             Step(CloseTip);
             Step(() =>
             {
-                foreach (var button in Find<ToggleButton>()) button.FontSize = 28;
+                foreach (var button in CalendarButtons) button.FontSize = 28;
                 foreach (var text in Descendants<XamlText>(Balance)) text.FontSize = 28;
                 Root.UpdateLayout();
                 Require(CalendarGrid.ActualWidth > _calendarWidth, "scaled date typography did not grow measured columns");
                 CheckBalanceWidth();
-                foreach (var button in Find<ToggleButton>())
+                foreach (var button in CalendarButtons)
                 {
                     var content = (UsageDateContent)button.Content;
                     foreach (var text in new[] { content.DateLabel, content.TemporalLabel })
@@ -503,10 +503,10 @@ sealed class Harness
             {
                 foreach (var size in new[] { 21d, 35d })
                 {
-                    foreach (var button in Find<ToggleButton>()) button.FontSize = size;
+                    foreach (var button in CalendarButtons) button.FontSize = size;
                     Root.UpdateLayout();
                     CheckBalanceWidth();
-                    var buttons = Find<ToggleButton>().ToArray();
+                    var buttons = CalendarButtons;
                     Require(buttons.All(b => Math.Abs(b.ActualWidth - buttons[0].ActualWidth) < .1),
                         "scaled columns lost equal width");
                     foreach (var button in buttons)
@@ -587,7 +587,7 @@ sealed class Harness
     {
         Require(_source.Subscribers == 3, "source subscription count");
         Require(SavedA.Pace.TotalWorkdays == 22 && SavedA.Pace.ElapsedWorkdays == 8, "September baseline");
-        var toggles = Find<ToggleButton>().ToArray();
+        var toggles = CalendarButtons;
         Require(toggles.Length == 35, "calendar must contain five complete seven-day rows");
         Require(!toggles[0].IsEnabled && AutomationProperties.GetName(toggles[0]).Contains("Sunday, August 30") &&
             AutomationProperties.GetName(toggles[^1]).Contains("Saturday, October 3"),
@@ -596,6 +596,21 @@ sealed class Harness
         Require(toggles.All(t => !string.IsNullOrEmpty(AutomationProperties.GetName(t))), "calendar date missing accessible name");
         Require(toggles.Where(t => t.IsEnabled).All(t => t.IsTabStop), "enabled date not keyboard accessible");
         Require(AutomationProperties.GetName(DateButton(new(2026, 9, 10))).Contains("Today"), "today not exposed");
+        var account = Find<Expander>().Single();
+        Require(!account.IsExpanded &&
+            Descendants<XamlText>(account).Any(t => t.Text == "Signed in as: fixture-account"),
+            "signed-in Account header missing");
+        account.IsExpanded = true;
+        Root.UpdateLayout();
+        Require(!Descendants<Button>(account).Any(b => b.Content?.ToString() == "Login"),
+            "Login button visible for signed-in account");
+        Require(!Descendants<XamlText>(account).Any(t => t.Text == "Login"),
+            "signed-in login value duplicated inside Account details");
+        account.IsExpanded = false;
+        Root.UpdateLayout();
+        Require(!account.IsExpanded, "Account did not collapse");
+        account.IsExpanded = true;
+        Root.UpdateLayout();
         var before = Draft?.GetRawText();
         try { ((IToggleProvider)new ToggleButtonAutomationPeer(toggles[0]).GetPattern(PatternInterface.Toggle)).Toggle(); }
         catch (ElementNotEnabledException) { }
@@ -657,7 +672,7 @@ sealed class Harness
         Require(!texts.Any(t => t.Contains("assumption") || t.Contains("inferred") || t.Contains("Estimated cycle") ||
             t.Contains("counts as a full") || t.Contains("cumulative") || t.Contains("by default") ||
             t is "Work" or "Rest" or "Outside cycle"), "removed Config explanation or state label visible");
-        var buttons = Find<ToggleButton>().ToArray();
+        var buttons = CalendarButtons;
         Require(buttons.All(b => Math.Abs(b.ActualWidth - buttons[0].ActualWidth) < .1), "calendar columns unequal");
         Require(CalendarGrid.ActualWidth < CalendarSection.ActualWidth - 16,
             "calendar not compact relative to parent");
@@ -965,6 +980,9 @@ sealed class Harness
 
     private ToggleButton DateButton(DateOnly date) => Find<ToggleButton>().Single(t =>
         AutomationProperties.GetName(t).Contains(date.ToString("MMMM d, yyyy", System.Globalization.CultureInfo.GetCultureInfo("en-US"))));
+    private ToggleButton[] CalendarButtons => Find<ToggleButton>()
+        .Where(t => t.Content is UsageDateContent)
+        .ToArray();
     private void Toggle(DateOnly date) => ((IToggleProvider)new ToggleButtonAutomationPeer(DateButton(date))
         .GetPattern(PatternInterface.Toggle)).Toggle();
     private void Invoke(string content)

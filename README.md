@@ -27,7 +27,14 @@ next UTC month's first day and are explicitly **estimated**.
 
 The Used Percentage card compares elapsed workdays with Credits consumption.
 Balance is elapsed days minus used fraction times total working days, rounded
-midpoint-away-from-zero. The same integer drives the card and pulse tint:
+midpoint-away-from-zero. The same integer drives the card and pulse tint.
+The Usage configuration also exposes Copilot account details in a collapsible
+Account section, collapsed by default. When the shared CLI login is available,
+its header keeps **Account** on the left, shows the signed-in account on the
+right, and omits the Login button.
+The expanded details contain only the status, host, authentication type, and
+the login action when authentication is unavailable; the signed-in login is
+not repeated in a nested card.
 opaque blue at rounded zero (the same blue in Light and Dark), red behind,
 green ahead; only color saturates at six days. Nonzero colors still blend from
 the theme's neutral color, never from blue; unavailable remains neutral.
