@@ -26,6 +26,9 @@ if errorlevel 1 exit /b 1
 call :DeployModule Pagurian.Modules.Copilot
 if errorlevel 1 exit /b 1
 
+rem Keep release symbols in the build outputs, but do not ship them.
+for /r "%PUBLISH_DIR%" %%F in (*.pdb) do del /q "%%F"
+
 echo Done.
 endlocal
 exit /b 0
