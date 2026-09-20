@@ -9,6 +9,7 @@ public sealed class CopilotModule : PagurianModule
     public static CopilotModule Instance { get; private set; } = null!;
 
     internal CopilotUsageService Usage { get; } = new();
+    internal CopilotSdkSessionService SdkSessions { get; } = new();
 
     public CopilotModule()
     {
@@ -17,7 +18,11 @@ public sealed class CopilotModule : PagurianModule
 
     public override void Startup() => Usage.Start(Log);
 
-    public override void Shutdown() => Usage.Shutdown();
+    public override void Shutdown()
+    {
+        SdkSessions.Shutdown();
+        Usage.Shutdown();
+    }
 
     // Asset path helper: the module loads from the modules folder, so its
     // assets resolve next to the module dll, not next to the host exe.

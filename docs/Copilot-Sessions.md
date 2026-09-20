@@ -341,3 +341,9 @@ The recorded interactive run used 100% display scale and exercised sampled
 Light/Dark changes. High Contrast, other DPI settings and maximum system text
 scale still require manual validation; the fixture does not change user
 accessibility settings.
+# SDK monitor companion
+
+The separate **Copilot SDK** shell is documented in
+[Copilot SDK sessions](Copilot-SDK-Sessions.md). It intentionally has
+different membership and status semantics from this hook-based shell and may
+show the same local session independently.

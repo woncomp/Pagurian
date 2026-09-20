@@ -3,7 +3,7 @@ using System.Text.Json;
 
 namespace Pagurian.Modules.Copilot;
 
-enum CopilotSessionStatus { Idle, Working, Blocked }
+enum CopilotSessionStatus { Idle, Working, Blocked, Unknown }
 
 sealed record CopilotBlocker(
     string SourceId, string OwnerId, DateTimeOffset BlockedSince,
@@ -61,6 +61,15 @@ sealed class CopilotSession
     public IReadOnlyList<CopilotRecentHook> RecentHooks { get; set; } = [];
     public CopilotSessionDetails Details { get; set; } = CopilotSessionDetails.Empty;
     public CopilotSessionDetails GroupDetails { get; set; } = CopilotSessionDetails.Empty;
+    public bool IsSdk { get; set; }
+    public CopilotSdkReadHealth SdkReadHealth { get; set; } = CopilotSdkReadHealth.Healthy;
+    public string? SdkStatusReason { get; set; }
+    public DateTimeOffset? SdkLastReadAt { get; set; }
+    public bool SdkHistoryPartial { get; set; }
+    public IReadOnlyList<CopilotSdkPersistedEvent> RecentPersistedEvents { get; set; } = [];
+    public event Action? Changed;
+
+    internal void NotifyChanged() => Changed?.Invoke();
 }
 
 // Only identity, lifecycle and presentation scalars are interpreted. Dump retains the

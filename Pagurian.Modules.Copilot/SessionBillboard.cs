@@ -32,10 +32,16 @@ class SessionBillboard : Billboard
         {
             void OnChanged() => setVersion(++tick.Current);
             CopilotSessionTracker.UiChanged += OnChanged;
+            if (_session.IsSdk)
+                CopilotModule.Instance.SdkSessions.UiChanged += OnChanged;
+            _session.Changed += OnChanged;
             Theme.Changed += OnChanged;
             return () =>
             {
                 CopilotSessionTracker.UiChanged -= OnChanged;
+                if (_session.IsSdk)
+                    CopilotModule.Instance.SdkSessions.UiChanged -= OnChanged;
+                _session.Changed -= OnChanged;
                 Theme.Changed -= OnChanged;
             };
         }, Array.Empty<object>());
@@ -74,6 +80,15 @@ class SessionBillboard : Billboard
             Section("Overview"),
             Field("Project", _session.ProjectName),
             Field("Working directory", _session.Cwd),
+            _session.IsSdk
+                ? Field("SDK observation",
+                    $"{_session.SdkReadHealth}: {_session.SdkStatusReason ?? "No status evidence"}")
+                : null,
+            _session.IsSdk && _session.SdkHistoryPartial
+                ? Caption("Recent persisted events are a bounded view; intermediate history may be missing.")
+                    .TextWrapping(TextWrapping.Wrap)
+                    .Foreground(ReactorTheme.SecondaryText)
+                : null,
             CopyId(_session.SessionId, "Main session ID"),
             DetailFields(_session.Details),
             Section("Attributable group totals" + Partial(_session.GroupDetails)),
@@ -99,7 +114,9 @@ class SessionBillboard : Billboard
                     UsageFields(node.Details))
                 .WithKey(node.SessionId)).ToArray())), hc);
 
-        var recent = VStack(4,
+        var recent = _session.IsSdk
+            ? PersistedEvents(_session)
+            : VStack(4,
             Section("Recent hooks"),
             _session.RecentHooks.Count == 0
                 ? Caption("No hooks received.").Foreground(ReactorTheme.SecondaryText)
@@ -233,6 +250,25 @@ class SessionBillboard : Billboard
     private static string Partial(CopilotSessionDetails details) => details.IsPartial ? " · Partial" : "";
     private static Element Section(string title) =>
         BodyStrong(title).HeadingLevel(AutomationHeadingLevel.Level2);
+
+    private static Element PersistedEvents(CopilotSession session)
+    {
+        var rows = session.RecentPersistedEvents.TakeLast(5).Select(item =>
+        {
+            var tool = CopilotRecentHook.Token(item.ToolName);
+            var line = $"{item.At?.ToLocalTime():HH:mm:ss} {CopilotRecentHook.Token(item.Type)} {tool}";
+            return Grid([GridSize.Star()], [GridSize.Auto],
+                    Caption(line).MaxLines(1)
+                        .TextTrimming(TextTrimming.CharacterEllipsis)
+                        .AutomationName(line))
+                .WithKey(item.EventId);
+        }).ToArray();
+        return VStack(4,
+            Section("Recent persisted events"),
+            rows.Length == 0
+                ? Caption("No persisted events available.").Foreground(ReactorTheme.SecondaryText)
+                : VStack(4, rows));
+    }
 
     private static Element Field(string label, string? value) =>
         Grid([GridSize.Px(160), GridSize.Star()], [GridSize.Auto],

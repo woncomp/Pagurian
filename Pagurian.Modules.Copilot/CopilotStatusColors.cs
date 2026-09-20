@@ -14,10 +14,11 @@ static class CopilotStatusColors
     public static SolidColorBrush StatusBrushFor(CopilotSession session, bool isDark)
     {
         var color = StatusColorFor(session.Status, isDark);
-        if (!_brushes.TryGetValue(session.SessionId, out var brush))
+        var key = Key(session);
+        if (!_brushes.TryGetValue(key, out var brush))
         {
             brush = new SolidColorBrush(color);
-            _brushes[session.SessionId] = brush;
+            _brushes[key] = brush;
         }
         else if (brush.Color != color)
         {
@@ -28,7 +29,13 @@ static class CopilotStatusColors
 
     // Drops a session's cached brush (sessionEnd removes the session, so
     // without this the cache would grow forever).
-    public static void Drop(string sessionId) => _brushes.Remove(sessionId);
+    public static void Drop(CopilotSession session) => _brushes.Remove(Key(session));
+
+    public static void Drop(string sessionId) =>
+        _brushes.Remove(sessionId);
+
+    private static string Key(CopilotSession session) =>
+        (session.IsSdk ? "sdk:" : "hook:") + session.SessionId;
 
     public static Windows.UI.Color StatusColorFor(CopilotSessionStatus status, bool isDark) =>
         status switch

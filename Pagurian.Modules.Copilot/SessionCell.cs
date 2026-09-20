@@ -16,6 +16,7 @@ class SessionCell : ShellCell
         var (_, setVersion) = UseState(0);
         var tick = UseRef(0);
         var colorScheme = UseColorScheme();
+        var session = ModelAs<CopilotSession>();
 
         UseEffect(() =>
         {
@@ -24,17 +25,22 @@ class SessionCell : ShellCell
             void OnChanged() => setVersion(++tick.Current);
             void OnTextScaleChanged(UISettings sender, object args) => dispatcher.TryEnqueue(OnChanged);
             CopilotSessionTracker.UiChanged += OnChanged;
+            if (session.IsSdk)
+                CopilotModule.Instance.SdkSessions.UiChanged += OnChanged;
+            session.Changed += OnChanged;
             Theme.Changed += OnChanged;
             settings.TextScaleFactorChanged += OnTextScaleChanged;
             return () =>
             {
                 CopilotSessionTracker.UiChanged -= OnChanged;
+                if (session.IsSdk)
+                    CopilotModule.Instance.SdkSessions.UiChanged -= OnChanged;
+                session.Changed -= OnChanged;
                 Theme.Changed -= OnChanged;
                 settings.TextScaleFactorChanged -= OnTextScaleChanged;
             };
         }, Array.Empty<object>());
 
-        var session = ModelAs<CopilotSession>();
         bool highContrast = colorScheme == ColorScheme.HighContrast;
         var status = TextBlock(session.Status.ToString())
             .ApplyStyle(SessionCellLayout.CaptionStyle)

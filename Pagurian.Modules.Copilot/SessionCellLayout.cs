@@ -20,7 +20,7 @@ internal static class SessionCellLayout
             Style = (Style)Application.Current.Resources[CaptionStyle],
         };
         double longest = 0;
-        foreach (string status in new[] { "Idle", "Working", "Blocked" })
+        foreach (string status in new[] { "Unknown", "Idle", "Working", "Blocked" })
         {
             text.Text = status;
             text.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
