@@ -47,3 +47,10 @@ visible with a neutral icon and an explicit source label.
 The SDK monitor owns a separate runtime shared by all Copilot SDK shell
 instances. The existing usage/login runtime and the hook-based Copilot
 Sessions shell are not changed or used as fallbacks.
+
+Removing the final Copilot SDK shell detaches its cells and cancels polling
+immediately. Its private runtime then drains and stops on a background thread,
+so Settings edits and Pagurian exit never wait on SDK pipe shutdown. If a new
+SDK shell is added during cleanup, it waits for the old runtime to finish
+stopping before starting a new monitor; two monitor runtimes are never run at
+the same time.

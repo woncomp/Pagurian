@@ -18,7 +18,9 @@ internal sealed class CopilotSdkSessionService
     private ICopilotSdkSessionSource? _source;
     private Task? _discoveryTask;
     private Task? _statusTask;
+    private Task? _drainTask;
     private TaskCompletionSource<bool>? _ready;
+    private readonly HashSet<Task> _inFlightReads = [];
     private Logger? _log;
     private DispatcherQueue? _dispatcher;
     private long _generation;
@@ -45,25 +47,30 @@ internal sealed class CopilotSdkSessionService
         lock (_sync)
         {
             _configurations[instanceId] = settings.Normalize();
-            if (_lifetime is not null)
+            if (_lifetime is not null || _drainTask is not null)
                 return;
-            _dispatcher = ReactorApp.UIDispatcher
-                ?? throw new InvalidOperationException(
-                    "The Reactor UI dispatcher is unavailable.");
-            _log = log;
-            _lifetime = new CancellationTokenSource();
-            _source = new CopilotSdkSessionSource();
-            _ready = new TaskCompletionSource<bool>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            var generation = ++_generation;
-            var token = _lifetime.Token;
-            _discoveryTask = Task.Run(
-                () => RunDiscoveryAsync(generation, token),
-                CancellationToken.None);
-            _statusTask = Task.Run(
-                () => RunStatusAsync(generation, token),
-                CancellationToken.None);
+            StartLocked(log);
         }
+    }
+
+    private void StartLocked(Logger log)
+    {
+        _dispatcher ??= ReactorApp.UIDispatcher
+            ?? throw new InvalidOperationException(
+                "The Reactor UI dispatcher is unavailable.");
+        _log = log;
+        _lifetime = new CancellationTokenSource();
+        _source = new CopilotSdkSessionSource();
+        _ready = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var generation = ++_generation;
+        var token = _lifetime.Token;
+        _discoveryTask = Task.Run(
+            () => RunDiscoveryAsync(generation, token),
+            CancellationToken.None);
+        _statusTask = Task.Run(
+            () => RunStatusAsync(generation, token),
+            CancellationToken.None);
     }
 
     public void Configure(string instanceId, CopilotSdkPollingSettings settings)
@@ -97,37 +104,98 @@ internal sealed class CopilotSdkSessionService
 
     private void ReleaseCore()
     {
-        CancellationTokenSource? lifetime = null;
-        Task[] tasks = [];
-        ICopilotSdkSessionSource? source = null;
+        CancellationTokenSource? lifetime;
+        Task[] tasks;
+        ICopilotSdkSessionSource? source;
+        long stoppingGeneration;
         lock (_sync)
         {
             if (_lifetime is null)
                 return;
             lifetime = _lifetime;
             _lifetime = null;
-            ++_generation;
+            stoppingGeneration = ++_generation;
             source = _source;
             _source = null;
             tasks = new[] { _discoveryTask, _statusTask }
-                .Where(task => task is not null).Cast<Task>().ToArray();
+                .Concat(_inFlightReads)
+                .Concat(_states.Values.Select(state => state.ConfirmationTask))
+                .Where(task => task is not null).Cast<Task>().Distinct().ToArray();
             _discoveryTask = null;
             _statusTask = null;
             _ready = null;
             _states.Clear();
+            _drainTask = Task.Run(
+                () => DrainAsync(stoppingGeneration, lifetime, tasks, source),
+                CancellationToken.None);
         }
         lifetime.Cancel();
-        try { Task.WaitAll(tasks, TimeSpan.FromSeconds(3)); }
-        catch (AggregateException exception)
+    }
+
+    private async Task DrainAsync(
+        long stoppingGeneration,
+        CancellationTokenSource lifetime,
+        IReadOnlyCollection<Task> tasks,
+        ICopilotSdkSessionSource? source)
+    {
+        try
         {
-            _log?.Warn($"Copilot SDK monitor shutdown failed: {exception.GetType().Name}");
+            var allOperations = Task.WhenAll(tasks);
+            if (await Task.WhenAny(
+                    allOperations,
+                    Task.Delay(TimeSpan.FromSeconds(3))).ConfigureAwait(false)
+                != allOperations)
+            {
+                _log?.Warn(
+                    "Copilot SDK monitor cleanup is still draining after cancellation.");
+            }
+            try
+            {
+                await allOperations.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception exception)
+            {
+                _log?.Warn($"Copilot SDK monitor cleanup failed: {exception.GetType().Name}");
+            }
+
+            if (source is not null)
+            {
+                var stop = source.DisposeAsync().AsTask();
+                if (await Task.WhenAny(
+                        stop,
+                        Task.Delay(TimeSpan.FromSeconds(3))).ConfigureAwait(false)
+                    != stop)
+                {
+                    _log?.Warn(
+                        "Copilot SDK runtime cleanup is still stopping after cancellation.");
+                }
+                try
+                {
+                    await stop.ConfigureAwait(false);
+                }
+                catch (Exception exception)
+                {
+                    _log?.Warn($"Copilot SDK runtime shutdown failed: {exception.GetType().Name}");
+                }
+            }
         }
-        try { source?.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
-        catch (Exception exception)
+        finally
         {
-            _log?.Warn($"Copilot SDK runtime shutdown failed: {exception.GetType().Name}");
+            lifetime.Dispose();
+            lock (_sync)
+            {
+                if (_generation == stoppingGeneration)
+                {
+                    _drainTask = null;
+                    if (_configurations.Count != 0)
+                        StartLocked(_log ?? throw new InvalidOperationException(
+                            "The Copilot SDK monitor logger is unavailable."));
+                }
+            }
         }
-        lifetime.Dispose();
     }
 
     private async Task RunDiscoveryAsync(long generation, CancellationToken token)
@@ -170,7 +238,7 @@ internal sealed class CopilotSdkSessionService
                     return;
                 var states = SnapshotStates();
                 await Task.WhenAll(states.Select(state =>
-                    ReadStatusAsync(state, generation, token))).ConfigureAwait(false);
+                    QueueStatusRead(state, generation, token))).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -234,7 +302,7 @@ internal sealed class CopilotSdkSessionService
         foreach (var session in started)
         {
             PublishOnUi(() => SessionStarted?.Invoke(session));
-            _ = ReadStatusAsync(FindState(session.SessionId), generation, token);
+            _ = QueueStatusRead(FindState(session.SessionId), generation, token);
         }
         foreach (var session in ended)
             PublishOnUi(() => SessionEnded?.Invoke(session));
@@ -258,6 +326,7 @@ internal sealed class CopilotSdkSessionService
                 return;
             ApplyEvents(state, result, generation, token);
         }
+
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
         }
@@ -265,6 +334,23 @@ internal sealed class CopilotSdkSessionService
         {
             state.ReadGate.Release();
         }
+    }
+
+    private Task QueueStatusRead(
+        SdkState? state,
+        long generation,
+        CancellationToken token)
+    {
+        var task = ReadStatusAsync(state, generation, token);
+        lock (_sync)
+            _inFlightReads.Add(task);
+        _ = task.ContinueWith(_ =>
+        {
+            lock (_sync)
+                _inFlightReads.Remove(task);
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+        return task;
     }
 
     private void ApplyEvents(
@@ -349,7 +435,7 @@ internal sealed class CopilotSdkSessionService
             {
                 await Task.Delay(BlockedConfirmationDelay, token).ConfigureAwait(false);
                 if (IsCurrent(generation) && state.CandidateKey == key)
-                    await ReadStatusAsync(state, generation, token).ConfigureAwait(false);
+                    await QueueStatusRead(state, generation, token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
