@@ -150,8 +150,14 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
 - `Trays/TrayId.cs` — `TrayId(MonitorKey, Edge)` (logical tray identity;
   `MonitorKey` is `"primary"` or a display's EDID identity key, never a GDI
   ordinal) and `SurfaceKey(DisplayKey, Edge)` (a live display's taskbar
-  surface). `TrayEdge.Right` is carried by the model/config but normalized to
-  the left surface until right-edge placement exists.
+  surface). Right-edge trays bind to their display's right surface and anchor
+  left of the taskbar's system area (the notification tray on the primary
+  taskbar, the clock on secondaries — `TaskbarInterop
+  .TryGetTaskbarSystemAreaLeft` finds its left boundary from known child
+  classes, falling back to a right-anchored-narrow-child heuristic with a
+  bounded children-signature log); on vertical taskbars they fold to the
+  left surface. Right-surface cells render in reversed config order so the
+  first configured cell sits nearest the system area.
 - `Displays/DisplayInterop.cs` + `Displays/DisplayTopology.cs` — the physical
   world: EnumDisplayMonitors geometry joined with DisplayConfig EDID identity
   (`MODEL-UID` keys, friendly names like "DELL U2720Q") and each display's
@@ -174,7 +180,9 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   presentation world: one TrayWindowSession + one sampled ThemeService per
   live surface. The controller's 50 ms tick polls input; every ~1.25 s it
   refreshes the topology and reconciles surfaces (primary-left always exists
-  as the tray-icon menu owner; others only while cells are bound). Hover/
+  as the tray-icon menu owner; right surfaces and non-primary left surfaces
+  exist only while cells are bound, so an empty right tray injects nothing).
+  Hover/
   tooltip/click dispatch iterates surfaces; the tooltip flips against the
   owning display's monitor rect, and the single billboard session uses the
   owner surface's theme.
@@ -184,12 +192,19 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   `HostSettings.SetConfigDir` → config reload → `TrayManager.ApplyConfig`).
   The Shells page keeps the module catalog or per-instance
   `ShellConfiguration` in the scrollable center, with the draft Tray fixed
-  at the bottom and horizontally scrollable. The draft is a list of
-  per-display trays; a monitor-picker button at the right end of the Tray
+  at the bottom. The Tray container is split into two drop zones per
+  selected display: the left half edits the left tray (icons ordered left to
+  right), the right half edits the right tray (icons hug the zone's right
+  edge, ordered outward from the system area; insertion candidates are
+  measured as distance from that edge, so the config-order spacing math is
+  shared). Dragging an icon across halves moves it between trays. The draft
+  is a list of per-display trays; a monitor-picker button at the right end
+  of the Tray
   container's title row opens a scaled display-layout preview (friendly
-  names, never display numbers; disconnected configured trays listed below)
-  and switches which tray is being edited. Selecting a display alone never
-  dirties the draft. The center uses a nested
+  names, never display numbers; disconnected configured displays listed
+  below, one row per display covering both edges)
+  and switches which display's trays are being edited. Selecting a display
+  alone never dirties the draft. The center uses a nested
   `NavigationHost` with `Modules` and per-instance `ShellConfiguration`
   routes: configurations enter from the right with
   `NavigationTransition.Spring()`, and Back plays the reverse transition.

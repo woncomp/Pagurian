@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace Pagurian;
 
@@ -89,6 +90,14 @@ static class TaskbarInterop
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern bool GetMonitorInfoW(IntPtr hMonitor, ref MONITORINFOEX lpmi);
+
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern int GetClassNameW(IntPtr hWnd, [Out] StringBuilder lpClassName, int nMaxCount);
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
     private static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
@@ -392,6 +401,68 @@ static class TaskbarInterop
     // than treating that outer host rectangle as the taskbar surface.
     public static bool TryGetTaskbarContentRect(out RECT rect) =>
         TryGetTaskbarContentRect(FindTaskbar(), out rect);
+
+    // Known classes of the taskbar's system-area controls: the notification
+    // tray (primary taskbar), the clock, and the show-desktop button. A
+    // right-edge tray anchors to the left of whichever is present. The
+    // secondary taskbar's clock is a XAML island whose bridging window class
+    // varies by build, so the geometry heuristic below covers whatever class
+    // it actually uses (its signature lands in the log for confirmation).
+    private static readonly string[] SystemAreaClassNames =
+        ["TrayNotifyWnd", "TrayClockWClass", "TrayShowDesktopButtonWClass"];
+
+    private static string? _loggedSystemAreaChildren;
+
+    // Left physical-pixel boundary of the taskbar's system area — where a
+    // right-edge tray's cells must end. Returns false when no system-area
+    // control is found; the caller then keeps the content rect's right edge.
+    public static bool TryGetTaskbarSystemAreaLeft(nint taskbar, in RECT contentRect, out int leftPx)
+    {
+        var content = contentRect;
+        var knownMin = int.MaxValue;
+        var rightAnchoredMin = int.MaxValue;
+        var signature = new StringBuilder();
+        EnumChildWindows(taskbar, (child, _) =>
+        {
+            if (!TryGetWindowRect(child, out var rect))
+                return true;
+            var name = new StringBuilder(256);
+            var length = GetClassNameW(child, name, name.Capacity);
+            var className = length > 0 ? name.ToString() : "";
+            signature.Append(' ').Append(className)
+                .Append('@').Append(rect.Left).Append(',').Append(rect.Top)
+                .Append(',').Append(rect.Width).Append('x').Append(rect.Height);
+            if (SystemAreaClassNames.Contains(className))
+                knownMin = Math.Min(knownMin, rect.Left);
+            // Fallback: children docked at the taskbar's right end and at
+            // most half as wide as the taskbar — the system-area cluster.
+            if (rect.Right >= content.Right - 8 && rect.Width <= content.Width / 2)
+                rightAnchoredMin = Math.Min(rightAnchoredMin, rect.Left);
+            return true;
+        }, IntPtr.Zero);
+
+        // One log line per taskbar structure change; the child list is short
+        // and stable, so this stays bounded (Explorer restarts re-log).
+        var signatureText = signature.ToString();
+        if (signatureText != _loggedSystemAreaChildren)
+        {
+            _loggedSystemAreaChildren = signatureText;
+            PagurianLog.Host($"taskbar {taskbar}: children[{signatureText}]");
+        }
+
+        if (knownMin != int.MaxValue)
+        {
+            leftPx = knownMin;
+            return true;
+        }
+        if (rightAnchoredMin != int.MaxValue)
+        {
+            leftPx = rightAnchoredMin;
+            return true;
+        }
+        leftPx = 0;
+        return false;
+    }
 
     public static bool TryGetTaskbarContentRect(IntPtr taskbar, out RECT rect)
     {

@@ -21,12 +21,10 @@ static class TaskbarTrayPlacement
             double xPx, yPx;
             if (IsHorizontal)
             {
-                // TODO(right-edge trays): anchoring at the content rect's
-                // right end overlaps the notification area/clock on stock
-                // Windows; the right anchor needs a measured safe inset
-                // before TrayEdge.Right surfaces are materialized. Until then
-                // the binding engine normalizes every tray to the left
-                // surface, so this branch is unreachable.
+                // Right-edge surfaces anchor left of the system area (the
+                // notification tray on the primary taskbar, the clock on
+                // secondaries); TryGetSurface pre-clips ContentRect.Right to
+                // that boundary, so the mirrored branch ends beside it.
                 xPx = Edge == TrayEdge.Right
                     ? ContentRect.Right - winW - 8 * Scale
                     : ContentRect.Left + 8 * Scale;
@@ -72,6 +70,15 @@ static class TaskbarTrayPlacement
         }
 
         var horizontal = contentRect.Width >= contentRect.Height;
+        if (edge == TrayEdge.Right && horizontal &&
+            TaskbarInterop.TryGetTaskbarSystemAreaLeft(taskbar, contentRect, out var systemLeft) &&
+            systemLeft > contentRect.Left)
+        {
+            // The right surface lives left of the system area; everything
+            // from its left boundary rightwards is off-limits for placement.
+            contentRect.Right = systemLeft;
+        }
+
         var scale = (horizontal ? contentRect.Height : contentRect.Width) /
             TaskbarTrayWindow.WindowHeightDip;
         if (scale <= 0)

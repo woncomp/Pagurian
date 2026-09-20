@@ -10,7 +10,8 @@ namespace Pagurian;
 //
 //   { "trays": [
 //     { "monitor": "primary",           // or a display identity key, e.g. "DEL40A6-UID4354"
-//       "edge": "left",                 // optional; "right" is a planned extension
+//       "edge": "left",                 // optional; "right" sits left of the
+//                                      // system area (clock/notification tray)
 //       "shells": [
 //         { "shell": "<Shell class FullName>", "id": "3842",
 //           "settings": { ... } },      // optional, passed through verbatim

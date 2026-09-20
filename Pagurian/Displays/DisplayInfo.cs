@@ -17,6 +17,15 @@ internal sealed record DisplayInfo(
     // The Windows "show taskbar on all displays" toggle and auto-hide states
     // control whether a taskbar window exists on this display right now.
     internal bool HasTaskbar => TaskbarHwnd != 0;
+
+    // Right-edge trays anchor beside the system area, which only exists on
+    // horizontal taskbars; the binding engine folds right trays onto the
+    // left surface for vertical ones (Windows 11 has no official vertical
+    // taskbar, so this is a defensive branch).
+    internal bool IsTaskbarHorizontal =>
+        TaskbarHwnd != 0 && TaskbarInterop.TryGetTaskbarRect(TaskbarHwnd, out var taskbarRect)
+            ? taskbarRect.Width >= taskbarRect.Height
+            : Rect.Width >= Rect.Height;
 }
 
 // Last-seen geometry/name of a display that may currently be disconnected.

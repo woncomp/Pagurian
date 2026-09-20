@@ -270,7 +270,7 @@ static class TrayManager
         if (exact != null)
         {
             reason = tray.IsPrimaryAlias ? "primary alias" : "configured display";
-            return LeftSurface(exact, tray, ref reason);
+            return SurfaceFor(exact, tray, ref reason);
         }
 
         // 1. Closest aspect ratio to the missing display's recorded geometry.
@@ -283,7 +283,7 @@ static class TrayManager
             if (best.Delta <= AspectTolerance)
             {
                 reason = $"aspect-ratio match for absent {tray.MonitorKey} ({recorded.Width}x{recorded.Height})";
-                return LeftSurface(best.Display, tray, ref reason);
+                return SurfaceFor(best.Display, tray, ref reason);
             }
         }
 
@@ -292,13 +292,13 @@ static class TrayManager
         if (empty != null)
         {
             reason = $"first unoccupied display for absent {tray.MonitorKey}";
-            return LeftSurface(empty, tray, ref reason);
+            return SurfaceFor(empty, tray, ref reason);
         }
 
         // 3. The primary display.
         var primary = candidates.FirstOrDefault(d => d.IsPrimary) ?? candidates[0];
         reason = $"primary fallback for absent {tray.MonitorKey}";
-        return LeftSurface(primary, tray, ref reason);
+        return SurfaceFor(primary, tray, ref reason);
     }
 
     // A tray owns a display when the config points at it directly — by
@@ -306,13 +306,17 @@ static class TrayManager
     private static bool Owns(TrayId tray, DisplayInfo display) =>
         tray.IsPrimaryAlias ? display.IsPrimary : tray.MonitorKey == display.IdentityKey;
 
-    // Until right-edge surfaces are materialized (see TaskbarTrayPlacement),
-    // every tray renders on its display's left surface. The configured edge
-    // stays on TrayId so configs round-trip untouched.
-    private static SurfaceKey LeftSurface(DisplayInfo display, TrayId tray, ref string reason)
+    // The surface a tray renders on: same display, same edge — except that
+    // right-edge trays need a horizontal taskbar (the system area they anchor
+    // beside only exists there), so they fold onto the display's left
+    // surface otherwise.
+    private static SurfaceKey SurfaceFor(DisplayInfo display, TrayId tray, ref string reason)
     {
-        if (tray.Edge != TrayEdge.Left)
-            reason += $"; {TrayId.EdgeName(tray.Edge)} edge is not yet supported, using left";
-        return new SurfaceKey(display.IdentityKey, TrayEdge.Left);
+        if (tray.Edge == TrayEdge.Right && !display.IsTaskbarHorizontal)
+        {
+            reason += "; right edge needs a horizontal taskbar, using left";
+            return new SurfaceKey(display.IdentityKey, TrayEdge.Left);
+        }
+        return new SurfaceKey(display.IdentityKey, tray.Edge);
     }
 }

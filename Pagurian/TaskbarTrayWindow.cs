@@ -129,6 +129,15 @@ class TaskbarTrayWindow : Component
             return () => TrayManager.Changed -= OnChanged;
         }, Array.Empty<object>());
         var cells = TrayManager.CellsForSurface(_surface).ToArray();
+        if (_surface.Edge == TrayEdge.Right)
+        {
+            // Right-edge surfaces anchor beside the system area (left of the
+            // clock/notification tray), so the first configured cell must
+            // render nearest it: reverse the visual order. The layout
+            // snapshot follows render order, which hit-testing and anchors
+            // are keyed by, so everything stays consistent.
+            Array.Reverse(cells);
+        }
         _layout.SetCells(cells);
         return HStack(0, cells.Select(cell =>
             (Element)(Border(new ComponentElement(cell.ViewType, cell.Props))

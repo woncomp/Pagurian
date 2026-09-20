@@ -25,13 +25,38 @@ Three layers, one-directional:
   surface: exact display (the `primary` alias follows the current primary) →
   closest aspect ratio to the recorded geometry (|ln(a/b)| ≤ 0.15) → a display
   no configured tray owns → the primary display. A surface renders the cells of
-  every tray bound to it, in config order. Right-edge trays are carried in the
-  identity/config model and currently normalized to the left surface.
+  every tray bound to it, in config order. Right-edge trays bind to their
+  display's right surface and keep their edge through the fallback chain;
+  only on vertical taskbars (no system area to anchor beside) do they fold
+  to the left surface.
 - **TraySurface** owns the presentation world: one TrayWindowSession, one
   sampled ThemeService, and the interaction state for its display. The
   TraySurfaceController reconciles the surface set on a throttled cadence: the
-  primary display's left surface always exists (tray-icon menu owner), others
-  exist only while cells are bound to them.
+  primary display's left surface always exists (tray-icon menu owner), all
+  other surfaces — non-primary left, every right — exist only while cells are
+  bound to them.
+
+## Right-edge trays
+
+A right-edge surface anchors its window to the left of the taskbar's system
+area: the notification tray (`TrayNotifyWnd`) on the primary taskbar, the
+clock on secondaries. `TaskbarInterop.TryGetTaskbarSystemAreaLeft` enumerates
+the taskbar's child windows and takes the left edge of known system-area
+classes (`TrayNotifyWnd`, `TrayClockWClass`, `TrayShowDesktopButtonWClass`),
+falling back to any right-anchored child at most half the taskbar's width; the
+enumerated child signature is logged once per structure change so the real
+secondary-clock class can be confirmed and added. When nothing is found the
+content rect's right edge stays the anchor (and the log shows why).
+
+`TaskbarTrayPlacement` pre-clips the content rect's right edge to that
+boundary for `TrayEdge.Right` surfaces, so the mirrored placement branch ends
+beside the system area without further math.
+
+Cells render in **reversed config order** (`TaskbarTrayWindow` reverses the
+array for right surfaces): the first configured cell sits nearest the system
+area, and the layout snapshot — which hit-testing, hover and billboard anchors
+read — follows render order, so everything stays keyed consistently. The
+logical order in `TrayManager.CellsForSurface` remains pure config order.
 
 DPI falls out of the existing math (surface scale is the measured taskbar
 thickness ÷ 48 DIP). Tooltips flip against the owning display's monitor rect —
@@ -131,7 +156,8 @@ at a bounded cadence; close invalidates queued capture and first-frame callbacks
   late results, floating fallback, parent destruction and subsequent recovery.
 - `tests/Verify-TrayTopology.ps1`: config v1→v2 migration and roundtrip, global
   id uniqueness across trays, exact/alias binding, the full fallback chain
-  (aspect → unoccupied → primary), reconnection, right-edge normalization,
+  (aspect → unoccupied → primary), reconnection, right-edge binding
+  (right surface, edge-preserving fallback, vertical-taskbar fold),
   cross-tray `post` routing, and cross-tray move restart semantics. Fabricated
   displays and an isolated temp config; never touches user state.
 - `tests/Verify-TrayLifecycle.ps1 -Taskbar`: the same production session under

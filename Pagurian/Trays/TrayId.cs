@@ -1,10 +1,8 @@
 namespace Pagurian;
 
-// Which edge of a display's taskbar a tray anchors to. Right-edge trays are a
-// planned extension: the identity and config model carry the edge from day
-// one, but the binding engine currently normalizes every tray to the left
-// surface (see TrayManager) until right-edge placement is designed (it must
-// avoid the notification area/clock).
+// Which edge of a display's taskbar a tray anchors to. Left-edge trays sit
+// at the taskbar's left end; right-edge trays sit left of the system area
+// (the notification tray on the primary taskbar, the clock on secondaries).
 internal enum TrayEdge { Left, Right }
 
 // Identity of a logical tray: the display it belongs to plus the taskbar

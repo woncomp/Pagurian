@@ -56,11 +56,13 @@ static class TraySurfaceController
         _surfaces.Clear();
     }
 
-    // The primary surface's HWND owns the native tray-icon context menu.
+    // The primary display's left surface HWND owns the native tray-icon
+    // context menu (a right surface may exist without one).
     public static nint TrayWindowHwnd()
     {
         foreach (var (key, surface) in _surfaces)
-            if (DisplayTopology.Find(key.DisplayKey) is { IsPrimary: true })
+            if (key.Edge == TrayEdge.Left &&
+                DisplayTopology.Find(key.DisplayKey) is { IsPrimary: true })
                 return surface.Hwnd;
         return _surfaces.Values.FirstOrDefault()?.Hwnd ?? 0;
     }
@@ -122,9 +124,16 @@ static class TraySurfaceController
         var wanted = new HashSet<SurfaceKey>();
         foreach (var display in DisplayTopology.Displays.Where(d => d.HasTaskbar))
         {
-            var key = new SurfaceKey(display.IdentityKey, TrayEdge.Left);
-            if (display.IsPrimary || TrayManager.CellsForSurface(key).Count > 0)
-                wanted.Add(key);
+            var leftKey = new SurfaceKey(display.IdentityKey, TrayEdge.Left);
+            if (display.IsPrimary || TrayManager.CellsForSurface(leftKey).Count > 0)
+                wanted.Add(leftKey);
+
+            // Right surfaces exist only while cells are bound to them; the
+            // tray icon's menu never needs one, and an empty right tray
+            // injects nothing.
+            var rightKey = new SurfaceKey(display.IdentityKey, TrayEdge.Right);
+            if (TrayManager.CellsForSurface(rightKey).Count > 0)
+                wanted.Add(rightKey);
         }
 
         foreach (var (key, surface) in _surfaces.ToList())

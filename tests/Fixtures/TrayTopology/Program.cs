@@ -32,6 +32,7 @@ ReactorApp.Run(_ =>
             return new DisplayInfo(key, key, $@"\\.\{key}", (nint)1, rect, rect, primary, taskbar ? (nint)2 : (nint)0);
         }
         SurfaceKey Left(string display) => new(display, TrayEdge.Left);
+        SurfaceKey Right(string display) => new(display, TrayEdge.Right);
 
         // --- config v1 migration ---
         var configPath = Path.Combine(HostSettings.TestDir, "config.json");
@@ -128,14 +129,34 @@ ReactorApp.Run(_ =>
         Require(TrayManager.BindingOf(new TrayId("MON-B", TrayEdge.Left)) == Left("MON-B"),
             "reconnected display did not reclaim its tray");
 
-        // --- right-edge trays normalize to the left surface for now ---
+        // --- right-edge trays bind to the display's right surface ---
         TrayManager.ApplyConfig([
             G(TrayId.PrimaryMonitorKey, E("1001")),
             new TrayConfig.TrayGroup(new TrayId("MON-B", TrayEdge.Right), [E("2002")]),
         ]);
         TrayManager.SetTopology([primary, monB]);
-        Require(TrayManager.BindingOf(new TrayId("MON-B", TrayEdge.Right)) == Left("MON-B"),
-            "right-edge tray did not normalize to the left surface");
+        Require(TrayManager.BindingOf(new TrayId("MON-B", TrayEdge.Right)) == Right("MON-B"),
+            "right-edge tray did not bind to the right surface");
+        Require(TrayManager.CellsForSurface(Right("MON-B")).Count == 1,
+            "right-edge cells did not compose on the right surface");
+        Require(TrayManager.CellsForSurface(Left("MON-B")).Count == 0,
+            "left surface picked up right-edge cells");
+
+        // --- fallback preserves the configured edge ---
+        history.Remove("MON-B");
+        TrayManager.SetTopology([primary, monC]);
+        Require(TrayManager.BindingOf(new TrayId("MON-B", TrayEdge.Right)) == Right("MON-C"),
+            "fallback did not keep the right edge");
+
+        // --- right trays fold to the left surface on vertical taskbars ---
+        TrayManager.ApplyConfig([
+            G(TrayId.PrimaryMonitorKey, E("1001")),
+            new TrayConfig.TrayGroup(new TrayId("MON-V", TrayEdge.Right), [E("2002")]),
+        ]);
+        var monV = D("MON-V", 1080, 1920, x: 4480);
+        TrayManager.SetTopology([primary, monV]);
+        Require(TrayManager.BindingOf(new TrayId("MON-V", TrayEdge.Right)) == Left("MON-V"),
+            "right tray did not fold to the left surface on a vertical taskbar");
 
         // --- post routing is global across trays ---
         var target = (ProbeShell)TrayManager.Shells.First(s => s.InstanceId == "2002");
