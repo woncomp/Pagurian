@@ -15,9 +15,12 @@ namespace Pagurian.Modules.Copilot;
 public sealed class CopilotShell : Shell
 {
     private readonly Dictionary<string, ShellCellHandle> _cells = new();
+    private readonly Dictionary<string, CopilotSessionCellModel> _cellModels = new();
+    private CopilotSessionIconSize _iconSize;
 
     public override void Startup()
     {
+        _iconSize = CopilotSettings.Clients(Settings).IconSize;
         CopilotSessionTracker.SessionStarted += OnSessionStarted;
         CopilotSessionTracker.SessionEnded += OnSessionEnded;
         CopilotSessionTracker.Start(Log);
@@ -37,6 +40,7 @@ public sealed class CopilotShell : Shell
             RemoveCell(cell);
         }
         _cells.Clear();
+        _cellModels.Clear();
         CopilotHookInstaller.Uninstall();
     }
 
@@ -56,15 +60,28 @@ public sealed class CopilotShell : Shell
     {
         if (_cells.ContainsKey(session.SessionId))
             return;
+        var model = new CopilotSessionCellModel(session, _iconSize);
+        _cellModels[session.SessionId] = model;
         _cells[session.SessionId] = AddCell<SessionCell>(
-            model: session,
+            model: model,
             tooltip: () => $"{session.Name}\n{(string.IsNullOrWhiteSpace(session.Cwd) ? "Working directory unavailable" : session.Cwd)}",
             billboard: () => new SessionBillboard(session));
+    }
+
+    public override void OnSettingsChanged()
+    {
+        var next = CopilotSettings.Clients(Settings).IconSize;
+        if (next == _iconSize)
+            return;
+        _iconSize = next;
+        foreach (var model in _cellModels.Values)
+            model.SetIconSize(next);
     }
 
     private void OnSessionEnded(CopilotSession session)
     {
         CopilotStatusColors.Drop(session.SessionId);
+        _cellModels.Remove(session.SessionId);
         if (_cells.Remove(session.SessionId, out var cell))
             RemoveCell(cell);
     }

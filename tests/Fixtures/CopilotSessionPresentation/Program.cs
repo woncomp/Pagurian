@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
@@ -9,6 +10,7 @@ using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Automation.Provider;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Shapes;
 using Pagurian;
 using Pagurian.Modules.Copilot;
 using Pagurian.Sdk;
@@ -37,15 +39,25 @@ sealed class FixtureTheme : IThemeService
 }
 
 sealed class FixtureShell : Shell;
-sealed record CellProbe(ShellCellProps Props, string Status, string Project)
+sealed class CellProbe(
+    ShellCellProps props,
+    string status,
+    string project,
+    string name,
+    bool isLarge)
 {
+    public ShellCellProps Props { get; } = props;
+    public string Status { get; } = status;
+    public string Project { get; } = project;
+    public string Name { get; } = name;
+    public bool IsLarge { get; set; } = isLarge;
     public FrameworkElement? Root;
 }
 
 sealed class CellsView(IReadOnlyList<CellProbe> cells) : Component
 {
     public override Element Render() => VStack(0,
-        Enumerable.Range(0, 3).Select(row =>
+        Enumerable.Range(0, (int)Math.Ceiling(cells.Count / 5.0)).Select(row =>
             HStack(0, cells.Skip(row * 5).Take(5).Select(cell =>
                 Border(new ComponentElement(Harness.Type("SessionCell"), cell.Props))
                     .Height(48)
@@ -67,6 +79,8 @@ sealed class Harness
     private object _model = null!;
     private Array _nodes = null!;
     private string[] _recentLines = [];
+    private CellProbe _switchingLargeCell = null!;
+    private double _mediumWidth;
     private int _checks;
     private bool _finished;
     private nint _foreground;
@@ -81,7 +95,13 @@ sealed class Harness
         if (property == "ProjectName" && !member.CanWrite) return;
         member.SetValue(target, value);
     }
-    private static object New(string type) => Activator.CreateInstance(Type(type), nonPublic: true)!;
+    private static object New(string type, params object?[] arguments) =>
+        Activator.CreateInstance(
+            Type(type),
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            binder: null,
+            arguments,
+            culture: null)!;
     private static object Details()
     {
         var value = New("CopilotSessionDetails");
@@ -100,28 +120,42 @@ sealed class Harness
         try
         {
             typeof(Shell).GetProperty(nameof(Shell.Theme))!.SetValue(_shell, _theme);
-            foreach (string status in new[] { "Idle", "Working", "Blocked" })
+            VerifyIconSizeSettings();
+            foreach (string status in new[] { "Idle", "Working", "Blocked", "Unknown" })
             foreach (string client in new[] { "App", "Cli", "VSCode", "Other", "Unknown" })
+                _cells.Add(CreateCell(status, client, false,
+                    "A very long project name that must be ellipsized",
+                    "Fixture session title"));
+            foreach (string status in new[] { "Idle", "Working", "Blocked", "Unknown" })
             {
-                var model = New("CopilotSession");
-                Set(model, "SessionId", $"fixture-{status}-{client}");
-                Set(model, "Name", "Fixture session");
-                Set(model, "Cwd", @"D:\fixture\A very long project name that must be ellipsized");
-                Set(model, "ProjectName", "A very long project name that must be ellipsized");
-                Set(model, "Client", EnumValue("CopilotClientKind", client));
-                Set(model, "Status", EnumValue("CopilotSessionStatus", status));
-                _cells.Add(new(new(_shell, model, null, null, null), status,
-                    (string)model.GetType().GetProperty("ProjectName")!.GetValue(model)!));
+                var cell = CreateCell(status, "App", true,
+                    status == "Idle" ? "Short" : "A very long project name that must be ellipsized",
+                    "A very long fixture session title that must be ellipsized");
+                _cells.Add(cell);
+                if (status == "Working")
+                    _switchingLargeCell = cell;
             }
             _cellWindow = ReactorApp.OpenWindow(new WindowSpec
             {
-                Title = "Isolated Copilot presentation fixture", Width = 640, Height = 144,
+                Title = "Isolated Copilot presentation fixture", Width = 720, Height = 240,
                 NoActivate = true, ActivateOnOpen = false, ShowInTaskbar = false,
                 ShowInSwitcher = false, Style = WindowStyle.None,
             }, () => new CellsView(_cells));
             _cellWindow.Show();
             OpenBillboard();
             _steps.Enqueue(CheckCells);
+            _steps.Enqueue(() =>
+            {
+                _mediumWidth = _cells.First(cell => !cell.IsLarge).Root!.ActualWidth;
+                SetIconSize(_switchingLargeCell, "Medium");
+                _switchingLargeCell.IsLarge = false;
+            });
+            _steps.Enqueue(() =>
+            {
+                Require(Math.Abs(_switchingLargeCell.Root!.ActualWidth - _mediumWidth) < .5,
+                    "live icon-size switch did not restore Medium width");
+                CheckCells();
+            });
             _steps.Enqueue(() =>
             {
                 Require(_billboard!.State == BillboardSessionState.Visible, "billboard not visible");
@@ -216,6 +250,54 @@ sealed class Harness
         catch (Exception ex) { Fail(ex.ToString()); }
     }
 
+    private CellProbe CreateCell(
+        string status,
+        string client,
+        bool isLarge,
+        string project,
+        string name)
+    {
+        var session = New("CopilotSession");
+        Set(session, "SessionId", $"fixture-{status}-{client}-{isLarge}");
+        Set(session, "Name", name);
+        Set(session, "Cwd", @"D:\fixture\" + project);
+        Set(session, "ProjectName", project);
+        Set(session, "Client", EnumValue("CopilotClientKind", client));
+        Set(session, "Status", EnumValue("CopilotSessionStatus", status));
+        object model = isLarge
+            ? New("CopilotSessionCellModel", session, EnumValue("CopilotSessionIconSize", "Large"))
+            : session;
+        return new(new(_shell, model, null, null, null), status, project, name, isLarge);
+    }
+
+    private static void SetIconSize(CellProbe cell, string size) =>
+        cell.Props.Model!.GetType().GetMethod("SetIconSize")!.Invoke(
+            cell.Props.Model, [EnumValue("CopilotSessionIconSize", size)]);
+
+    private void VerifyIconSizeSettings()
+    {
+        var settings = Type("CopilotSettings");
+        var read = settings.GetMethod("Clients", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!;
+        var write = settings.GetMethod("Write", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!;
+        object Read(string json) => read.Invoke(null, [JsonDocument.Parse(json).RootElement])!;
+        string Size(object clients) => clients.GetType().GetProperty("IconSize")!.GetValue(clients)!.ToString()!;
+
+        var missing = Read("{}");
+        Require(Size(missing) == "Medium", "missing icon size must default to Medium");
+        Require((bool)missing.GetType().GetProperty("CopilotCli")!.GetValue(missing)!,
+            "missing clients must retain enabled defaults");
+        Require(Size(Read("""{"iconSize":"unexpected"}""")) == "Medium",
+            "invalid icon size must default to Medium");
+        var large = Read("""{"iconSize":"LARGE","clients":{"copilotCli":false,"copilotApp":true,"vsCode":false}}""");
+        Require(Size(large) == "Large", "large icon size was not read");
+        var written = (JsonElement)write.Invoke(null, [large])!;
+        Require(written.GetProperty("iconSize").GetString() == "large",
+            "large icon size was not persisted canonically");
+        Require(!written.GetProperty("clients").GetProperty("copilotCli").GetBoolean() &&
+                !written.GetProperty("clients").GetProperty("vsCode").GetBoolean(),
+            "icon-size write did not preserve client selections");
+    }
+
     private void OpenBillboard()
     {
         _model = New("CopilotSession");
@@ -268,22 +350,73 @@ sealed class Harness
 
     private void CheckCells()
     {
-        var widths = new List<double>();
+        var mediumWidths = new List<double>();
+        var largeWidths = new List<double>();
         foreach (var cell in _cells)
         {
             var root = cell.Root!;
             var labels = Descendants<XamlText>(root).ToArray();
-            var status = labels.Single(text => text.Text == cell.Status);
             var project = labels.Single(text => text.Text == cell.Project);
-            var statusPoint = status.TransformToVisual(root).TransformPoint(new Point());
             var projectPoint = project.TransformToVisual(root).TransformPoint(new Point());
-            Require(projectPoint.Y >= statusPoint.Y + status.ActualHeight - 1, "cell labels are not two rows");
             Require(projectPoint.Y + project.ActualHeight <= 49, "two-line cell exceeds taskbar slot");
-            Require(project.IsTextTrimmed, "long project is not ellipsized in finite column");
-            widths.Add(root.ActualWidth);
+            if (!cell.IsLarge)
+            {
+                var status = labels.Single(text => text.Text == cell.Status);
+                var statusPoint = status.TransformToVisual(root).TransformPoint(new Point());
+                Require(projectPoint.Y >= statusPoint.Y + status.ActualHeight - 1,
+                    "Medium cell labels are not two rows");
+                if (cell.Project.Length > 16)
+                    Require(project.IsTextTrimmed, "Medium project is not ellipsized in finite column");
+                mediumWidths.Add(root.ActualWidth);
+                continue;
+            }
+
+            var name = labels.Single(text => text.Text == cell.Name);
+            var namePoint = name.TransformToVisual(root).TransformPoint(new Point());
+            Require(namePoint.Y >= projectPoint.Y + project.ActualHeight - 1,
+                "Large session title is not on the second row");
+            Require(namePoint.Y + name.ActualHeight <= 49, "Large cell exceeds taskbar slot");
+            if (cell.Project.Length > 16)
+                Require(project.IsTextTrimmed, "Large project is not ellipsized in its finite column");
+            Require(name.IsTextTrimmed, "Large session title is not ellipsized in its finite row");
+            switch (cell.Status)
+            {
+                case "Idle":
+                    Require(Descendants<Ellipse>(root).Count() == 1 &&
+                            !labels.Any(text => text.Text is "!" or "?"),
+                        "Idle Large status icon is not a hollow circle");
+                    break;
+                case "Working":
+                    Require(Descendants<ProgressRing>(root).Single().IsActive,
+                        "Working Large status icon is not an active progress ring");
+                    break;
+                case "Blocked":
+                    Require(Descendants<Ellipse>(root).Count() == 1 &&
+                            labels.Any(text => text.Text == "!"),
+                        "Blocked Large status icon is not an exclamation circle");
+                    break;
+                case "Unknown":
+                    Require(Descendants<Ellipse>(root).Count() == 1 &&
+                            labels.Any(text => text.Text == "?"),
+                        "Unknown Large status icon is not a question-mark circle");
+                    break;
+            }
+            Require(Descendants<FrameworkElement>(root).Any(element =>
+                    AutomationProperties.GetName(element) == $"{cell.Name}, {cell.Status}, {cell.Project}"),
+                "Large cell accessibility name changed");
+            largeWidths.Add(root.ActualWidth);
         }
-        Require(widths.Max() - widths.Min() < 0.5, "client/status variants have different widths");
-        Require(Math.Abs(widths[0] / 4 - Math.Round(widths[0] / 4)) < .01, "width not rounded to 4 DIP");
+        Require(mediumWidths.Max() - mediumWidths.Min() < 0.5,
+            "Medium client/status variants have different widths");
+        Require(Math.Abs(mediumWidths[0] / 4 - Math.Round(mediumWidths[0] / 4)) < .01,
+            "Medium width not rounded to 4 DIP");
+        if (largeWidths.Count > 0)
+        {
+            Require(largeWidths.Max() - largeWidths.Min() < .5,
+                "Large status variants have different widths");
+            Require(Math.Abs(largeWidths[0] / mediumWidths[0] - 1.6) < .01,
+                "Large width is not 1.6 times Medium width");
+        }
     }
 
     private IEnumerable<XamlText> Texts() => Descendants<XamlText>(_billboard!.Window!.NativeWindow.Content);

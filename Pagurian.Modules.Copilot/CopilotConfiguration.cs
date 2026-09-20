@@ -10,6 +10,8 @@ namespace Pagurian.Modules.Copilot;
 
 class CopilotConfiguration : ShellConfiguration
 {
+    private static readonly string[] IconSizeOptions = ["Medium", "Large"];
+
     public override Element Render()
     {
         var clients = CopilotSettings.Clients(Settings);
@@ -39,7 +41,21 @@ class CopilotConfiguration : ShellConfiguration
             Caption("These selections are stored for future client identification and do not change runtime behavior yet.")
                 .TextWrapping(TextWrapping.WrapWholeWords)
                 .Foreground(ReactorTheme.SecondaryText)
-                .Margin(0, 8, 0, 0));
+                .Margin(0, 8, 0, 0),
+            RadioButtons(
+                    IconSizeOptions,
+                    clients.IconSize == CopilotSessionIconSize.Large ? 1 : 0,
+                    index => SetSettings(CopilotSettings.Write(
+                        clients with
+                        {
+                            IconSize = index == 1
+                                ? CopilotSessionIconSize.Large
+                                : CopilotSessionIconSize.Medium,
+                        })))
+                .Set(buttons => buttons.Header = "Icon size")
+                .AutomationName("Icon size")
+                .HorizontalAlignment(HorizontalAlignment.Left)
+                .Margin(0, 16, 0, 0));
     }
 }
 

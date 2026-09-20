@@ -306,14 +306,30 @@ The tracker owns stable root `CopilotSession` objects. Shell notifications
 concern owners only, so child activity, completion and exit do not replace
 the owner's cell or close its billboard.
 
-Cells show two centered rows: packaged client icon plus aggregate status,
-then the cwd basename. All statuses/clients use one width measured from the
-longest Idle/Working/Blocked caption with WinUI's actual caption style, plus
-icon/spacing/padding, rounded to four DIPs. Text-scale changes remeasure.
-Project text occupies a finite star column with ellipsis; drive/share roots
-have meaningful labels. The host's tooltip callback exposes full name/cwd.
-The three icons deploy with the module and resolve with `ModuleAssets`,
-never from developer installation/download paths.
+`Copilot Sessions` has an `Icon size` setting, persisted as
+`settings.iconSize`: `medium` (the default for missing or invalid values) or
+`large`. Changing it in the Shell editor takes effect after Save and updates
+all of that shell's existing cells without restarting tracked sessions.
+`Copilot SDK` is separate and always uses the Medium presentation.
+
+Medium cells show two centered rows: packaged client icon plus aggregate
+status text, then the cwd basename. All statuses/clients use one width
+measured from the longest Idle/Working/Blocked caption with WinUI's actual
+caption style, plus icon/spacing/padding, rounded to four DIPs. Text-scale
+changes remeasure.
+
+Large cells retain the taskbar-height and 16-DIP client/status icon size, but
+their width is exactly 1.6 times the runtime-measured Medium width. The first
+row is a client icon, a finite star column for the project name, and a status
+icon. The star column consumes all space between both icons even when the
+project name is short; long project names ellipsize. The second row spans the
+cell and shows the session title with ellipsis. Large status icons use the
+same theme-aware color policy as Medium status text: Idle is a hollow circle,
+Working is an active WinUI progress ring, Blocked is a circle containing `!`,
+and Unknown is a circle containing `?`. In High Contrast, status visuals use
+the system window-text brush. The host's tooltip callback exposes full
+name/cwd. The three client icons deploy with the module and resolve with
+`ModuleAssets`, never from developer installation/download paths.
 
 The billboard has a 600-DIP width and 640-DIP content ceiling with a bounded
 scroll viewport below the header. Its overview/header uses aggregate status;
@@ -404,14 +420,16 @@ disposable repository artifacts, not user session directories.
 The presentation fixture mounts production cells/billboard through the host
 BillboardSession in isolated nonactivating windows, without starting the
 Copilot tracker, loading user configuration or installing hooks. It checks
-two-row bounds, equal four-DIP-rounded widths for all statuses/clients,
-ellipsis, bounded scrolling, local-vs-group state, all-node breakdown,
-expansion preservation, exact recent rows, integer display and (when opted
-in) clipboard readback/contention without activation. `-BuildOnly` skips UI.
-The recorded interactive run used 100% display scale and exercised sampled
-Light/Dark changes. High Contrast, other DPI settings and maximum system text
-scale still require manual validation; the fixture does not change user
-accessibility settings.
+icon-size parsing/preservation, Medium compatibility, live Large-to-Medium
+updates, exact 1.6x Large width, two-row bounds, finite-column ellipsis,
+the four Large status icons, accessibility names, equal variant widths,
+bounded scrolling, local-vs-group state, all-node breakdown, expansion
+preservation, exact recent rows, integer display and (when opted in) clipboard
+readback/contention without activation. `-BuildOnly` skips UI. The recorded
+interactive run used 100% display scale and exercised sampled Light/Dark
+changes. High Contrast, other DPI settings and maximum system text scale still
+require manual validation; the fixture does not change user accessibility
+settings.
 # SDK monitor companion
 
 The separate **Copilot SDK** shell is documented in
