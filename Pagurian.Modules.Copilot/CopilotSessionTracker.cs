@@ -21,7 +21,7 @@ static class CopilotSessionTracker
     public static IReadOnlyCollection<CopilotSession> Sessions => _state?.Sessions ?? [];
     public static CopilotSession? Find(string sessionId) => _state?.Find(sessionId);
 
-    public static void Start(Logger log, string? stateDirectory = null)
+    public static void Start(Logger log, string? stateDirectory = null, ICopilotAppLifecycleReader? lifecycle = null)
     {
         if (_users++ > 0)
             return;
@@ -36,12 +36,12 @@ static class CopilotSessionTracker
         state.SessionEnded += OnEnded;
         var directory = stateDirectory ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             ".copilot", "session-state");
-        _resolver = new(directory, log.Warn);
-        _resolver.Start(identities => dispatcher.TryEnqueue(() =>
+        _resolver = new(directory, log.Warn, lifecycle, enableAppLifecycle: stateDirectory is null);
+        _resolver.StartSnapshots((identities, snapshot) => dispatcher.TryEnqueue(() =>
         {
             if (_generation != generation || !ReferenceEquals(_state, state))
                 return;
-            state.Resolve(identities);
+            state.Resolve(identities, snapshot);
             NotifyChanged();
         }));
         _timer = dispatcher.CreateTimer();

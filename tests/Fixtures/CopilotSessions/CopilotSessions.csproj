@@ -9,6 +9,7 @@
     <DefineConstants>$(DefineConstants);HOOK_EVENT_LOG_TESTS</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotAppLifecycle.cs" Link="CopilotAppLifecycle.cs" />
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSessionDetails.cs" Link="CopilotSessionDetails.cs" />
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSessionIdentityResolver.cs" Link="CopilotSessionIdentityResolver.cs" />
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSessionState.cs" Link="CopilotSessionState.cs" />

@@ -19,6 +19,8 @@
 
   <ItemGroup>
     <PackageReference Include="GitHub.Copilot.SDK" Version="1.0.13" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.13" />
     <PackageReference Include="Microsoft.UI.Reactor" Version="0.1.0-preview.12">
       <ExcludeAssets>runtime</ExcludeAssets>
     </PackageReference>
@@ -44,15 +46,20 @@
         Condition="'%(ReferenceCopyLocalPaths.NuGetPackageId)' == 'GitHub.Copilot.SDK'
           Or '%(ReferenceCopyLocalPaths.NuGetPackageId)' == 'Microsoft.Extensions.AI.Abstractions'
           Or '%(ReferenceCopyLocalPaths.NuGetPackageId)' == 'Microsoft.Extensions.Logging.Abstractions'
+          Or '%(ReferenceCopyLocalPaths.NuGetPackageId)' == 'Microsoft.Data.Sqlite.Core'
+          Or $([System.String]::Copy('%(ReferenceCopyLocalPaths.NuGetPackageId)').StartsWith('SQLitePCLRaw.'))
           Or '%(ReferenceCopyLocalPaths.NuGetPackageId)' == 'Microsoft.Extensions.DependencyInjection.Abstractions'" />
       <ModuleCopilotRuntime Include="@(ContentWithTargetPath)"
         Condition="'%(ContentWithTargetPath.TargetPath)' != ''
           And $([System.String]::Copy('%(ContentWithTargetPath.TargetPath)').StartsWith('runtimes\'))" />
+      <ModuleSqliteNative Include="@(NativeCopyLocalItems)"
+        Condition="$([System.String]::Copy('%(NativeCopyLocalItems.NuGetPackageId)').StartsWith('SQLitePCLRaw.'))" />
     </ItemGroup>
     <MakeDir Directories="$(HostModulesDir);$(HostModulesDir)Assets" />
     <Copy SourceFiles="$(TargetPath);$(ProjectDepsFilePath)" DestinationFolder="$(HostModulesDir)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(TargetDir)$(AssemblyName).pdb" DestinationFolder="$(HostModulesDir)" SkipUnchangedFiles="true" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
     <Copy SourceFiles="@(ModulePrivateDependency)" DestinationFolder="$(HostModulesDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(ModuleSqliteNative)" DestinationFolder="$(HostModulesDir)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="@(ModuleCopilotRuntime)"
       DestinationFiles="@(ModuleCopilotRuntime->'$(HostModulesDir)%(TargetPath)')"
       SkipUnchangedFiles="true" />

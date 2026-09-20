@@ -259,6 +259,9 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
     private int _transcriptRoundRobin;
     private int _metadataRoundRobin;
     private IReadOnlyList<CopilotSessionIdentity> _lastPublished = Array.Empty<CopilotSessionIdentity>();
+    private readonly ICopilotAppLifecycleReader? _appLifecycle;
+    private readonly HashSet<string> _lifecycleObserved = new(StringComparer.Ordinal);
+    internal CopilotAppLifecycleSnapshot? LifecycleSnapshot { get; private set; }
 
     private sealed class Observation
     {
@@ -289,12 +292,15 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
         }
     }
 
-    public CopilotSessionIdentityResolver(string stateDirectory, Action<string>? diagnostic = null)
+    public CopilotSessionIdentityResolver(string stateDirectory, Action<string>? diagnostic = null,
+        ICopilotAppLifecycleReader? appLifecycle = null, bool enableAppLifecycle = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(stateDirectory);
         _stateDirectory = Path.GetFullPath(stateDirectory);
         _diagnostic = diagnostic;
         _index = new CopilotSessionIdentityIndex(Diagnose);
+        _appLifecycle = appLifecycle ?? (enableAppLifecycle
+            ? CopilotAppLifecycleReader.Create(_stateDirectory, Diagnose) : null);
     }
 
     public void Observe(string sourceId, string? transcriptPath = null, string? parentId = null, string? childId = null)
@@ -317,7 +323,10 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
         }
     }
 
-    public void Start(Action<IReadOnlyList<CopilotSessionIdentity>> onResolved)
+    public void Start(Action<IReadOnlyList<CopilotSessionIdentity>> onResolved) =>
+        StartSnapshots((identities, _) => onResolved(identities));
+
+    public void StartSnapshots(Action<IReadOnlyList<CopilotSessionIdentity>, CopilotAppLifecycleSnapshot?> onResolved)
     {
         ArgumentNullException.ThrowIfNull(onResolved);
         lock (_observationsGate)
@@ -351,6 +360,7 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
 
             foreach (var (source, observation) in observations)
             {
+                _lifecycleObserved.Add(source);
                 _index.Observe(source);
                 _metadataCandidates.Add(source);
                 foreach (var parent in observation.Parents)
@@ -371,6 +381,17 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
                 }
             }
 
+            if (_appLifecycle is not null)
+            {
+                LifecycleSnapshot = _appLifecycle.Scan(_lifecycleObserved, _cancellation.Token);
+                foreach (var evidence in LifecycleSnapshot.Sessions.Where(e => e.App is not null))
+                {
+                    _lifecycleObserved.Add(evidence.SessionId);
+                    _index.Observe(evidence.SessionId);
+                    _metadataCandidates.Add(evidence.SessionId);
+                    ReadMetadata(evidence.SessionId, true);
+                }
+            }
             RefreshMetadata();
             DiscoverRoots();
             foreach (var (source, observation) in observations)
@@ -420,7 +441,7 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
             observation.Parents.Add(parent);
     }
 
-    private async Task RunAsync(Action<IReadOnlyList<CopilotSessionIdentity>> onResolved)
+    private async Task RunAsync(Action<IReadOnlyList<CopilotSessionIdentity>, CopilotAppLifecycleSnapshot?> onResolved)
     {
         try
         {
@@ -436,10 +457,10 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
                 }
                 if (_cancellation.IsCancellationRequested)
                     break;
-                if (!identities.SequenceEqual(_lastPublished))
+                if (LifecycleSnapshot is not null || !identities.SequenceEqual(_lastPublished))
                 {
                     _lastPublished = identities;
-                    try { onResolved(identities); }
+                    try { onResolved(identities, LifecycleSnapshot); }
                     catch { Diagnose("identity-callback-failed"); }
                 }
                 await _wake.WaitAsync(TimeSpan.FromMilliseconds(500), _cancellation.Token).ConfigureAwait(false);
@@ -888,6 +909,7 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
     {
         lock (_scanGate)
         {
+            _appLifecycle?.Dispose();
             _directories?.Dispose();
             _directories = null;
             foreach (var cursor in _transcripts.Values)

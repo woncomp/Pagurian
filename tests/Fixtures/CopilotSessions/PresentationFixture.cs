@@ -53,17 +53,16 @@ internal static class PresentationFixture
             "Hook rows never wrap injected whitespace");
         Hook("sessionEnd", "root", 13);
         Hook("preToolUse", "leaf", 14, "late");
-        Check(state.Sessions.Count == 0, "Root fence unchanged");
+        Check(state.Sessions.Count == 1, "App turn end keeps the root and descendants");
         Hook("sessionStart", "root", 20);
-        Check(Cell().Nodes.Count == 1 && Cell().RecentHooks.Count == 1 &&
-            Cell().RecentHooks[0].Name == "sessionStart", "Generation excludes historical nodes and hook rows");
+        Check(Cell().Nodes.Count == 3 && Cell().RecentHooks.Count == 5 &&
+            Cell().RecentHooks[0].Name == "sessionStart", "App turn start retains historical nodes and hook rows");
         state.Resolve(identities);
-        Check(Cell().Nodes.Count == 1 && Cell().RecentHooks.Count == 1, "Identity refresh cannot resurrect old history");
+        Check(Cell().Nodes.Count == 3 && Cell().RecentHooks.Count == 5, "Turn start preserves conversation history");
         Hook("permissionRequest", "leaf", 21);
         Check(Cell().Nodes.Any(n => n.SessionId == "leaf"), "Fresh child resumes in new root generation");
-        Check(Cell().Nodes.Single(n => n.SessionId == "middle").Status is null &&
-            Cell().Nodes.Single(n => n.SessionId == "middle").Lifecycle == "Unknown",
-            "Current descendants retain hookless ancestor without old generation state");
+        Check(Cell().Nodes.Single(n => n.SessionId == "middle").Status == CopilotSessionStatus.Working,
+            "Parent turn completion never clears a different source");
         var telemetry = new CopilotSessionDetailsReducer("leaf");
         using (var doc = JsonDocument.Parse(JsonSerializer.Serialize(new
         {

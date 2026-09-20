@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Platforms>x64;ARM64</Platforms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.13" />
+    <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotApp*.cs" />
+    <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotArchiveReader.cs" />
+    <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSessionIdentityResolver.cs" />
+    <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSessionState.cs" />
+    <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSessionDetails.cs" />
+    <Compile Include="..\CopilotSessions\AppLifecycleFixture.cs" />
+    <Compile Include="..\..\..\Pagurian\ModuleLoadContext.cs" />
+  </ItemGroup>
+</Project>

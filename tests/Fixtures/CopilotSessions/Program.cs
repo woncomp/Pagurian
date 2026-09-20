@@ -21,9 +21,9 @@ var tests = new (string Name, Action Run)[]
     ("unknown lifecycle ordering agrees with resolved delivery", UnknownOrdering),
     ("unknown start-stop preserves later multi-turn resume", UnknownStartStopResume),
     ("child lifecycle ordering survives shuffled delivery", ShuffledLifecycle),
-    ("root exit guards children, resolver, and explicit reopen", RootGeneration),
-    ("owner exit is terminal regardless of activity delivery order", OwnerExitOrdering),
-    ("explicit owner restart survives a delayed older exit", OwnerRestartOrdering),
+    ("App archive guards children and requires positive loaded reopen", RootGeneration),
+    ("CLI owner exit is terminal regardless of activity delivery order", OwnerExitOrdering),
+    ("CLI explicit owner restart survives a delayed older exit", OwnerRestartOrdering),
     ("older child exit still preserves newer permission", ChildExitOrdering),
     ("unknown ended source never publishes after resolution", UnknownEnd),
     ("one-second aggregate debounce is independent of siblings", Debounce),
@@ -46,10 +46,12 @@ var tests = new (string Name, Action Run)[]
     ("sanitized reported root/child replay", ReportedReplay),
     ("tracker stop/start drops queued callbacks and timers", TrackerRestart),
     ("tracker shared consumers retain state until final stop", TrackerConsumers),
+    ("tracker stop fences queued lifecycle restoration", TrackerLifecycleStop),
     ("hook events rotate into exclusive local app-data JSONL files", HookEventLogRotation),
     ("usage normalization preserves unavailable and unlimited states", UsageFixture.Run),
     ("local telemetry and identity detail scenarios", () => Console.WriteLine($"  {DetailsFixture.Run()} detail scenarios passed")),
     ("session presentation state scenarios", PresentationFixture.Run),
+    ("App turn/archive/process generation separation", AppLifecycleFixture.Run),
 };
 int passed = 0;
 foreach (var (name, run) in tests)
@@ -222,7 +224,8 @@ static void ChildLifecycle()
     Check(r.Ends.Count == 0);
     Check(cell.BlockingSources.Single().SourceId == "root");
     r.Event("sessionEnd", "root");
-    Check(r.Ends.SequenceEqual(["root"]));
+    Check(r.Ends.Count == 0 && ReferenceEquals(cell, r.Cell()));
+    Check(cell.BlockingSources.Count == 0);
 }
 
 static void ChildResume()
@@ -279,6 +282,7 @@ static void RootGeneration()
     var first = r.Cell();
     var staleStart = r.Event("sessionStart", "root");
     r.Event("sessionEnd", "root");
+    r.State.Resolve([], new(1, r.Now, [new("root", CopilotArchiveState.Archived)], []));
     r.Event("permissionRequest", "a");
     r.Event("subagentStart", "root", agent: "b");
     r.Group();
@@ -287,6 +291,9 @@ static void RootGeneration()
     r.Event("permissionRequest", "unknown");
     var beforeReopen = r.Now;
     r.Event("sessionStart", "root");
+    Check(r.State.Sessions.Count == 0);
+    r.State.Resolve([], new(2, r.Now, [new("root", CopilotArchiveState.Live,
+        new(123, r.Now, @"C:\fixture\github.exe"), r.Now)], []));
     r.Resolve("unknown", "root", CopilotIdentityKind.AppTaskChild);
     Check(r.Cell().BlockingSources.Count == 0);
     Check(!ReferenceEquals(first, r.Cell()));
@@ -323,7 +330,7 @@ static void UnknownOrdering()
 
 static void OwnerExitOrdering()
 {
-    foreach (var kind in new[] { CopilotIdentityKind.AppRoot, CopilotIdentityKind.Cli })
+    foreach (var kind in new[] { CopilotIdentityKind.Cli })
     foreach (bool exitFirst in new[] { true, false })
     foreach (bool initialStart in new[] { false, true })
     foreach (int resolveAfter in new[] { 0, 1, 2 })
@@ -369,7 +376,7 @@ static void OwnerExitOrdering()
 static void OwnerRestartOrdering()
 {
     int[][] orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
-    foreach (var kind in new[] { CopilotIdentityKind.AppRoot, CopilotIdentityKind.Cli })
+    foreach (var kind in new[] { CopilotIdentityKind.Cli })
     foreach (var order in orders)
     foreach (int resolveAfter in new[] { 0, 1, 2, 3 })
     {
@@ -803,6 +810,22 @@ static void TrackerConsumers()
     Check(CopilotSessionTracker.Sessions.Count == 0);
 }
 
+static void TrackerLifecycleStop()
+{
+    using var f = new Files();
+    f.App("loaded");
+    var dispatcher = ReactorApp.UIDispatcher;
+    dispatcher.Drain();
+    var reader = new FixtureLifecycleReader("loaded");
+    CopilotSessionTracker.Start(Logger.For("fixture"), f.Root, reader);
+    Check(SpinWait.SpinUntil(() => dispatcher.PendingCount > 0, TimeSpan.FromSeconds(5)),
+        "Lifecycle restoration callback was not queued");
+    CopilotSessionTracker.Stop();
+    dispatcher.Drain();
+    Check(CopilotSessionTracker.Sessions.Count == 0, "Queued lifecycle resurrected stopped tracker");
+    Check(SpinWait.SpinUntil(() => reader.Disposed, TimeSpan.FromSeconds(5)), "Lifecycle reader was not disposed");
+}
+
 sealed class Rig
 {
     public DateTimeOffset Now { get; private set; } = DateTimeOffset.Parse("2026-09-10T06:00:00Z");
@@ -842,7 +865,7 @@ sealed class Rig
 
 sealed class Files : IDisposable
 {
-    public string Root { get; } = Path.Combine(Path.GetTempPath(), "Pagurian-Copilot-" + Guid.NewGuid().ToString("N"));
+    public string Root { get; } = Path.Combine(Environment.CurrentDirectory, "artifacts", "Pagurian-Copilot-" + Guid.NewGuid().ToString("N"));
     public List<string> Diagnostics { get; } = [];
     public CopilotSessionIdentityResolver Resolver { get; }
     public Files()
@@ -850,6 +873,7 @@ sealed class Files : IDisposable
         Directory.CreateDirectory(Root);
         Resolver = new(Root, Diagnostics.Add);
     }
+
     public void App(string id) => Metadata(id, "client_name: github/autopilot\nname: Fixture\n");
     public void Metadata(string id, string text) => Write(id, "workspace.yaml", text);
     public void Transcript(string id, string text) => Write(id, "events.jsonl", text);

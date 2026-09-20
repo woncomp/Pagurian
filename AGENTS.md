@@ -18,6 +18,10 @@ and message boxes.
 `tests\Verify-CopilotSessions.ps1 -Platform x64` runs the dependency-free
 Copilot identity/state/dispatcher fixture using temporary sanitized metadata
 and transcripts; it does not launch Pagurian or change user hook/session files.
+`tests\Verify-CopilotAppLifecycle.ps1 -Platform x64` exercises read-only SQLite,
+WAL/lock/schema behavior and injected App/SDK process handles using repository
+`artifacts` fixtures, never the user's database/processes. Optional `-BundlePath`
+checks deployed SQLite managed/native resolution through `ModuleLoadContext`.
 
 ### Quick compile check on macOS (temporary development)
 
@@ -320,8 +324,12 @@ public sealed class MyShell : Shell
   `agentStop` makes only that source Idle. `subagentStop.agentId` deactivates
   an App child (not `payload.sessionId`, which is the parent); the identity
   remains for multi-turn resume. Child `sessionEnd` cannot remove a root's
-  cell/billboard. Root `sessionEnd` ends the group, and only a newer explicit
-  root `sessionStart` can reopen it. Timestamp ordering rejects older
+  cell/billboard. App root `sessionEnd(reason=complete)` ends only that source's
+  turn and retains
+  the cell; absent/other reasons also await authoritative visibility evidence.
+  Independent CLI/VS Code/Other roots retain their terminal `sessionEnd` policy.
+  App archive and verified owning-process exit, not hooks or transcript shutdown,
+  hide App groups. Timestamp ordering rejects older
   unblock/stop delivery; absent timestamps use bridge `ReceivedAt`.
   The existing one-second visual debounce applies to the final aggregate,
   never to source bookkeeping. Sibling events cannot reset a stable blocked
@@ -330,6 +338,28 @@ public sealed class MyShell : Shell
   diagnostics go through the module logger. Tracker Stop invalidates queued
   callbacks, cancels background resolution, stops its timer, and clears state.
   See `docs/Copilot-Sessions.md` for discovery limits and regression coverage.
+- **Copilot App visibility evidence**: the existing background resolver publishes
+  coherent versioned identity/lifecycle batches. `CopilotArchiveReader` opens
+  `.copilot\data.db` read-only with Microsoft.Data.Sqlite (WAL-aware, one-second
+  lock timeout, parameterized IDs, schema checks and a read transaction).
+  Direct workspace session IDs and aliases use `workspaces.archived_at`;
+  only unmapped explicit standalone chats use `sessions.archived_at`.
+  Missing/conflicting/unsupported evidence is Unknown, never ended.
+  `CopilotAppProcesses` validates the owner PID hint against github.exe path,
+  GitHub company metadata and process creation time; inuse locks must correlate
+  to live SDK processes and verified App ancestry. Retained handles prove exit;
+  missing hints, denied queries, SDK detach/survival and UI closure do not.
+  Loaded-session discovery bypasses the seven-day metadata cutoff but restores
+  only positively identified, loaded, known-nonarchived App roots, never all DB
+  rows. Archive/unarchive and exit/restart have monotonic visibility/work fences;
+  unarchive requires a new positive load, not a late hook or old lock.
+  A new App work epoch resets stale blockers/active tasks/debounce to Idle without
+  overwriting fresh hooks or discarding conversation usage/history.
+  SQLitePCLRaw 2.1.13 managed/native private assets deploy for x64 and ARM64;
+  host-owned assemblies remain excluded. These observed App internals may change;
+  fail closed for new restoration, retain existing visibility on Unknown, and
+  log bounded reason codes. See
+  `docs/IssueHistory/2026-09-11-Copilot-App-Session-Lifecycle.md`.
 - **Copilot session presentation/details**: two caption rows (client icon +
   aggregate status, then cwd basename) share a WinUI-measured status-based width;
   finite Grid columns ellipsize project names, and the host tooltip exposes cwd.

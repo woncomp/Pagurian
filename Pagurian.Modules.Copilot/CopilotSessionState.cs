@@ -63,12 +63,12 @@ sealed class CopilotSession
     public CopilotSessionDetails GroupDetails { get; set; } = CopilotSessionDetails.Empty;
 }
 
-// Only the identity fields and timestamp are interpreted. Dump retains the
+// Only identity, lifecycle and presentation scalars are interpreted. Dump retains the
 // original payload, notably sessionId on child events and agentId on stops.
 sealed record CopilotHookEvent(
     string Name, string SourceId, DateTimeOffset At, string Dump,
     string? AgentId = null, string? ParentId = null, string? TranscriptPath = null,
-    string? ToolName = null, string? Cwd = null)
+    string? ToolName = null, string? Cwd = null, string? Reason = null)
 {
     public static CopilotHookEvent? Parse(string name, string? json, DateTimeOffset receivedAt)
     {
@@ -98,7 +98,7 @@ sealed record CopilotHookEvent(
                 new JsonSerializerOptions { WriteIndented = true });
             return new(name, source!, at, dump, Text(payload, "agentId"),
                 Text(payload, "parentSessionId"), Text(payload, "transcriptPath"),
-                Text(payload, "toolName"), Text(payload, "cwd"));
+                Text(payload, "toolName"), Text(payload, "cwd"), Text(payload, "reason"));
         }
         catch (JsonException) { return null; }
     }
@@ -143,6 +143,11 @@ sealed class CopilotSessionState
         public CopilotSessionDetails DetailsOutput = CopilotSessionDetails.Empty;
         public DateTimeOffset DetailsEpoch;
         public DateTimeOffset TranscriptTerminalAt = DateTimeOffset.MinValue;
+        public CopilotAppInstance? App;
+        public bool Hidden;
+        public bool Restored;
+        public DateTimeOffset VisibilityFence = DateTimeOffset.MinValue;
+        public DateTimeOffset WorkEpoch = DateTimeOffset.MinValue;
     }
 
     private readonly Dictionary<string, Source> _sources = new(StringComparer.Ordinal);
@@ -151,6 +156,9 @@ sealed class CopilotSessionState
     private readonly Func<DateTimeOffset> _clock;
     private readonly Action<CopilotTransition>? _diagnostic;
     private long _sequence;
+    private long _lifecycleVersion;
+    private readonly Dictionary<string, (CopilotAppSessionEvidence Evidence, DateTimeOffset At)> _appEvidence = new();
+    private readonly HashSet<string> _exitedApps = new(StringComparer.Ordinal);
     private const int TransitionLimit = 256;
     private static readonly TimeSpan Debounce = TimeSpan.FromSeconds(1);
 
@@ -179,6 +187,16 @@ sealed class CopilotSessionState
             return;
         var source = Get(hook.SourceId);
         long sequence = ++_sequence;
+        var appOwner = source.Identity.Kind is CopilotIdentityKind.AppRoot or CopilotIdentityKind.AppTaskChild
+            ? Get(source.Identity.OwnerId) : null;
+        // Hidden is a presentation gate, not an event sink. Reduce tentative
+        // work after the removal fence until positive load evidence can admit it.
+        if (appOwner is not null && (hook.At < appOwner.WorkEpoch ||
+            (appOwner.Hidden && hook.At <= appOwner.VisibilityFence)))
+        {
+            Trace(source, hook, source.Status, "app-visibility-or-runtime-fence");
+            return;
+        }
         // Ended roots cannot be revived by late work. Unknown/App-task sources
         // may retain tentative activity, but it stays inactive until an explicit
         // newer session/task start proves that the older child exit is stale.
@@ -220,8 +238,16 @@ sealed class CopilotSessionState
         Reconcile();
     }
 
-    public void Resolve(IReadOnlyList<CopilotSessionIdentity> identities)
+    public void Resolve(IReadOnlyList<CopilotSessionIdentity> identities, CopilotAppLifecycleSnapshot? snapshot = null)
     {
+        if (snapshot is not null)
+        {
+            if (snapshot.Version <= _lifecycleVersion) return;
+            _lifecycleVersion = snapshot.Version;
+            foreach (var evidence in snapshot.Sessions)
+                _appEvidence[evidence.SessionId] = (evidence, snapshot.ObservedAt);
+            foreach (var app in snapshot.Exited) _exitedApps.Add(app.Key);
+        }
         // Assign the complete batch before any cell notifications: a child is
         // never briefly published as a root while its owner is being attached.
         foreach (var identity in identities)
@@ -238,7 +264,100 @@ sealed class CopilotSessionState
                     Trace(source, latest, source.Status, "identity-attached");
             }
         }
+        ReconcileAppLifecycle();
         Reconcile();
+    }
+
+    private void ReconcileAppLifecycle()
+    {
+        foreach (var owner in _sources.Values.Where(s => s.Identity.Kind == CopilotIdentityKind.AppRoot).ToArray())
+        {
+            _appEvidence.TryGetValue(owner.Identity.SourceId, out var entry);
+            var evidence = entry.Evidence;
+            if (evidence?.Archive == CopilotArchiveState.Archived)
+            {
+                HideApp(owner, entry.At, "app-archive");
+                continue;
+            }
+            bool loaded = evidence is { App: not null, LoadedAt: not null }
+                && !_exitedApps.Contains(evidence.App.Key);
+            bool restore = loaded && evidence!.Archive == CopilotArchiveState.Live &&
+                (!owner.Hidden || evidence.LoadedAt > owner.VisibilityFence);
+            // Process ownership is useful even when SQLite is unavailable, but
+            // it must not by itself admit a new or previously hidden cell.
+            bool attach = loaded && !owner.Hidden && (_sessions.ContainsKey(owner.Identity.SourceId) ||
+                owner.HasOwnHook || _sources.Values.Any(s => s.Identity.OwnerId == owner.Identity.SourceId &&
+                    s.Active && !s.Ended));
+            if (restore || attach)
+            {
+                var app = evidence!.App!;
+                if (owner.App?.Key != app.Key || owner.Hidden)
+                {
+                    var floor = owner.Hidden && owner.VisibilityFence >= app.StartedAt
+                        ? evidence.LoadedAt!.Value : app.StartedAt;
+                    owner.App = app;
+                    owner.WorkEpoch = floor;
+                    owner.Hidden = false;
+                    owner.Restored |= restore;
+                    foreach (var member in _sources.Values.Where(s => s.Identity.OwnerId == owner.Identity.SourceId))
+                    {
+                        if (member.StateAt >= floor)
+                        {
+                            // Fresh hooks beat initial Idle, but not with a blocker
+                            // timestamp or terminal fence inherited from the old run.
+                            if (member.Blocker is { } blocker && blocker.BlockedSince < floor)
+                                member.Blocker = blocker with
+                                {
+                                    BlockedSince = member.StateAt, EventAt = member.StateAt,
+                                    EventName = member.StateEvent,
+                                };
+                            if (member.EndedAt < floor) member.Ended = false;
+                            continue;
+                        }
+                        member.Status = CopilotSessionStatus.Idle;
+                        member.Blocker = null;
+                        member.Active = member == owner;
+                        member.Ended = false;
+                        member.EndedAt = floor;
+                        member.StateAt = floor;
+                        member.StateEvent = member == owner ? "appRestore" : "subagentStop";
+                        if (member.Lifecycle is { } lifecycle && lifecycle.Event.At < floor)
+                            member.AppliedLifecycle = lifecycle.Sequence;
+                        if (member.LifecycleStart is { } start && start.Event.At < floor)
+                            member.AppliedLifecycleStart = start.Sequence;
+                    }
+                    if (_sessions.TryGetValue(owner.Identity.SourceId, out var cell))
+                    {
+                        var active = _sources.Values.Where(s => s.Identity.OwnerId == owner.Identity.SourceId &&
+                            s.Active && !s.Ended && s.StateAt >= floor).ToArray();
+                        var candidate = active.Any(s => s.Blocker is not null) ? CopilotSessionStatus.Blocked
+                            : active.Any(s => s.Status == CopilotSessionStatus.Working) ? CopilotSessionStatus.Working
+                            : CopilotSessionStatus.Idle;
+                        if (cell.Status != candidate) cell.Status = CopilotSessionStatus.Idle;
+                        if (cell.PendingStatus != candidate || cell.PendingStatusSince < floor)
+                            cell.PendingStatus = null;
+                    }
+                    Trace(owner, new("appRestore", owner.Identity.SourceId, entry.At, ""),
+                        CopilotSessionStatus.Idle, "app-runtime-restored");
+                }
+            }
+            if (owner.App is { } current && _exitedApps.Contains(current.Key))
+                HideApp(owner, entry.At > current.StartedAt ? entry.At : _clock(), "app-exit");
+        }
+    }
+
+    private void HideApp(Source owner, DateTimeOffset at, string reason)
+    {
+        if (owner.Hidden) return;
+        owner.Hidden = true;
+        owner.VisibilityFence = at;
+        foreach (var member in _sources.Values.Where(s => s.Identity.OwnerId == owner.Identity.SourceId))
+        {
+            member.Active = false;
+            member.Blocker = null;
+            member.Status = CopilotSessionStatus.Idle;
+        }
+        Trace(owner, new("appVisibility", owner.Identity.SourceId, at, ""), owner.Status, reason);
     }
 
     private bool InOwnerGeneration(Source source, DateTimeOffset at)
@@ -246,7 +365,8 @@ sealed class CopilotSessionState
         if (source.Identity.Kind != CopilotIdentityKind.AppTaskChild)
             return true;
         var owner = Get(source.Identity.OwnerId);
-        return !owner.Ended && at >= owner.Epoch;
+        return !owner.Ended && (!owner.Hidden || at > owner.VisibilityFence) &&
+            at >= owner.Epoch && at >= owner.WorkEpoch;
     }
 
     private void Apply(Source source, CopilotHookEvent hook, bool lifecycle = false)
@@ -257,7 +377,7 @@ sealed class CopilotSessionState
         {
             if (source.ExplicitEnd is null || hook.At > source.ExplicitEnd.At)
                 source.ExplicitEnd = hook;
-            if (source.Identity.Kind is CopilotIdentityKind.AppRoot or CopilotIdentityKind.Cli)
+            if (source.Identity.Kind == CopilotIdentityKind.Cli)
             {
                 ReconcileOwnerLifecycle(source);
                 return;
@@ -299,7 +419,7 @@ sealed class CopilotSessionState
         }
         else if (hook.Name == "sessionEnd")
         {
-            source.Ended = true;
+            source.Ended = source.Identity.Kind != CopilotIdentityKind.AppRoot;
             source.EndedAt = hook.At;
         }
         if (status == CopilotSessionStatus.Blocked)
@@ -308,7 +428,9 @@ sealed class CopilotSessionState
         else
             source.Blocker = null;
         if (before != source.Status || wasActive != source.Active || hook.Name == "sessionEnd")
-            Trace(source, hook, before, hook.Name is "sessionEnd" or "subagentStop" ? "end" : "state");
+            Trace(source, hook, before, hook.Name == "sessionEnd" && source.Identity.Kind == CopilotIdentityKind.AppRoot
+                ? hook.Reason == "complete" ? "app-turn-complete" : "app-end-awaiting-evidence"
+                : hook.Name is "sessionEnd" or "subagentStop" ? "end" : "state");
     }
 
     private static void SetLatest(Source source, CopilotHookEvent hook, long sequence)
@@ -324,8 +446,8 @@ sealed class CopilotSessionState
     private void Reconcile()
     {
         // Identity may have been unknown when an exit lost the child/activity
-        // timestamp comparison. For owners only an explicit newer sessionStart
-        // can supersede that exit; ordinary activity never opens a generation.
+        // timestamp comparison. Independent clients need an explicit newer
+        // sessionStart; App completion never establishes that terminal fence.
         foreach (var source in _sources.Values)
             ReconcileOwnerLifecycle(source);
 
@@ -367,10 +489,10 @@ sealed class CopilotSessionState
         foreach (var (ownerId, members) in groups)
         {
             var owner = Get(ownerId);
-            if (owner.Ended || owner.Identity.Kind is not (CopilotIdentityKind.AppRoot or CopilotIdentityKind.Cli))
+            if (owner.Ended || owner.Hidden || owner.Identity.Kind is not (CopilotIdentityKind.AppRoot or CopilotIdentityKind.Cli))
                 continue;
             var active = members.Where(s => s.Active && !s.Ended && InOwnerGeneration(s, s.StateAt)).ToArray();
-            if (!owner.HasOwnHook && !_sessions.ContainsKey(ownerId) && active.Length == 0)
+            if (!owner.HasOwnHook && !owner.Restored && !_sessions.ContainsKey(ownerId) && active.Length == 0)
                 continue;
             desired.Add(ownerId);
             bool created = !_sessions.TryGetValue(ownerId, out var session);
@@ -397,7 +519,7 @@ sealed class CopilotSessionState
                     parent = ancestor.Identity.ParentId;
                 }
             }
-            var nodes = members.Where(s => visible.Contains(s.Identity.SourceId)).Select(s => Node(s, owner.Epoch))
+            var nodes = members.Where(s => visible.Contains(s.Identity.SourceId)).Select(s => Node(s, owner.Epoch, owner.WorkEpoch))
                 .OrderBy(n => n.SessionId == ownerId ? 0 : 1)
                 .ThenBy(n => n.SessionId, StringComparer.Ordinal).ToArray();
             bool detailChange = session.Nodes.Count != nodes.Length || nodes.Any(n =>
@@ -461,7 +583,7 @@ sealed class CopilotSessionState
         }
     }
 
-    private static CopilotSessionNode Node(Source source, DateTimeOffset epoch)
+    private static CopilotSessionNode Node(Source source, DateTimeOffset epoch, DateTimeOffset workEpoch)
     {
         var input = source.Identity.Details ?? CopilotSessionDetails.Empty;
         if (!ReferenceEquals(input, source.DetailsInput) || epoch != source.DetailsEpoch)
@@ -471,12 +593,14 @@ sealed class CopilotSessionState
             source.DetailsOutput = input.ForGeneration(epoch);
         }
         var details = source.DetailsOutput;
-        bool hasCurrentState = source.StateAt >= epoch && source.StateAt != DateTimeOffset.MinValue
+        bool hasCurrentState = source.StateAt >= epoch && source.StateAt >= workEpoch &&
+            source.StateAt != DateTimeOffset.MinValue
             && source.StateAt > source.TranscriptTerminalAt;
         string lifecycle = !hasCurrentState ? "Unknown" : source.Ended ? "Ended"
             : source.StateEvent == "subagentStop" ? "Completed"
             : source.StateAt == DateTimeOffset.MinValue ? "Unknown" : "Active";
-        if (details.LifecycleAt is { } at && at >= source.StateAt &&
+        if (source.Identity.Kind != CopilotIdentityKind.AppRoot &&
+            details.LifecycleAt is { } at && at >= source.StateAt &&
             details.Lifecycle is "Completed" or "Ended")
             lifecycle = details.Lifecycle;
         return new(source.Identity.SourceId, source.Identity.ParentId,
@@ -487,6 +611,14 @@ sealed class CopilotSessionState
 
     private void ReconcileOwnerLifecycle(Source source)
     {
+        if (source.Identity.Kind == CopilotIdentityKind.AppRoot)
+        {
+            // A deferred end was reduced before client metadata was available.
+            // App turn completion never establishes a conversation tombstone.
+            source.Ended = false;
+            source.Epoch = DateTimeOffset.MinValue;
+            return;
+        }
         if (source.Identity.Kind is not (CopilotIdentityKind.AppRoot or CopilotIdentityKind.Cli) ||
             source.ExplicitEnd is not { } exit)
             return;
@@ -579,6 +711,9 @@ sealed class CopilotSessionState
         _sources.Clear();
         _transitions.Clear();
         _sequence = 0;
+        _lifecycleVersion = 0;
+        _appEvidence.Clear();
+        _exitedApps.Clear();
         foreach (var session in ended)
             SessionEnded?.Invoke(session);
     }
