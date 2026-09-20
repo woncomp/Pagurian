@@ -1,0 +1,449 @@
+using System.Globalization;
+using System.Text.Json;
+
+namespace Pagurian.Modules.Copilot;
+
+enum CopilotSessionStatus { Idle, Working, Blocked }
+
+sealed record CopilotBlocker(
+    string SourceId, string OwnerId, DateTimeOffset BlockedSince,
+    string EventName, DateTimeOffset EventAt);
+
+sealed record CopilotTransition(
+    string SourceId, string OwnerId, string EventName, DateTimeOffset EventAt,
+    CopilotSessionStatus Before, CopilotSessionStatus After, string Reason);
+
+// Stable display-owner model. Source state and visual debounce deliberately
+// live separately: a pending visual change must never lose a permission owner.
+sealed class CopilotSession
+{
+    public required string SessionId { get; init; }
+    public string Name { get; set; } = "";
+    public bool NameResolved { get; set; }
+    public CopilotSessionStatus Status { get; set; }
+    public CopilotSessionStatus? PendingStatus { get; set; }
+    public DateTimeOffset PendingStatusSince { get; set; }
+    public string LastEventName { get; set; } = "";
+    public string LastEventDump { get; set; } = "";
+    public string LastEventSourceId { get; set; } = "";
+    public IReadOnlyList<CopilotBlocker> BlockingSources { get; set; } = [];
+    public IReadOnlyList<CopilotTransition> Transitions { get; set; } = [];
+}
+
+// Only the identity fields and timestamp are interpreted. Dump retains the
+// original payload, notably sessionId on child events and agentId on stops.
+sealed record CopilotHookEvent(
+    string Name, string SourceId, DateTimeOffset At, string Dump,
+    string? AgentId = null, string? ParentId = null, string? TranscriptPath = null)
+{
+    public static CopilotHookEvent? Parse(string name, string? json, DateTimeOffset receivedAt)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json ?? "null");
+            var payload = document.RootElement;
+            if (payload.ValueKind != JsonValueKind.Object)
+                return null;
+            var source = Text(payload, "sessionId");
+            if (!CopilotSessionIdentityIndex.ValidId(source))
+                return null;
+            var at = receivedAt;
+            if (payload.TryGetProperty("timestamp", out var timestamp))
+            {
+                if (timestamp.ValueKind == JsonValueKind.String &&
+                    DateTimeOffset.TryParse(timestamp.GetString(), CultureInfo.InvariantCulture,
+                        DateTimeStyles.AssumeUniversal, out var parsed))
+                    at = parsed;
+                else if (timestamp.ValueKind == JsonValueKind.Number && timestamp.TryGetInt64(out var milliseconds))
+                {
+                    try { at = DateTimeOffset.FromUnixTimeMilliseconds(milliseconds); }
+                    catch (ArgumentOutOfRangeException) { }
+                }
+            }
+            var dump = JsonSerializer.Serialize(new { loggedAt = receivedAt, @event = name, payload },
+                new JsonSerializerOptions { WriteIndented = true });
+            return new(name, source!, at, dump, Text(payload, "agentId"),
+                Text(payload, "parentSessionId"), Text(payload, "transcriptPath"));
+        }
+        catch (JsonException) { return null; }
+    }
+
+    private static string? Text(JsonElement value, string name) =>
+        value.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String
+            ? property.GetString() : null;
+}
+
+// Pure, UI-thread-owned reducer. Unknown identities retain a reduced state, not
+// an event queue. Timestamps order each source independently; arrival sequence
+// breaks ties for latest details only. A stop at the same timestamp as work is
+// conservatively ignored (hooks have no reliable per-tool correlation IDs).
+sealed class CopilotSessionState
+{
+    private sealed class Source(string id)
+    {
+        public CopilotSessionIdentity Identity = new(id, id, CopilotIdentityKind.Unknown, null);
+        public bool HasOwnHook;
+        public bool Active;
+        public bool Ended;
+        public DateTimeOffset EndedAt = DateTimeOffset.MinValue;
+        public CopilotSessionStatus Status;
+        public CopilotBlocker? Blocker;
+        public DateTimeOffset StateAt = DateTimeOffset.MinValue;
+        public string StateEvent = "";
+        // Own lifecycle evidence must survive activity's stale-event filter,
+        // including while identity is unknown. App task starts are separate.
+        public DateTimeOffset ExplicitStartAt = DateTimeOffset.MinValue;
+        public CopilotHookEvent? ExplicitEnd;
+        public DateTimeOffset Epoch = DateTimeOffset.MinValue;
+        public CopilotHookEvent? Latest;
+        public long LatestSequence;
+        public (CopilotHookEvent Event, long Sequence)? Lifecycle;
+        public (CopilotHookEvent Event, long Sequence)? LifecycleStart;
+        public long AppliedLifecycle;
+        public long AppliedLifecycleStart;
+    }
+
+    private readonly Dictionary<string, Source> _sources = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, CopilotSession> _sessions = new(StringComparer.Ordinal);
+    private readonly Queue<CopilotTransition> _transitions = new();
+    private readonly Func<DateTimeOffset> _clock;
+    private readonly Action<CopilotTransition>? _diagnostic;
+    private long _sequence;
+    private const int TransitionLimit = 256;
+    private static readonly TimeSpan Debounce = TimeSpan.FromSeconds(1);
+
+    public CopilotSessionState(Func<DateTimeOffset>? clock = null, Action<CopilotTransition>? diagnostic = null)
+    {
+        _clock = clock ?? (() => DateTimeOffset.UtcNow);
+        _diagnostic = diagnostic;
+    }
+
+    public event Action<CopilotSession>? SessionStarted;
+    public event Action<CopilotSession>? SessionEnded;
+    public IReadOnlyCollection<CopilotSession> Sessions => _sessions.Values;
+    public IReadOnlyCollection<CopilotTransition> Transitions => _transitions;
+    public CopilotSession? Find(string id) => _sessions.GetValueOrDefault(id);
+
+    private Source Get(string id)
+    {
+        if (!_sources.TryGetValue(id, out var source))
+            _sources[id] = source = new(id);
+        return source;
+    }
+
+    public void Handle(CopilotHookEvent hook)
+    {
+        if (!CopilotSessionIdentityIndex.ValidId(hook.SourceId))
+            return;
+        var source = Get(hook.SourceId);
+        long sequence = ++_sequence;
+        // Ended roots cannot be revived by late work. Unknown/App-task sources
+        // may retain tentative activity, but it stays inactive until an explicit
+        // newer session/task start proves that the older child exit is stale.
+        if ((source.Ended && source.Identity.Kind is (CopilotIdentityKind.Cli or CopilotIdentityKind.AppRoot) &&
+                hook.Name != "sessionEnd" &&
+                (hook.Name != "sessionStart" || hook.At <= source.EndedAt)) ||
+            !InOwnerGeneration(source, hook.At))
+        {
+            Trace(source, hook, source.Status, "ended-generation");
+            return;
+        }
+        source.HasOwnHook = true;
+        SetLatest(source, hook, sequence);
+        Apply(source, hook);
+        if (hook.Name is "subagentStart" or "subagentStop" &&
+            CopilotSessionIdentityIndex.ValidId(hook.AgentId) && hook.AgentId != hook.SourceId)
+        {
+            var child = Get(hook.AgentId!);
+            if (hook.Name == "subagentStart" &&
+                (child.LifecycleStart is not { } start || hook.At > start.Event.At))
+                child.LifecycleStart = (hook, sequence);
+            if (child.Lifecycle is not { } previous || hook.At > previous.Event.At ||
+                (hook.At == previous.Event.At && hook.Name == "subagentStart" && previous.Event.Name != hook.Name))
+                child.Lifecycle = (hook, sequence);
+        }
+        Reconcile();
+    }
+
+    public void Resolve(IReadOnlyList<CopilotSessionIdentity> identities)
+    {
+        // Assign the complete batch before any cell notifications: a child is
+        // never briefly published as a root while its owner is being attached.
+        foreach (var identity in identities)
+        {
+            if (CopilotSessionIdentityIndex.ValidId(identity.SourceId) &&
+                CopilotSessionIdentityIndex.ValidId(identity.OwnerId))
+            {
+                var source = Get(identity.SourceId);
+                bool changed = source.Identity != identity;
+                source.Identity = identity;
+                if (source.Blocker is { } blocker)
+                    source.Blocker = blocker with { OwnerId = identity.OwnerId };
+                if (changed && source.Latest is { } latest)
+                    Trace(source, latest, source.Status, "identity-attached");
+            }
+        }
+        Reconcile();
+    }
+
+    private bool InOwnerGeneration(Source source, DateTimeOffset at)
+    {
+        if (source.Identity.Kind != CopilotIdentityKind.AppTaskChild)
+            return true;
+        var owner = Get(source.Identity.OwnerId);
+        return !owner.Ended && at >= owner.Epoch;
+    }
+
+    private void Apply(Source source, CopilotHookEvent hook, bool lifecycle = false)
+    {
+        if (hook.Name == "sessionStart" && hook.At > source.ExplicitStartAt)
+            source.ExplicitStartAt = hook.At;
+        if (hook.Name == "sessionEnd")
+        {
+            if (source.ExplicitEnd is null || hook.At > source.ExplicitEnd.At)
+                source.ExplicitEnd = hook;
+            if (source.Identity.Kind is CopilotIdentityKind.AppRoot or CopilotIdentityKind.Cli)
+            {
+                ReconcileOwnerLifecycle(source);
+                return;
+            }
+        }
+        var status = hook.Name switch
+        {
+            "sessionStart" or "agentStop" or "sessionEnd" => (CopilotSessionStatus?)CopilotSessionStatus.Idle,
+            "userPromptSubmitted" or "preToolUse" or "postToolUse" or "postToolUseFailure" => CopilotSessionStatus.Working,
+            "permissionRequest" => CopilotSessionStatus.Blocked,
+            "subagentStart" when lifecycle => CopilotSessionStatus.Working,
+            "subagentStop" when lifecycle => CopilotSessionStatus.Idle,
+            _ => null,
+        };
+        if (status is null)
+            return;
+        // Unknown/App-task sources may retain post-exit activity pending a newer App
+        // task start. An explicit session start resets that tentative history.
+        if (source.Ended && hook.Name == "sessionStart" && hook.At > source.EndedAt)
+            source.StateAt = source.EndedAt;
+        if (hook.At < source.StateAt ||
+            (hook.At == source.StateAt && (source.StateEvent == hook.Name ||
+                (status == CopilotSessionStatus.Idle && hook.Name != "sessionEnd"))))
+        {
+            Trace(source, hook, source.Status, "stale-or-duplicate");
+            return;
+        }
+        var before = source.Status;
+        bool wasActive = source.Active;
+        source.StateAt = hook.At;
+        source.StateEvent = hook.Name;
+        source.Status = status.Value;
+        source.Active = hook.Name is not ("sessionEnd" or "subagentStop");
+        if (hook.Name == "sessionStart")
+        {
+            if (source.Ended)
+                source.Epoch = hook.At;
+            source.Ended = false;
+        }
+        else if (hook.Name == "sessionEnd")
+        {
+            source.Ended = true;
+            source.EndedAt = hook.At;
+        }
+        if (status == CopilotSessionStatus.Blocked)
+            source.Blocker ??= new(source.Identity.SourceId, source.Identity.OwnerId,
+                hook.At, hook.Name, hook.At);
+        else
+            source.Blocker = null;
+        if (before != source.Status || wasActive != source.Active || hook.Name == "sessionEnd")
+            Trace(source, hook, before, hook.Name is "sessionEnd" or "subagentStop" ? "end" : "state");
+    }
+
+    private static void SetLatest(Source source, CopilotHookEvent hook, long sequence)
+    {
+        if (source.Latest is null || hook.At > source.Latest.At ||
+            (hook.At == source.Latest.At && sequence > source.LatestSequence))
+        {
+            source.Latest = hook;
+            source.LatestSequence = sequence;
+        }
+    }
+
+    private void Reconcile()
+    {
+        // Identity may have been unknown when an exit lost the child/activity
+        // timestamp comparison. For owners only an explicit newer sessionStart
+        // can supersede that exit; ordinary activity never opens a generation.
+        foreach (var source in _sources.Values)
+            ReconcileOwnerLifecycle(source);
+
+        foreach (var source in _sources.Values.ToArray())
+        {
+            if (source.Identity.Kind != CopilotIdentityKind.AppTaskChild)
+                continue;
+            if (!InOwnerGeneration(source, source.StateAt))
+            {
+                if (source.Active || source.Blocker is not null)
+                {
+                    var before = source.Status;
+                    source.Active = false;
+                    source.Status = CopilotSessionStatus.Idle;
+                    source.Blocker = null;
+                    if (source.Latest is { } latest)
+                        Trace(source, latest, before, "owner-generation-ended");
+                }
+            }
+            // Retain the newest start as well as the latest lifecycle record:
+            // start -> stop before identity resolves must still invalidate an
+            // older child exit and permit a subsequent multi-turn resume.
+            if (source.LifecycleStart is { } start && start.Sequence != source.AppliedLifecycleStart &&
+                ApplyLifecycle(source, start))
+                source.AppliedLifecycleStart = start.Sequence;
+            if (source.Lifecycle is { } lifecycle && lifecycle.Sequence != source.AppliedLifecycle)
+            {
+                if (lifecycle.Sequence == source.AppliedLifecycleStart || ApplyLifecycle(source, lifecycle))
+                    source.AppliedLifecycle = lifecycle.Sequence;
+            }
+        }
+
+        var groups = _sources.Values
+            .Where(s => s.Identity.Kind != CopilotIdentityKind.Unknown)
+            .GroupBy(s => s.Identity.OwnerId)
+            .ToDictionary(g => g.Key, g => g.ToArray(), StringComparer.Ordinal);
+        var desired = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (ownerId, members) in groups)
+        {
+            var owner = Get(ownerId);
+            if (owner.Ended || owner.Identity.Kind is not (CopilotIdentityKind.AppRoot or CopilotIdentityKind.Cli))
+                continue;
+            var active = members.Where(s => s.Active && !s.Ended && InOwnerGeneration(s, s.StateAt)).ToArray();
+            if (!owner.HasOwnHook && !_sessions.ContainsKey(ownerId) && active.Length == 0)
+                continue;
+            desired.Add(ownerId);
+            bool created = !_sessions.TryGetValue(ownerId, out var session);
+            if (created)
+                _sessions[ownerId] = session = new() { SessionId = ownerId, Name = ownerId };
+            session!.Name = owner.Identity.Name ?? ownerId;
+            session.NameResolved = !string.IsNullOrWhiteSpace(owner.Identity.Name);
+            session.BlockingSources = active.Where(s => s.Blocker is not null)
+                .Select(s => s.Blocker! with { OwnerId = ownerId }).OrderBy(b => b.BlockedSince).ToArray();
+            var latest = members.Where(s => s.Latest is not null && InOwnerGeneration(s, s.Latest.At))
+                .OrderByDescending(s => s.Latest!.At).ThenByDescending(s => s.LatestSequence).FirstOrDefault();
+            if (latest?.Latest is { } hook)
+            {
+                session.LastEventName = hook.Name;
+                session.LastEventDump = hook.Dump;
+                session.LastEventSourceId = hook.SourceId;
+            }
+            session.Transitions = _transitions.Where(t => t.OwnerId == ownerId ||
+                members.Any(m => m.Identity.SourceId == t.SourceId)).TakeLast(64).ToArray();
+            var candidate = session.BlockingSources.Count > 0 ? CopilotSessionStatus.Blocked
+                : active.Any(s => s.Status == CopilotSessionStatus.Working) ? CopilotSessionStatus.Working
+                : CopilotSessionStatus.Idle;
+            UpdateCandidate(session, candidate, _clock());
+            if (created)
+                SessionStarted?.Invoke(session);
+        }
+        foreach (var id in _sessions.Keys.Where(id => !desired.Contains(id)).ToArray())
+        {
+            var ended = _sessions[id];
+            _sessions.Remove(id);
+            SessionEnded?.Invoke(ended);
+        }
+    }
+
+    private void ReconcileOwnerLifecycle(Source source)
+    {
+        if (source.Identity.Kind is not (CopilotIdentityKind.AppRoot or CopilotIdentityKind.Cli) ||
+            source.ExplicitEnd is not { } exit)
+            return;
+        source.EndedAt = exit.At;
+        if (source.ExplicitStartAt > exit.At)
+        {
+            source.Ended = false;
+            // Also fence old members when the exit arrives AFTER its restart.
+            source.Epoch = source.ExplicitStartAt;
+            return;
+        }
+        var before = source.Status;
+        bool changed = !source.Ended || source.Active || source.Blocker is not null;
+        source.Ended = true;
+        source.Active = false;
+        source.StateAt = exit.At;
+        source.StateEvent = "sessionEnd";
+        source.Status = CopilotSessionStatus.Idle;
+        source.Blocker = null;
+        if (changed)
+            Trace(source, exit, before, "end");
+    }
+
+    private bool ApplyLifecycle(Source source, (CopilotHookEvent Event, long Sequence) lifecycle)
+    {
+        var emitter = Get(lifecycle.Event.SourceId);
+        if (emitter.Identity.Kind is not (CopilotIdentityKind.AppRoot or CopilotIdentityKind.AppTaskChild) ||
+            emitter.Identity.OwnerId != source.Identity.OwnerId)
+            return false; // CLI lifecycle records are details-only.
+        if (!InOwnerGeneration(source, lifecycle.Event.At))
+            return true;
+        if (source.Ended)
+        {
+            if (lifecycle.Event.Name != "subagentStart" || lifecycle.Event.At <= source.EndedAt)
+                return true;
+            // Ordering must not depend on when identity became available:
+            // a newer explicit task start invalidates an older child exit,
+            // while reduced own events newer than that start stay intact.
+            source.Ended = false;
+        }
+        Apply(source, lifecycle.Event, lifecycle: true);
+        SetLatest(source, lifecycle.Event, lifecycle.Sequence);
+        return true;
+    }
+
+    private void Trace(Source source, CopilotHookEvent hook, CopilotSessionStatus before, string reason)
+    {
+        // No prompt, tool arguments, cwd, transcript text or arbitrary event name.
+        var eventName = hook.Name is "sessionStart" or "sessionEnd" or "agentStop" or "subagentStart" or
+            "subagentStop" or "userPromptSubmitted" or "preToolUse" or "postToolUse" or
+            "postToolUseFailure" or "permissionRequest" ? hook.Name : "other";
+        var transition = new CopilotTransition(source.Identity.SourceId, source.Identity.OwnerId,
+            eventName, hook.At, before, source.Status, reason);
+        if (_transitions.Count == TransitionLimit)
+            _transitions.Dequeue();
+        _transitions.Enqueue(transition);
+        _diagnostic?.Invoke(transition);
+    }
+
+    private static void UpdateCandidate(CopilotSession session, CopilotSessionStatus candidate, DateTimeOffset now)
+    {
+        if (candidate == session.Status)
+            session.PendingStatus = null;
+        else if (session.PendingStatus != candidate)
+        {
+            session.PendingStatus = candidate;
+            session.PendingStatusSince = now;
+        }
+    }
+
+    public bool CommitStableStatuses()
+    {
+        var now = _clock();
+        bool changed = false;
+        foreach (var session in _sessions.Values)
+        {
+            if (session.PendingStatus is not { } pending || now - session.PendingStatusSince < Debounce)
+                continue;
+            session.PendingStatus = null;
+            session.Status = pending;
+            changed = true;
+        }
+        return changed;
+    }
+
+    public void Clear()
+    {
+        var ended = _sessions.Values.ToArray();
+        _sessions.Clear();
+        _sources.Clear();
+        _transitions.Clear();
+        _sequence = 0;
+        foreach (var session in ended)
+            SessionEnded?.Invoke(session);
+    }
+}

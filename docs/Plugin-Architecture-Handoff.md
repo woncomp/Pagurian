@@ -60,7 +60,7 @@ Key naming decisions (final):
 | `Pagurian` (host) | WinExe | Tray window container, taskbar injection/anchoring/blend sampling, theme derivation and broadcast, hover/click hit-test dispatch, Billboard placement, TooltipWindow, module loader, config file, `post` command + message pipe, unified Logger, tray icon and quit sequence. **Contains no concrete shell/cell logic.** |
 | `Pagurian.Modules.Hello` | class lib | Demo module: clock cell (two lines + 1s timer) + Hello World billboard. |
 | `Pagurian.Modules.Metrics` | class lib | `SystemMetricsTracker` + `SystemMetricsColors` + CPU/MEM shells + their billboards. |
-| `Pagurian.Modules.Copilot` | class lib | Hook JSON install/uninstall, session state machine, activator shell + dynamic SessionCells, session billboard, tooltip, hook-events.log. |
+| `Pagurian.Modules.Copilot` | class lib | Hook JSON install/uninstall, per-run `%LOCALAPPDATA%\Pagurian\Copilot\` hook-event JSONL, session state machine, activator shell + dynamic SessionCells, session billboard, tooltip. |
 
 Module projects copy their dll (+pdb+assets) into the host output `modules\`
 folder via a post-build target, so F5/`dotnet run` just works.
@@ -288,11 +288,20 @@ Sampling cadence switches via billboard `OnOpened/OnClosed` self-reporting
 **Copilot**: `CopilotHookInstaller` stays but the hook command becomes
 `post {id} hook <event>` (UTF-8 no BOM, points at the exe not dotnet, all 14
 camelCase events unchanged). `CopilotSessionTracker` loses its pipe server
-and is fed by `CopilotShell.OnMessage` instead (state machine, status
-debounce, workspace.yaml name resolution unchanged). `SessionPopupWindow`
-becomes `SessionBillboard`. `CopilotShell` has 0 cells normally;
-`sessionStart` -> `AddCell(new SessionCell(session))`, `sessionEnd` ->
-`RemoveCell`. SessionCell carries per-session state (GitHub icon + status
+and is fed by `CopilotShell.OnMessage` instead. The implemented tracker now
+adapts the pure `CopilotSessionState` reducer and background
+`CopilotSessionIdentityResolver`: confirmed App task agents route to their
+App root, while independently persisted App sessions and ordinary CLI
+sessions retain separate cells. Unknown identity waits undisplayed.
+`SessionPopupWindow` becomes `SessionBillboard`. `CopilotShell` has 0 cells
+normally; only display-owner start/end notifications add/remove cells.
+Member state is immediate and source-owned (Blocked > Working > Idle);
+the final aggregate retains the one-second visual debounce. Child stop/end
+never removes the root, and child identity survives multi-turn stops.
+Root exit and module shutdown guard late events/callbacks.
+See [Copilot sessions](Copilot-Sessions.md) for identity, name resolution,
+provenance, lifecycle ordering, and validation. SessionCell carries the stable
+owner model (GitHub icon + status
 text, tooltip = session name, click -> billboard). Status colors re-render
 via `Theme.Changed`. The GitHub icon moves into the module's assets (Sdk
 asset helper resolves relative to the module assembly location).

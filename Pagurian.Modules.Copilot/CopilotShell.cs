@@ -3,7 +3,8 @@ using Pagurian.Sdk;
 namespace Pagurian.Modules.Copilot;
 
 // The Copilot activator shell: zero cells while no Copilot CLI session is
-// tracked (occupying no tray space), one SessionCell per live session.
+// tracked (occupying no tray space), one SessionCell per resolved display owner.
+// App task children share their root; independently persisted sessions do not.
 // Startup registers the CLI hook file pointing at this shell's persistent id
 // and starts the session tracker; hook events arrive via OnMessage through
 // the host's post pipeline ("Pagurian.exe post {id} hook <event>").
@@ -19,7 +20,9 @@ public sealed class CopilotShell : Shell
     {
         CopilotSessionTracker.SessionStarted += OnSessionStarted;
         CopilotSessionTracker.SessionEnded += OnSessionEnded;
-        CopilotSessionTracker.Start();
+        CopilotSessionTracker.Start(Log);
+        foreach (var session in CopilotSessionTracker.Sessions)
+            OnSessionStarted(session);
         CopilotHookInstaller.Install(InstanceId);
     }
 
@@ -28,6 +31,12 @@ public sealed class CopilotShell : Shell
         CopilotSessionTracker.SessionStarted -= OnSessionStarted;
         CopilotSessionTracker.SessionEnded -= OnSessionEnded;
         CopilotSessionTracker.Stop();
+        foreach (var (id, cell) in _cells)
+        {
+            CopilotStatusColors.Drop(id);
+            RemoveCell(cell);
+        }
+        _cells.Clear();
         CopilotHookInstaller.Uninstall();
     }
 
@@ -40,14 +49,18 @@ public sealed class CopilotShell : Shell
         }
 
         HookEventLog.Write(message.Args[0], message.Payload);
-        CopilotSessionTracker.HandleHookEvent(message.Args[0], message.Payload);
+        CopilotSessionTracker.HandleHookEvent(message.Args[0], message.Payload, message.ReceivedAt);
     }
 
-    private void OnSessionStarted(CopilotSession session) =>
+    private void OnSessionStarted(CopilotSession session)
+    {
+        if (_cells.ContainsKey(session.SessionId))
+            return;
         _cells[session.SessionId] = AddCell<SessionCell>(
             model: session,
             tooltip: () => session.Name,
             billboard: () => new SessionBillboard(session));
+    }
 
     private void OnSessionEnded(CopilotSession session)
     {

@@ -94,6 +94,12 @@ class SessionBillboard : Billboard
             var eventDump = string.IsNullOrWhiteSpace(_session.LastEventDump)
                 ? "No event received yet."
                 : _session.LastEventDump;
+            // Keep current permission provenance independent of the latest
+            // event, which may now be work/stop from a different group member.
+            if (_session.BlockingSources.Count > 0)
+                eventDump = "Current blockers:\n" + string.Join("\n", _session.BlockingSources.Select(blocker =>
+                    $"{blocker.SourceId} · {blocker.EventName} · {blocker.BlockedSince:o}")) +
+                    "\n\n" + eventDump;
 
             eventContent = VStack(8,
                 VStack(4,

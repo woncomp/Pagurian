@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Platforms>x64</Platforms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <DefineConstants>$(DefineConstants);HOOK_EVENT_LOG_TESTS</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSessionIdentityResolver.cs" Link="CopilotSessionIdentityResolver.cs" />
+    <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSessionState.cs" Link="CopilotSessionState.cs" />
+    <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSessionTracker.cs" Link="CopilotSessionTracker.cs" />
+    <Compile Include="..\..\..\Pagurian.Modules.Copilot\HookEventLog.cs" Link="HookEventLog.cs" />
+    <Compile Include="..\..\..\Pagurian.Sdk\Logger.cs" Link="Logger.cs" />
+  </ItemGroup>
+</Project>

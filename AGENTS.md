@@ -15,6 +15,9 @@ There is no general unit-test suite or linter. Run
 `tests\Verify-ModuleIsolation.ps1` for the module load-context contract, then
 launch the app and observe the tray icon, taskbar tray, settings, billboards,
 and message boxes.
+`tests\Verify-CopilotSessions.ps1 -Platform x64` runs the dependency-free
+Copilot identity/state/dispatcher fixture using temporary sanitized metadata
+and transcripts; it does not launch Pagurian or change user hook/session files.
 
 ### Quick compile check on macOS (temporary development)
 
@@ -287,9 +290,43 @@ public sealed class MyShell : Shell
   `AppContext.BaseDirectory\Pagurian.exe`; commands are
   `"<exe>" post {shellId} hook <event>` for all 14 camelCase events; the
   shell's persistent config id is what keeps the hook stable across restarts.
-- **Session names** come from
-  `%USERPROFILE%\.copilot\session-state\{id}\workspace.yaml`, top-level
-  `name:` field, plain line scan; retried on every event until resolved.
+- **Copilot hook event audit**: `HookEventLog` writes JSONL to
+  `%LOCALAPPDATA%\Pagurian\Copilot\`, using one exclusive
+  `hook-events-YYYYMMDD-HHmmss-fff.log` per bridge process. Concurrent
+  processes choose another timestamp rather than overwrite; creating a new
+  run file removes only matching files whose filesystem creation date is
+  before today. This is separate from `pagurian.log`, Compass logs, hook
+  installation, and Copilot session files, and remains best-effort.
+- **Copilot session identity and names**: `CopilotSessionIdentityResolver`
+  reads `%USERPROFILE%\.copilot\session-state\{id}\workspace.yaml` off the UI
+  thread. Top-level `client_name: github/autopilot` positively identifies an
+  App root; an explicit other client identifies ordinary CLI. `name:` names
+  the display owner. Missing/partial client metadata stays unresolved (no
+  cell, no timeout-based guess); reduced source state waits for resolution.
+  Independently persisted App sessions, including `create_session` children,
+  keep separate cells. App task children never get their own cell: explicit
+  lifecycle relationships and incrementally indexed `events.jsonl`
+  `subagent.started`/`subagent.completed` top-level `agentId` route them to
+  their owning App root, including nested tasks. Early hooks need not contain
+  `transcriptPath` or `subagentStart.agentId`. Recent local App roots are
+  discovered in the background for mid-session attachment; cwd, trace ID,
+  agent name, and absent workspace files are never parentage evidence.
+- **Copilot status/lifecycle**: `CopilotSessionState` immediately reduces
+  each source's own state. Any active blocker wins over Working, which wins
+  over Idle. Working hooks clear only their emitting source's permission;
+  `agentStop` makes only that source Idle. `subagentStop.agentId` deactivates
+  an App child (not `payload.sessionId`, which is the parent); the identity
+  remains for multi-turn resume. Child `sessionEnd` cannot remove a root's
+  cell/billboard. Root `sessionEnd` ends the group, and only a newer explicit
+  root `sessionStart` can reopen it. Timestamp ordering rejects older
+  unblock/stop delivery; absent timestamps use bridge `ReceivedAt`.
+  The existing one-second visual debounce applies to the final aggregate,
+  never to source bookkeeping. Sibling events cannot reset a stable blocked
+  candidate. Latest details keep the original payload/source; current
+  blockers have separate provenance. Bounded payload-free transition
+  diagnostics go through the module logger. Tracker Stop invalidates queued
+  callbacks, cancels background resolution, stops its timer, and clears state.
+  See `docs/Copilot-Sessions.md` for discovery limits and regression coverage.
 - The codebase mirrors `D:\Workspace\gitea_backup\Tea` (`Tea.Gui` project):
   same csproj settings and Reactor version.
 
