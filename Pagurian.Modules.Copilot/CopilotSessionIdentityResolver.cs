@@ -163,7 +163,8 @@ internal sealed class CopilotSessionIdentityIndex
             return cache[source] = new(source, source, metadata.Kind, metadata.Name,
                 ClassifyClient(metadata.Client), metadata.Client, Cwd: metadata.Cwd, Details: details);
         var unknown = new CopilotSessionIdentity(source, source, CopilotIdentityKind.Unknown, ownName,
-            ClassifyClient(metadata.Client), metadata.Client, Cwd: metadata.Cwd, Details: details);
+            metadata.Client is null ? CopilotClientKind.Unknown : ClassifyClient(metadata.Client),
+            metadata.Client, Cwd: metadata.Cwd, Details: details);
         if (_conflicted.Contains(source) || path.Count >= 64 || !path.Add(source))
         {
             _diagnostic?.Invoke("identity-conflict");
@@ -216,11 +217,15 @@ internal sealed class CopilotSessionIdentityIndex
             conflict = true;
         if (conflict)
             _diagnostic?.Invoke("identity-conflict");
-        return cache[source] = conflict ? unknown
-            : owner is not null ? new(source, owner, CopilotIdentityKind.AppTaskChild, ownName,
-                CopilotClientKind.App, metadata.Client, immediateParent, metadata.Cwd, details)
-            : cli ? new(source, source, CopilotIdentityKind.Cli, metadata.Name,
-                ClassifyClient(metadata.Client), metadata.Client, Cwd: metadata.Cwd, Details: details) : unknown;
+        if (conflict)
+            return cache[source] = unknown;
+        if (owner is not null)
+            return cache[source] = new(source, owner, CopilotIdentityKind.AppTaskChild, ownName,
+                CopilotClientKind.App, metadata.Client, immediateParent, metadata.Cwd, details);
+        if (cli && metadata.Client is not null)
+            return cache[source] = new(source, source, CopilotIdentityKind.Cli, metadata.Name,
+                ClassifyClient(metadata.Client), metadata.Client, Cwd: metadata.Cwd, Details: details);
+        return cache[source] = unknown;
     }
 
     internal static bool ValidId(string? id) => !string.IsNullOrEmpty(id) && id.Length <= 128

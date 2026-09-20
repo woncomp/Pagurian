@@ -29,6 +29,11 @@ hook `sessionId`. No settings, hook commands, or payload formats change.
   nothing. A hint identifies an owner, not an immediate parent; it cannot
   flatten a nested tree. Conflicting immediate parents (even within the same
   owner) and cyclic claims stay unresolved.
+- An independently displayed root must have positive client metadata. A source
+  without its own non-empty `client_name` is not promoted to an independent
+  CLI session merely because it has a CLI parent; it remains unresolved and
+  has no cell. App task children may still lack their own marker because they
+  inherit the confirmed App root's ownership.
 - Unknown sources wait **without a cell or timeout fallback**. Their latest
   event and reduced status (including permission ownership) are retained,
   not an unbounded queue of raw events. A resolution batch attaches that

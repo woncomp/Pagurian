@@ -40,6 +40,7 @@ var tests = new (string Name, Action Run)[]
     ("transcript truncation and replacement recover", ReplacedTranscript),
     ("validated App hints only; cwd and trace never merge", ValidatedHints),
     ("metadata scalar parsing and malformed writes", MetadataParsing),
+    ("empty client child does not become a CLI cell", EmptyClientChild),
     ("partial client rewrite never publishes an App child cell", PartialClientRewrite),
     ("unreadable metadata retries without payload logging", MetadataIo),
     ("resolver disposal and no post-disposal scans", ResolverDisposal),
@@ -167,6 +168,8 @@ static void CliLifecycle()
     var index = new CopilotSessionIdentityIndex();
     index.SetMetadata("cli", "copilot-cli");
     index.Claim("task", "cli");
+    Check(index.Resolve("task").Kind == CopilotIdentityKind.Unknown);
+    index.SetMetadata("task", "copilot-cli");
     Check(index.Resolve("task") is { Kind: CopilotIdentityKind.Cli, OwnerId: "task" });
 }
 
@@ -691,6 +694,37 @@ static void MetadataParsing()
     Check(f.Identity("root") is { Kind: CopilotIdentityKind.AppRoot, Name: "It's a fixture" });
     f.Metadata("root", "client_name:\nname:\n");
     Check(f.Identity("root").Kind == CopilotIdentityKind.AppRoot);
+}
+
+static void EmptyClientChild()
+{
+    var index = new CopilotSessionIdentityIndex();
+    index.SetMetadata("cli", "github/cli", "CLI");
+    index.SetMetadata("blank", " ");
+    index.Observe("cli");
+    index.Observe("child");
+    index.Observe("blank");
+    index.Claim("child", "cli");
+    index.Claim("blank", "cli");
+
+    Check(index.Resolve("child") is
+        { Kind: CopilotIdentityKind.Unknown, Client: CopilotClientKind.Unknown },
+        "A child without client metadata remains unresolved");
+    Check(index.Resolve("blank") is
+        { Kind: CopilotIdentityKind.Unknown, Client: CopilotClientKind.Unknown },
+        "A child with blank client metadata remains unresolved");
+    Check(index.Resolve("cli") is
+        { Kind: CopilotIdentityKind.Cli, Client: CopilotClientKind.Cli },
+        "The explicit CLI root remains independently classified");
+
+    var state = new CopilotSessionState();
+    state.Handle(CopilotHookEvent.Parse("permissionRequest",
+        """{"sessionId":"cli"}""", DateTimeOffset.UtcNow)!);
+    state.Handle(CopilotHookEvent.Parse("permissionRequest",
+        """{"sessionId":"child"}""", DateTimeOffset.UtcNow.AddMilliseconds(1))!);
+    state.Resolve(index.ResolveObserved());
+    Check(state.Sessions.Count == 1 && state.Find("cli") is not null &&
+        state.Find("child") is null, "The empty-client child does not publish a cell");
 }
 
 static void MetadataIo()
