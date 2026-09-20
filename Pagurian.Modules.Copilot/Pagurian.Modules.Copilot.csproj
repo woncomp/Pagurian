@@ -12,9 +12,13 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Pagurian.Modules.Copilot</RootNamespace>
     <EnableDynamicLoading>true</EnableDynamicLoading>
+    <RuntimeIdentifier Condition="'$(Platform)' == 'x64'">win-x64</RuntimeIdentifier>
+    <RuntimeIdentifier Condition="'$(Platform)' == 'ARM64'">win-arm64</RuntimeIdentifier>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="GitHub.Copilot.SDK" Version="1.0.13" />
     <PackageReference Include="Microsoft.UI.Reactor" Version="0.1.0-preview.12">
       <ExcludeAssets>runtime</ExcludeAssets>
     </PackageReference>
@@ -22,22 +26,37 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include="Assets\icons8-github-64.png">
+    <Content Include="Assets\icons8-github-64.png;Assets\icons8-pulse-50.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
 
-  <!-- Deploy a folder bundle and its assets into the development host output. -->
+  <!-- Deploy a folder bundle, its private SDK dependencies, and runtime.
+       Pagurian/Reactor/WinUI stay host-owned and must never enter the bundle. -->
   <Target Name="DeployToHostModules" AfterTargets="Build">
     <PropertyGroup>
       <HostModulesRoot>$(MSBuildThisFileDirectory)..\Pagurian\bin\$(Platform)\$(Configuration)\$(TargetFramework)\modules\</HostModulesRoot>
       <HostModulesDir>$(HostModulesRoot)$(AssemblyName)\</HostModulesDir>
     </PropertyGroup>
+    <ItemGroup>
+      <ModulePrivateDependency Include="@(ReferenceCopyLocalPaths)"
+        Condition="'%(ReferenceCopyLocalPaths.NuGetPackageId)' == 'GitHub.Copilot.SDK'
+          Or '%(ReferenceCopyLocalPaths.NuGetPackageId)' == 'Microsoft.Extensions.AI.Abstractions'
+          Or '%(ReferenceCopyLocalPaths.NuGetPackageId)' == 'Microsoft.Extensions.Logging.Abstractions'
+          Or '%(ReferenceCopyLocalPaths.NuGetPackageId)' == 'Microsoft.Extensions.DependencyInjection.Abstractions'" />
+      <ModuleCopilotRuntime Include="@(ContentWithTargetPath)"
+        Condition="'%(ContentWithTargetPath.TargetPath)' != ''
+          And $([System.String]::Copy('%(ContentWithTargetPath.TargetPath)').StartsWith('runtimes\'))" />
+    </ItemGroup>
     <MakeDir Directories="$(HostModulesDir);$(HostModulesDir)Assets" />
     <Copy SourceFiles="$(TargetPath);$(ProjectDepsFilePath)" DestinationFolder="$(HostModulesDir)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(TargetDir)$(AssemblyName).pdb" DestinationFolder="$(HostModulesDir)" SkipUnchangedFiles="true" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
+    <Copy SourceFiles="@(ModulePrivateDependency)" DestinationFolder="$(HostModulesDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(ModuleCopilotRuntime)"
+      DestinationFiles="@(ModuleCopilotRuntime->'$(HostModulesDir)%(TargetPath)')"
+      SkipUnchangedFiles="true" />
     <Copy SourceFiles="@(Content)" DestinationFolder="$(HostModulesDir)Assets" SkipUnchangedFiles="true" />
-    <Delete Files="$(HostModulesRoot)$(AssemblyName).dll;$(HostModulesRoot)Assets\icons8-github-64.png" />
+    <Delete Files="$(HostModulesRoot)$(AssemblyName).dll;$(HostModulesRoot)Assets\icons8-github-64.png;$(HostModulesRoot)Assets\icons8-pulse-50.png" />
     <RemoveDir Directories="$(HostModulesRoot)Assets" Condition="Exists('$(HostModulesRoot)Assets')" />
   </Target>
 </Project>

@@ -35,30 +35,23 @@ exit /b 0
 
 :DeployModule
 set "PROJ=%~1"
+set "HOST_MOD_DIR=Pagurian\bin\x64\%CONFIG%\net10.0-windows10.0.22621.0\modules\%PROJ%"
+set "MOD_DIR=%MODULES_DIR%\%PROJ%"
+if exist "%HOST_MOD_DIR%" rmdir /s /q "%HOST_MOD_DIR%"
 echo Building module %PROJ%...
 dotnet build "%PROJ%\%PROJ%.csproj" -c %CONFIG% -p:Platform=x64
 if errorlevel 1 (
     echo Build failed for module %PROJ%.
     exit /b 1
 )
-set "MOD_OUT=%PROJ%\bin\x64\%CONFIG%\net10.0-windows10.0.22621.0"
-set "MOD_DIR=%MODULES_DIR%\%PROJ%"
+if not exist "%HOST_MOD_DIR%\%PROJ%.dll" (
+    echo Module deployment bundle was not created for %PROJ%.
+    exit /b 1
+)
 if not exist "%MOD_DIR%" mkdir "%MOD_DIR%"
-copy /y "%MOD_OUT%\%PROJ%.dll" "%MOD_DIR%\" >nul
+xcopy /y /q /s /e "%HOST_MOD_DIR%\*" "%MOD_DIR%\" >nul
 if errorlevel 1 (
-    echo Failed to copy %PROJ%.dll.
+    echo Failed to copy %PROJ% deployment bundle.
     exit /b 1
-)
-copy /y "%MOD_OUT%\%PROJ%.deps.json" "%MOD_DIR%\" >nul
-if errorlevel 1 (
-    echo Failed to copy %PROJ%.deps.json.
-    exit /b 1
-)
-if exist "%MOD_OUT%\Assets" (
-    xcopy /y /q /s "%MOD_OUT%\Assets\*" "%MOD_DIR%\Assets\" >nul
-    if errorlevel 1 (
-        echo Failed to copy %PROJ% assets.
-        exit /b 1
-    )
 )
 exit /b 0

@@ -12,6 +12,7 @@
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSessionIdentityResolver.cs" Link="CopilotSessionIdentityResolver.cs" />
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSessionState.cs" Link="CopilotSessionState.cs" />
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSessionTracker.cs" Link="CopilotSessionTracker.cs" />
+    <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotUsageState.cs" Link="CopilotUsageState.cs" />
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\HookEventLog.cs" Link="HookEventLog.cs" />
     <Compile Include="..\..\..\Pagurian.Sdk\Logger.cs" Link="Logger.cs" />
   </ItemGroup>

@@ -47,6 +47,7 @@ var tests = new (string Name, Action Run)[]
     ("tracker stop/start drops queued callbacks and timers", TrackerRestart),
     ("tracker shared consumers retain state until final stop", TrackerConsumers),
     ("hook events rotate into exclusive local app-data JSONL files", HookEventLogRotation),
+    ("usage normalization preserves unavailable and unlimited states", UsageFixture.Run),
 };
 int passed = 0;
 foreach (var (name, run) in tests)

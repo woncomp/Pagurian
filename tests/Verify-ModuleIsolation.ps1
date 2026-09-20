@@ -33,6 +33,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Build-Fixture "ModuleA"
 Build-Fixture "ModuleB"
+Build-Fixture "ModuleHost"
 $entries = @(
     Get-FixtureEntry "ModuleA"
     Get-FixtureEntry "ModuleB"
@@ -51,13 +52,43 @@ $default = [System.Runtime.Loader.AssemblyLoadContext]::Default
 
 $sdkAssembly = $default.Assemblies | Where-Object { $_.GetName().Name -eq "Pagurian.Sdk" }
 $moduleBase = $sdkAssembly.GetType("Pagurian.Sdk.PagurianModule")
-$hostAssembly = $default.LoadFromAssemblyPath((Join-Path $hostOutput "Pagurian.dll"))
+$hostAssembly = $default.LoadFromAssemblyPath((Get-FixtureEntry "ModuleHost"))
 $contextType = $hostAssembly.GetType("Pagurian.ModuleLoadContext", $true)
+$hostOwnedMethod = $contextType.GetMethod(
+    "IsHostOwnedAssemblyFile",
+    [Reflection.BindingFlags]"Static,NonPublic,Public")
 $constructor = $contextType.GetConstructor(
     [Reflection.BindingFlags]"Instance,NonPublic,Public",
     $null,
     @([string]),
     $null)
+
+$copilotBundle = Join-Path $hostOutput "modules\Pagurian.Modules.Copilot"
+@(
+    "GitHub.Copilot.SDK.dll",
+    "Microsoft.Extensions.AI.Abstractions.dll",
+    "Microsoft.Extensions.DependencyInjection.Abstractions.dll",
+    "Microsoft.Extensions.Logging.Abstractions.dll",
+    "Assets\icons8-pulse-50.png",
+    "runtimes\win-$Platform\native\copilot.exe",
+    "runtimes\win-$Platform\native\copilot-runtime.exe",
+    "runtimes\win-$Platform\native\runtime.node"
+) | ForEach-Object {
+    $path = Join-Path $copilotBundle $_
+    if (!(Test-Path $path) -or (Get-Item $path).Length -eq 0) {
+        throw "Copilot module bundle is missing required private asset: $_"
+    }
+}
+
+$forbidden = Get-ChildItem $copilotBundle -Filter "*.dll" -File -Recurse |
+    Where-Object {
+        [object[]]$arguments = @([string]$_.FullName)
+        $hostOwnedMethod.Invoke($null, $arguments)
+    } |
+    ForEach-Object { [IO.Path]::GetRelativePath($copilotBundle, $_.FullName) }
+if ($forbidden.Count -ne 0) {
+    throw "Copilot module bundle contains host-owned assemblies: $($forbidden -join ', ')"
+}
 
 $observed = @()
 foreach ($entry in $entries) {
@@ -75,3 +106,4 @@ if ($observed.Count -ne 2 -or $observed[0] -ne "1.0.0" -or $observed[1] -ne "2.0
 }
 
 Write-Output "Module dependency isolation passed: $($observed -join ', ')"
+Write-Output "Copilot private SDK/runtime bundle passed."
