@@ -27,7 +27,8 @@ var tests = new (string Name, Action Run)[]
     ("CLI explicit owner restart survives a delayed older exit", OwnerRestartOrdering),
     ("older child exit still preserves newer permission", ChildExitOrdering),
     ("unknown ended source never publishes after resolution", UnknownEnd),
-    ("one-second aggregate debounce is independent of siblings", Debounce),
+    ("only entering Blocked waits for a stable one-second aggregate", Debounce),
+    ("non-Blocked tracker notifications do not wait for a timer", TrackerImmediateStatus),
     ("latest payload retains child source and blocker provenance", Provenance),
     ("transition diagnostics are bounded and payload-free", Diagnostics),
     ("malformed hook fields cannot throw", MalformedHooks),
@@ -223,7 +224,8 @@ static void AskUserBlocked()
         r.Advance(1000);
         Check(r.Cell().Status == CopilotSessionStatus.Blocked);
         r.Event(completion, "root", tool: "ask_user");
-        Check(r.Cell().BlockingSources.Count == 0);
+        Check(r.Cell().BlockingSources.Count == 0 && r.Cell().Status == CopilotSessionStatus.Working &&
+            r.Cell().PendingStatus is null, "Tool completion returns to Working without waiting for a timer");
         r.State.Handle(ask);
         Check(r.Cell().BlockingSources.Count == 0, "An older ask cannot undo tool completion");
         r.Advance(1000);
@@ -545,6 +547,54 @@ static void ShuffledLifecycle()
 
 static void Debounce()
 {
+    foreach (var initial in new[] { CopilotSessionStatus.Idle, CopilotSessionStatus.Working })
+    {
+        var boundary = new Rig(); boundary.Group();
+        boundary.Event(initial == CopilotSessionStatus.Idle ? "sessionStart" : "preToolUse", "root");
+        var candidate = boundary.Cell();
+        Check(candidate.Status == initial && candidate.PendingStatus is null, "Initial non-Blocked state is immediate");
+        boundary.Event("permissionRequest", "a");
+        Check(candidate.Status == initial && candidate.PendingStatus == CopilotSessionStatus.Blocked);
+        boundary.Advance(999);
+        Check(candidate.Status == initial, "Blocked is not visible before one second");
+        boundary.Advance(1);
+        Check(candidate.Status == CopilotSessionStatus.Blocked && candidate.PendingStatus is null,
+            "Blocked becomes visible at one second");
+        boundary.Event("postToolUse", "a");
+        Check(candidate.Status == CopilotSessionStatus.Working && candidate.PendingStatus is null,
+            "Blocked to Working is immediate");
+        boundary.Event("agentStop", "a");
+        boundary.Event("agentStop", "root");
+        Check(candidate.Status == CopilotSessionStatus.Idle && candidate.PendingStatus is null,
+            "Working to Idle is immediate");
+        boundary.Event("preToolUse", "root");
+        Check(candidate.Status == CopilotSessionStatus.Working && candidate.PendingStatus is null,
+            "Idle to Working is immediate");
+    }
+
+    foreach (var completion in new[] { "agentStop", "postToolUse", "postToolUseFailure" })
+    {
+        var cancelled = new Rig(); cancelled.Group();
+        cancelled.Event("preToolUse", "root", tool: "ask_user");
+        cancelled.Advance(600);
+        cancelled.Event(completion, "root", tool: "ask_user");
+        var expected = completion == "agentStop" ? CopilotSessionStatus.Idle : CopilotSessionStatus.Working;
+        Check(cancelled.Cell().Status == expected && cancelled.Cell().PendingStatus is null,
+            "Leaving a pending Blocked candidate cancels it immediately");
+        cancelled.Advance(500);
+        Check(cancelled.Cell().Status == expected, "Timer cannot commit a cancelled candidate");
+        cancelled.Event("preToolUse", "root", tool: "ask_user");
+        var restartedAt = cancelled.Now;
+        Check(cancelled.Cell().PendingStatusSince == restartedAt, "Re-entry starts a fresh interval");
+        cancelled.Advance(999);
+        Check(cancelled.Cell().Status == expected, "Re-entry does not inherit time from the cancelled interval");
+        cancelled.Advance(1);
+        Check(cancelled.Cell().Status == CopilotSessionStatus.Blocked);
+        cancelled.Event(completion, "root", tool: "ask_user");
+        Check(cancelled.Cell().Status == expected && cancelled.Cell().PendingStatus is null,
+            "Leaving committed Blocked is also immediate");
+    }
+
     var r = new Rig(); r.Group();
     r.Event("permissionRequest", "a");
     var cell = r.Cell();
@@ -555,17 +605,80 @@ static void Debounce()
     r.Event("agentStop", "root");
     r.Event("permissionRequest", "a"); // repeat preserves blocked-since
     Check(cell.PendingStatusSince == since);
-    r.Advance(490);
-    Check(cell.Status == CopilotSessionStatus.Idle);
-    r.Advance(10);
-    Check(cell.Status == CopilotSessionStatus.Blocked);
+    r.Event("permissionRequest", "b");
     r.Event("postToolUse", "a");
-    Check(cell.BlockingSources.Count == 0 && cell.Status == CopilotSessionStatus.Blocked);
-    r.Advance(500);
-    r.Event("permissionRequest", "a");
-    Check(cell.PendingStatus is null && cell.BlockingSources.Count == 1);
-    r.Advance(1000);
+    Check(cell.PendingStatusSince == since && cell.BlockingSources.Single().SourceId == "b",
+        "Continuous aggregate blocking retains its timer when blocker ownership changes");
+    r.Advance((int)(since.AddMilliseconds(999) - r.Now).TotalMilliseconds);
+    Check(cell.Status == CopilotSessionStatus.Idle);
+    r.Advance(1);
     Check(cell.Status == CopilotSessionStatus.Blocked);
+    r.Event("permissionRequest", "a");
+    r.Event("postToolUse", "b");
+    Check(cell.PendingStatus is null && cell.BlockingSources.Single().SourceId == "a" &&
+        cell.Status == CopilotSessionStatus.Blocked, "Another active blocker prevents unblocking");
+    r.Event("postToolUse", "a");
+    Check(cell.BlockingSources.Count == 0 && cell.Status == CopilotSessionStatus.Working &&
+        cell.PendingStatus is null, "The last blocker clearing immediately shows Working");
+}
+
+static void TrackerImmediateStatus()
+{
+    using var files = new Files();
+    files.App("root");
+    var dispatcher = ReactorApp.UIDispatcher;
+    dispatcher.Drain();
+    var time = new TrackerClock();
+    CopilotSessionStatus? notified = null;
+    int notifications = 0;
+    void Changed()
+    {
+        notified = CopilotSessionTracker.Find("root")?.Status;
+        notifications++;
+    }
+    CopilotSessionTracker.UiChanged += Changed;
+    CopilotSessionTracker.Start(Logger.For("fixture"), files.Root, time: time);
+    try
+    {
+        CopilotSessionTracker.HandleHookEvent("preToolUse",
+            """{"sessionId":"root","toolName":"powershell"}""", time.GetUtcNow());
+        Check(SpinWait.SpinUntil(() =>
+        {
+            dispatcher.Drain(); return CopilotSessionTracker.Find("root") is not null;
+        }, TimeSpan.FromSeconds(5)), "Named tracker session was not published");
+        Check(notified == CopilotSessionStatus.Working, "First publication already notifies Working without a timer");
+        var timer = dispatcher.Timers.Last();
+        time.Advance(1);
+        CopilotSessionTracker.HandleHookEvent("preToolUse",
+            """{"sessionId":"root","toolName":"ask_user"}""", time.GetUtcNow());
+        Check(notified == CopilotSessionStatus.Working, "Pending Blocked retains the visible Working status");
+        time.Advance(999);
+        timer.Fire();
+        Check(notified == CopilotSessionStatus.Working);
+        time.Advance(1);
+        timer.Fire();
+        Check(notified == CopilotSessionStatus.Blocked);
+        int before = notifications;
+        time.Advance(1);
+        CopilotSessionTracker.HandleHookEvent("postToolUse",
+            """{"sessionId":"root","toolName":"ask_user"}""", time.GetUtcNow());
+        Check(notified == CopilotSessionStatus.Working && notifications == before + 1,
+            "Hook processing itself notifies Working, without firing or draining the timer");
+        time.Advance(1);
+        CopilotSessionTracker.HandleHookEvent("agentStop", """{"sessionId":"root"}""", time.GetUtcNow());
+        Check(notified == CopilotSessionStatus.Idle && notifications == before + 2,
+            "Hook processing itself notifies Idle");
+        time.Advance(1000);
+        timer.Fire();
+        Check(notified == CopilotSessionStatus.Idle && notifications == before + 2,
+            "No pending transition remains for a later timer tick");
+    }
+    finally
+    {
+        CopilotSessionTracker.UiChanged -= Changed;
+        CopilotSessionTracker.Stop();
+        dispatcher.Drain();
+    }
 }
 
 static void Provenance()
@@ -922,6 +1035,16 @@ static void TrackerLifecycleStop()
     dispatcher.Drain();
     Check(CopilotSessionTracker.Sessions.Count == 0, "Queued lifecycle resurrected stopped tracker");
     Check(SpinWait.SpinUntil(() => reader.Disposed, TimeSpan.FromSeconds(5)), "Lifecycle reader was not disposed");
+}
+
+sealed class TrackerClock : TimeProvider
+{
+    private long _milliseconds;
+    public override long TimestampFrequency => 1000;
+    public override long GetTimestamp() => Interlocked.Read(ref _milliseconds);
+    public override DateTimeOffset GetUtcNow() =>
+        DateTimeOffset.Parse("2026-09-18T03:00:00Z").AddMilliseconds(GetTimestamp());
+    public void Advance(long milliseconds) => Interlocked.Add(ref _milliseconds, milliseconds);
 }
 
 sealed class Rig

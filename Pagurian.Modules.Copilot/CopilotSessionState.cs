@@ -175,7 +175,7 @@ sealed class CopilotSessionState
     private readonly Dictionary<string, (CopilotAppSessionEvidence Evidence, DateTimeOffset At)> _appEvidence = new();
     private readonly HashSet<string> _exitedApps = new(StringComparer.Ordinal);
     private const int TransitionLimit = 256;
-    private static readonly TimeSpan Debounce = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan BlockedDebounce = TimeSpan.FromSeconds(1);
 
     public CopilotSessionState(Func<DateTimeOffset>? clock = null, Action<CopilotTransition>? diagnostic = null)
     {
@@ -771,7 +771,12 @@ sealed class CopilotSessionState
 
     private static void UpdateCandidate(CopilotSession session, CopilotSessionStatus candidate, DateTimeOffset now)
     {
-        if (candidate == session.Status)
+        if (candidate != CopilotSessionStatus.Blocked)
+        {
+            session.PendingStatus = null;
+            session.Status = candidate;
+        }
+        else if (candidate == session.Status)
             session.PendingStatus = null;
         else if (session.PendingStatus != candidate)
         {
@@ -786,10 +791,11 @@ sealed class CopilotSessionState
         bool changed = false;
         foreach (var session in _sessions.Values)
         {
-            if (session.PendingStatus is not { } pending || now - session.PendingStatusSince < Debounce)
+            if (session.PendingStatus != CopilotSessionStatus.Blocked ||
+                now - session.PendingStatusSince < BlockedDebounce)
                 continue;
             session.PendingStatus = null;
-            session.Status = pending;
+            session.Status = CopilotSessionStatus.Blocked;
             changed = true;
         }
         return changed;

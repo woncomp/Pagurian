@@ -424,9 +424,11 @@ public sealed class MyShell : Shell
   App archive and verified owning-process exit, not hooks or transcript shutdown,
   hide App groups. Timestamp ordering rejects older
   unblock/stop delivery; absent timestamps use bridge `ReceivedAt`.
-  The existing one-second visual debounce applies to the final aggregate,
-  never to source bookkeeping. Sibling events cannot reset a stable blocked
-  candidate. Latest details keep the original payload/source; current
+  The one-second visual debounce applies only to entering aggregate Blocked,
+  never to source bookkeeping. Working/Idle aggregates display immediately and
+  cancel pending Blocked; re-entry requires a fresh continuous second.
+  Sibling events cannot reset a stable blocked candidate. Latest details keep
+  the original payload/source; current
   blockers have separate provenance. Bounded payload-free transition
   diagnostics go through the module logger. Tracker Stop invalidates queued
   callbacks, cancels background resolution, stops its timer, and clears state.

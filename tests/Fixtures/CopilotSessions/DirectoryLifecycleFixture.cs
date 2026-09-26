@@ -215,8 +215,8 @@ internal static class DirectoryLifecycleFixture
             state.Resolve([root], directories: Snapshot(4, time, recovery, CopilotSessionDirectoryPresence.Unknown, "Fresh"));
             Check(state.Find("root") is null, "Fresh name does not bypass unknown directory evidence");
             state.Resolve([root], directories: Snapshot(5, time, recovery, CopilotSessionDirectoryPresence.Present, "Fresh"));
-            Check(state.Find("root") is { Name: "Fresh", BlockingSources.Count: 0 } &&
-                state.Find("root")!.PendingStatus == CopilotSessionStatus.Working && starts == 3,
+            Check(state.Find("root") is { Name: "Fresh", BlockingSources.Count: 0,
+                Status: CopilotSessionStatus.Working, PendingStatus: null } && starts == 3,
                 "Fresh hook and fresh directory/name restore current work without old permission");
             state.Resolve([], directories: Snapshot(6, time, target, CopilotSessionDirectoryPresence.Missing));
             Check(state.Find("root") is not null && ends == 1, "Old revision cannot remove a rebuilt cell");

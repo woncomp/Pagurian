@@ -144,18 +144,24 @@ Each source owns its current permission blocker independently:
 For CLI, subagent lifecycle hooks remain details-only; they do not clear or
 remove another independently displayed session.
 
-`ask_user` uses the same per-source blocker aggregation and one-second visual
-debounce as `permissionRequest`. Its `postToolUse` or `postToolUseFailure`
-returns that source to Working; other sources' blockers remain intact.
+`ask_user` uses the same per-source blocker aggregation and one-second
+Blocked-entry debounce as `permissionRequest`. Its `postToolUse` or
+`postToolUseFailure` returns that source to Working; other sources' blockers
+remain intact. When the final blocker clears, Working is displayed immediately.
 Repeated waiting signals preserve the original blocked-since timestamp.
 At equal `preToolUse` timestamps the waiting signal wins over ordinary work;
 older hooks cannot undo a newer completion.
 
 The aggregate is **Blocked > Working > Idle** over active members. The
-one-second visual debounce affects only this aggregate; permission ownership
-and end bookkeeping are immediate. A sibling cannot clear a blocker or restart
-an unchanged Blocked candidate's timer. A newly discovered group starts
-visually Idle until its candidate has been stable for one second.
+one-second visual debounce applies only to **entering Blocked**: the aggregate
+must stay continuously Blocked for one second before the existing timer commits
+it. Until then the previous visible state is retained. Any non-Blocked aggregate
+(Working or Idle) is displayed immediately and cancels the pending candidate;
+subsequent Blocked re-entry starts a fresh interval. Permission ownership and
+end bookkeeping remain immediate. A sibling cannot clear a blocker or restart
+an unchanged Blocked candidate's timer, even when blocker ownership changes.
+A newly discovered or restored Working/Idle group displays its state immediately;
+a new Blocked group starts visually Idle while its entry interval elapses.
 
 Hook `timestamp` (ISO timestamp or Unix milliseconds) orders each source.
 Without it, the bridge's `ReceivedAt` is used. Duplicate/older status and

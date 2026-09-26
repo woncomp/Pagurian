@@ -169,6 +169,8 @@ internal static class AppLifecycleFixture
         delayed.Resolve([Child("late")], Snapshot(3, 31, App(2, 25), ("root", CopilotArchiveState.Live, 30)));
         Check(delayed.Find("root")!.Nodes.Single(n => n.SessionId == "late").Status == CopilotSessionStatus.Working,
             "Fresh lifecycle-only child survives deferred identity at restoration");
+        Check(delayed.Find("root") is { Status: CopilotSessionStatus.Working, PendingStatus: null },
+            "Restored child work updates the aggregate immediately");
         var working = new CopilotSessionState();
         working.Resolve([Root("root")], Snapshot(1, 2, App(), ("root", CopilotArchiveState.Live, 1)));
         working.Resolve([], new(2, Time.AddSeconds(20), [], [App()]));
@@ -177,6 +179,8 @@ internal static class AppLifecycleFixture
         working.Resolve([], Snapshot(3, 31, App(2, 25), ("root", CopilotArchiveState.Live, 30)));
         Check(working.Find("root")!.Nodes[0].Status == CopilotSessionStatus.Working,
             "Fresh root work is retained even when latest hidden hook has no state");
+        Check(working.Find("root") is { Status: CopilotSessionStatus.Working, PendingStatus: null },
+            "Restored root work is visible without a timer tick");
     }
 
     private static void UnknownArchiveOwnership()
