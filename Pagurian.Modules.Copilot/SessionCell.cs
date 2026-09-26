@@ -87,6 +87,7 @@ class SessionCell : ShellCell
                 TextBlock(session.ProjectName)
                     .ApplyStyle(SessionCellLayout.CaptionStyle)
                     .MaxLines(1)
+                    .TextWrapping(TextWrapping.NoWrap)
                     .TextTrimming(TextTrimming.CharacterEllipsis)
                     .TextAlignment(TextAlignment.Center)
                     .Foreground(highContrast
@@ -109,6 +110,7 @@ class SessionCell : ShellCell
             TextBlock(session.ProjectName)
                 .ApplyStyle(SessionCellLayout.CaptionStyle)
                 .MaxLines(1)
+                .TextWrapping(TextWrapping.NoWrap)
                 .TextTrimming(TextTrimming.CharacterEllipsis)
                 .ToolTip(session.ProjectName)
                 .Margin(SessionCellLayout.GapDip, 0)
@@ -121,6 +123,7 @@ class SessionCell : ShellCell
             TextBlock(session.Name)
                 .ApplyStyle(SessionCellLayout.CaptionStyle)
                 .MaxLines(1)
+                .TextWrapping(TextWrapping.NoWrap)
                 .TextTrimming(TextTrimming.CharacterEllipsis)
                 .ToolTip(session.Name)
                 .Grid(row: 1, column: 0, columnSpan: 3));

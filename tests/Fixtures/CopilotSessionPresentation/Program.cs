@@ -359,6 +359,9 @@ sealed class Harness
             var project = labels.Single(text => text.Text == cell.Project);
             var projectPoint = project.TransformToVisual(root).TransformPoint(new Point());
             Require(projectPoint.Y + project.ActualHeight <= 49, "two-line cell exceeds taskbar slot");
+            Require(project.TextWrapping == TextWrapping.NoWrap &&
+                    project.TextTrimming == TextTrimming.CharacterEllipsis,
+                "project name does not use single-line character ellipsis");
             if (!cell.IsLarge)
             {
                 var status = labels.Single(text => text.Text == cell.Status);
@@ -376,6 +379,9 @@ sealed class Harness
             Require(namePoint.Y >= projectPoint.Y + project.ActualHeight - 1,
                 "Large session title is not on the second row");
             Require(namePoint.Y + name.ActualHeight <= 49, "Large cell exceeds taskbar slot");
+            Require(name.TextWrapping == TextWrapping.NoWrap &&
+                    name.TextTrimming == TextTrimming.CharacterEllipsis,
+                "session name does not use single-line character ellipsis");
             if (cell.Project.Length > 16)
                 Require(project.IsTextTrimmed, "Large project is not ellipsized in its finite column");
             Require(name.IsTextTrimmed, "Large session title is not ellipsized in its finite row");
