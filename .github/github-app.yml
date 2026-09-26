@@ -1,0 +1,6 @@
+scripts:
+  - name: Run
+    command: "dotnet run --project Pagurian -c Debug -p:Platform=x64"
+automation:
+  auto_issue_session: true
+  remote_control: false

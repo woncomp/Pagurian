@@ -17,11 +17,8 @@ class CopilotConfiguration : ShellConfiguration
         var clients = CopilotSettings.Clients(Settings);
 
         return FlexColumn(
-            Component<CopilotAccountPanel>()
-                .Margin(0, 8, 0, 0),
             BodyStrong("Enabled Copilot clients")
-                .HeadingLevel(AutomationHeadingLevel.Level2)
-                .Margin(0, 16, 0, 0),
+                .HeadingLevel(AutomationHeadingLevel.Level2),
             CheckBox(
                     clients.CopilotCli,
                     value => SetSettings(CopilotSettings.Write(
@@ -99,23 +96,8 @@ class UsageConfiguration : ShellConfiguration
     }
 }
 
-class CopilotAccountPanel : Component
+static class CopilotAccountPanel
 {
-    public override Element Render()
-    {
-        var service = CopilotModule.Instance.Usage;
-        var (_, setVersion) = UseState(0);
-        var tick = UseRef(0);
-        UseEffect(() =>
-        {
-            void OnChanged() => setVersion(++tick.Current);
-            service.Changed += OnChanged;
-            return () => service.Changed -= OnChanged;
-        }, service);
-
-        return AccountSection(service.State, service.Login);
-    }
-
     internal static Element AccountSection(
         CopilotUsageState state,
         Action login) =>
