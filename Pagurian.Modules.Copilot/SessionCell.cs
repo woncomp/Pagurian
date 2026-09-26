@@ -58,7 +58,7 @@ class SessionCell : ShellCell
 
         return Border(content)
             .Width(SessionCellLayout.MeasureWidth(iconSize))
-            .Padding(SessionCellLayout.PaddingDip, 0)
+            .Padding(iconSize == CopilotSessionIconSize.Large ? 0 : SessionCellLayout.PaddingDip, 0)
             .RequestedTheme(highContrast ? ElementTheme.Default
                 : Theme.IsDark ? ElementTheme.Dark : ElementTheme.Light)
             .AutomationName($"{session.Name}, {session.Status}, {session.ProjectName}");
@@ -99,34 +99,72 @@ class SessionCell : ShellCell
 
     private static Element LargeContent(CopilotSession session, Brush statusBrush) =>
         Grid(
-            [GridSize.Auto, GridSize.Star(), GridSize.Auto],
+            [GridSize.Star()],
             [GridSize.Auto, GridSize.Auto],
             Image(CopilotModule.ClientIconPath(session.Client))
                 .Width(SessionCellLayout.IconDip)
                 .Height(SessionCellLayout.IconDip)
+                .Margin(left: SessionCellLayout.PaddingDip, top: 0, right: 0, bottom: 0)
                 .AccessibilityHidden()
+                .HAlign(HorizontalAlignment.Left)
                 .VAlign(VerticalAlignment.Center)
-                .Grid(row: 0, column: 0),
+                .Grid(row: 0),
             TextBlock(session.ProjectName)
                 .ApplyStyle(SessionCellLayout.CaptionStyle)
                 .MaxLines(1)
                 .TextWrapping(TextWrapping.NoWrap)
                 .TextTrimming(TextTrimming.CharacterEllipsis)
                 .ToolTip(session.ProjectName)
-                .Margin(SessionCellLayout.GapDip, 0)
-                .HAlign(HorizontalAlignment.Stretch)
+                .Width(SessionCellLayout.LargeProjectNameWidth)
+                .HAlign(HorizontalAlignment.Center)
+                .TextAlignment(TextAlignment.Center)
                 .VAlign(VerticalAlignment.Center)
-                .Grid(row: 0, column: 1),
+                .Grid(row: 0),
             StatusIcon(session.Status, statusBrush)
-                .Margin(left: SessionCellLayout.GapDip, top: 0, right: 0, bottom: 0)
-                .Grid(row: 0, column: 2),
-            TextBlock(session.Name)
+                .Margin(left: SessionCellLayout.GapDip, top: 0,
+                    right: SessionCellLayout.PaddingDip, bottom: 0)
+                .HAlign(HorizontalAlignment.Right)
+                .Grid(row: 0),
+            LargeName(session.Name)
+                .Grid(row: 1))
+            .HAlign(HorizontalAlignment.Stretch);
+
+    private static Element LargeName(string name)
+    {
+        var label = TextBlock(name)
+            .ApplyStyle(SessionCellLayout.CaptionStyle)
+            .MaxLines(1)
+            .TextWrapping(TextWrapping.NoWrap)
+            .TextTrimming(TextTrimming.CharacterEllipsis)
+            .TextAlignment(TextAlignment.Center)
+            .ToolTip(name);
+
+        if (!SessionCellLayout.HasRoomForLargeNameBoundaries(name))
+            return label
+                .Width(SessionCellLayout.LargeWidth)
+                .HAlign(HorizontalAlignment.Center);
+
+        label = label
+            .Width(SessionCellLayout.LargeNameWidthWithBoundaries)
+            .HAlign(HorizontalAlignment.Center);
+
+        return Grid(
+            [GridSize.Auto, GridSize.Star(), GridSize.Auto],
+            [GridSize.Auto],
+            TextBlock("[")
                 .ApplyStyle(SessionCellLayout.CaptionStyle)
-                .MaxLines(1)
-                .TextWrapping(TextWrapping.NoWrap)
-                .TextTrimming(TextTrimming.CharacterEllipsis)
-                .ToolTip(session.Name)
-                .Grid(row: 1, column: 0, columnSpan: 3));
+                .AccessibilityHidden()
+                .VAlign(VerticalAlignment.Center)
+                .Grid(row: 0, column: 0),
+            label.Grid(row: 0, column: 1),
+            TextBlock("]")
+                .ApplyStyle(SessionCellLayout.CaptionStyle)
+                .AccessibilityHidden()
+                .HAlign(HorizontalAlignment.Right)
+                .VAlign(VerticalAlignment.Center)
+                .Grid(row: 0, column: 2))
+            .Width(SessionCellLayout.LargeWidth);
+    }
 
     private static Element StatusIcon(CopilotSessionStatus status, Brush brush) =>
         status == CopilotSessionStatus.Working

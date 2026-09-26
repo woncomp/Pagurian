@@ -44,13 +44,15 @@ sealed class CellProbe(
     string status,
     string project,
     string name,
-    bool isLarge)
+    bool isLarge,
+    bool hasNameBoundaries)
 {
     public ShellCellProps Props { get; } = props;
     public string Status { get; } = status;
     public string Project { get; } = project;
     public string Name { get; } = name;
     public bool IsLarge { get; set; } = isLarge;
+    public bool HasNameBoundaries { get; } = hasNameBoundaries;
     public FrameworkElement? Root;
 }
 
@@ -130,7 +132,7 @@ sealed class Harness
             {
                 var cell = CreateCell(status, "App", true,
                     status == "Idle" ? "Short" : "A very long project name that must be ellipsized",
-                    "A very long fixture session title that must be ellipsized");
+                    status == "Idle" ? "Short session" : "A very long fixture session title that must be ellipsized");
                 _cells.Add(cell);
                 if (status == "Working")
                     _switchingLargeCell = cell;
@@ -267,7 +269,8 @@ sealed class Harness
         object model = isLarge
             ? New("CopilotSessionCellModel", session, EnumValue("CopilotSessionIconSize", "Large"))
             : session;
-        return new(new(_shell, model, null, null, null), status, project, name, isLarge);
+        return new(new(_shell, model, null, null, null), status, project, name, isLarge,
+            isLarge && name == "Short session");
     }
 
     private static void SetIconSize(CellProbe cell, string size) =>
@@ -379,12 +382,33 @@ sealed class Harness
             Require(namePoint.Y >= projectPoint.Y + project.ActualHeight - 1,
                 "Large session title is not on the second row");
             Require(namePoint.Y + name.ActualHeight <= 49, "Large cell exceeds taskbar slot");
+            Require(project.HorizontalAlignment == HorizontalAlignment.Center &&
+                    project.TextAlignment == TextAlignment.Center,
+                "Large project name does not use centered layout and text alignment");
+            Require(name.HorizontalAlignment == HorizontalAlignment.Center &&
+                    name.TextAlignment == TextAlignment.Center,
+                "Large session title does not use centered layout and text alignment");
             Require(name.TextWrapping == TextWrapping.NoWrap &&
                     name.TextTrimming == TextTrimming.CharacterEllipsis,
                 "session name does not use single-line character ellipsis");
+            var boundaries = labels.Where(text => text.Text is "[" or "]").ToArray();
+            Require(boundaries.Length == (cell.HasNameBoundaries ? 2 : 0),
+                "Large session title boundary markers do not match the available name width");
+            if (cell.HasNameBoundaries)
+            {
+                var left = boundaries.Single(text => text.Text == "[");
+                var right = boundaries.Single(text => text.Text == "]");
+                var leftPoint = left.TransformToVisual(root).TransformPoint(new Point());
+                var rightPoint = right.TransformToVisual(root).TransformPoint(new Point());
+                Require(leftPoint.X <= .5 && rightPoint.X + right.ActualWidth >= root.ActualWidth - .5,
+                    "Large session title boundary markers are not at the shell cell edges");
+            }
             if (cell.Project.Length > 16)
                 Require(project.IsTextTrimmed, "Large project is not ellipsized in its finite column");
-            Require(name.IsTextTrimmed, "Large session title is not ellipsized in its finite row");
+            if (cell.HasNameBoundaries)
+                Require(!name.IsTextTrimmed, "Short Large session title was unexpectedly ellipsized");
+            else
+                Require(name.IsTextTrimmed, "Large session title is not ellipsized in its finite row");
             switch (cell.Status)
             {
                 case "Idle":
