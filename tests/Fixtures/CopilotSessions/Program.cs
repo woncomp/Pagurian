@@ -13,6 +13,7 @@ var tests = new (string Name, Action Run)[]
     ("CLI subagent lifecycle is details-only", CliLifecycle),
     ("child blocker survives parent and sibling activity", MemberBlockers),
     ("multiple blockers clear only at their emitting source", MultipleBlockers),
+    ("ask_user blocks its source until tool completion", AskUserBlocked),
     ("working child overrides idle parent", AggregatePriority),
     ("child completion and exit preserve the stable owner", ChildLifecycle),
     ("child-only discovery preserves owner after child exit", SyntheticOwnerPreserved),
@@ -200,6 +201,68 @@ static void MultipleBlockers()
     Check(r.Cell().BlockingSources.Count == 0);
     r.Advance(1000);
     Check(r.Cell().Status == CopilotSessionStatus.Working);
+}
+
+static void AskUserBlocked()
+{
+    foreach (var kind in new[] { CopilotIdentityKind.AppRoot, CopilotIdentityKind.Cli })
+    foreach (var completion in new[] { "postToolUse", "postToolUseFailure" })
+    foreach (bool deferred in new[] { false, true })
+    {
+        var r = new Rig();
+        if (!deferred) r.Resolve("root", "root", kind);
+        var ask = r.Event("preToolUse", "root", tool: "ask_user");
+        Check(ask.ToolName == "ask_user", "Hook parser preserves the tool name");
+        if (deferred)
+        {
+            Check(r.State.Sessions.Count == 0);
+            r.Resolve("root", "root", kind);
+        }
+        Check(r.Cell().BlockingSources.Single() is { SourceId: "root", EventName: "preToolUse" } blocker &&
+            blocker.BlockedSince == ask.At, "ask_user supplies blocker provenance without a permission hook");
+        r.Advance(1000);
+        Check(r.Cell().Status == CopilotSessionStatus.Blocked);
+        r.Event(completion, "root", tool: "ask_user");
+        Check(r.Cell().BlockingSources.Count == 0);
+        r.State.Handle(ask);
+        Check(r.Cell().BlockingSources.Count == 0, "An older ask cannot undo tool completion");
+        r.Advance(1000);
+        Check(r.Cell().Status == CopilotSessionStatus.Working);
+    }
+
+    var group = new Rig(); group.Group();
+    var childAsk = group.Event("preToolUse", "a", tool: "ask_user");
+    group.Advance(500);
+    group.Event("preToolUse", "b", tool: "powershell");
+    group.Event("postToolUse", "root", tool: "ask_user");
+    group.Event("preToolUse", "a", tool: "ask_user");
+    group.Advance(500);
+    Check(group.Cell().Status == CopilotSessionStatus.Blocked &&
+        group.Cell().BlockingSources.Single().BlockedSince == childAsk.At,
+        "Sibling work and repeated asks preserve the stable child blocker and debounce");
+    group.Event("permissionRequest", "b");
+    group.Event("postToolUse", "a", tool: "ask_user");
+    Check(group.Cell().BlockingSources.Single().SourceId == "b",
+        "Answering one source cannot clear another source's permission");
+    group.Event("postToolUseFailure", "b");
+    Check(group.Cell().BlockingSources.Count == 0);
+
+    var tied = new Rig(); tied.Group();
+    var work = tied.Event("preToolUse", "root", tool: "powershell");
+    var waiting = work with { ToolName = "ask_user" };
+    tied.State.Handle(waiting);
+    tied.State.Handle(work);
+    Check(tied.Cell().BlockingSources.Count == 1,
+        "At equal preToolUse timestamps, a waiting tool wins over ordinary work");
+    tied.Event("permissionRequest", "root");
+    Check(tied.Cell().BlockingSources.Single().BlockedSince == waiting.At,
+        "An additional permission hook keeps the original waiting start");
+    tied.Event("preToolUse", "root", tool: "powershell");
+    Check(tied.Cell().BlockingSources.Count == 0, "Newer ordinary work keeps its existing unblock behavior");
+    tied.Event("preToolUse", "root");
+    Check(tied.Cell().BlockingSources.Count == 0, "Missing tool name is not an ask_user signal");
+    tied.Advance(1000);
+    Check(tied.Cell().Status == CopilotSessionStatus.Working);
 }
 
 static void AggregatePriority()
@@ -881,12 +944,12 @@ sealed class Rig
         State.Resolve([new(source, owner, kind, $"Fixture {source}")]);
     public CopilotSession Cell(string id = "root") =>
         State.Find(id) ?? throw new InvalidOperationException($"Missing cell {id}");
-    public CopilotHookEvent Event(string name, string id, string? agent = null)
+    public CopilotHookEvent Event(string name, string id, string? agent = null, string? tool = null)
     {
         Now = Now.AddMilliseconds(1);
         var hook = CopilotHookEvent.Parse(name, JsonSerializer.Serialize(new
         {
-            sessionId = id, agentId = agent, timestamp = Now, toolInput = "fixture-secret",
+            sessionId = id, agentId = agent, timestamp = Now, toolName = tool, toolInput = "fixture-secret",
         }), Now)!;
         State.Handle(hook);
         return hook;

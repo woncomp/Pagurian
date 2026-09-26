@@ -129,7 +129,8 @@ Each source owns its current permission blocker independently:
 | Hook | Source contribution |
 | --- | --- |
 | `sessionStart` | Idle; can reopen an ended CLI generation, not an archived App root |
-| `userPromptSubmitted`, `preToolUse`, `postToolUse`, `postToolUseFailure` | Working; clears only this source's blocker |
+| `preToolUse` with `toolName=ask_user` | Blocked while waiting for the user; no permission hook required |
+| `userPromptSubmitted`, other `preToolUse`, `postToolUse`, `postToolUseFailure` | Working; clears only this source's blocker |
 | `permissionRequest` | Blocked; preserves this source's original blocked-since |
 | `agentStop` | Idle; clears only this source's blocker, not a session exit |
 | App `subagentStart` with `agentId` | Activates that child as Working |
@@ -142,6 +143,13 @@ Each source owns its current permission blocker independently:
 
 For CLI, subagent lifecycle hooks remain details-only; they do not clear or
 remove another independently displayed session.
+
+`ask_user` uses the same per-source blocker aggregation and one-second visual
+debounce as `permissionRequest`. Its `postToolUse` or `postToolUseFailure`
+returns that source to Working; other sources' blockers remain intact.
+Repeated waiting signals preserve the original blocked-since timestamp.
+At equal `preToolUse` timestamps the waiting signal wins over ordinary work;
+older hooks cannot undo a newer completion.
 
 The aggregate is **Blocked > Working > Idle** over active members. The
 one-second visual debounce affects only this aggregate; permission ownership

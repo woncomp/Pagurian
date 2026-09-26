@@ -410,7 +410,10 @@ public sealed class MyShell : Shell
   agent name, and absent workspace files are never parentage evidence.
 - **Copilot status/lifecycle**: `CopilotSessionState` immediately reduces
   each source's own state. Any active blocker wins over Working, which wins
-  over Idle. Working hooks clear only their emitting source's permission;
+  over Idle. `preToolUse` for exact `toolName=ask_user` blocks that source
+  without requiring `permissionRequest`; its `postToolUse`/`postToolUseFailure`
+  returns it to Working. Equal-timestamp `preToolUse` keeps the blocking signal
+  over ordinary work. Working hooks clear only their emitting source's blocker;
   `agentStop` makes only that source Idle. `subagentStop.agentId` deactivates
   an App child (not `payload.sessionId`, which is the parent); the identity
   remains for multi-turn resume. Child `sessionEnd` cannot remove a root's

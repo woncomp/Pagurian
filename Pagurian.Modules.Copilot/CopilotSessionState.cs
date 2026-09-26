@@ -470,6 +470,7 @@ sealed class CopilotSessionState
         var status = hook.Name switch
         {
             "sessionStart" or "agentStop" or "sessionEnd" => (CopilotSessionStatus?)CopilotSessionStatus.Idle,
+            "preToolUse" when hook.ToolName == "ask_user" => CopilotSessionStatus.Blocked,
             "userPromptSubmitted" or "preToolUse" or "postToolUse" or "postToolUseFailure" => CopilotSessionStatus.Working,
             "permissionRequest" => CopilotSessionStatus.Blocked,
             "subagentStart" when lifecycle => CopilotSessionStatus.Working,
@@ -483,7 +484,8 @@ sealed class CopilotSessionState
         if (source.Ended && hook.Name == "sessionStart" && hook.At > source.EndedAt)
             source.StateAt = source.EndedAt;
         if (hook.At < source.StateAt ||
-            (hook.At == source.StateAt && (source.StateEvent == hook.Name ||
+            (hook.At == source.StateAt && ((source.StateEvent == hook.Name &&
+                (source.Status == CopilotSessionStatus.Blocked || status != CopilotSessionStatus.Blocked)) ||
                 (status == CopilotSessionStatus.Idle && hook.Name != "sessionEnd"))))
         {
             Trace(source, hook, source.Status, "stale-or-duplicate");
