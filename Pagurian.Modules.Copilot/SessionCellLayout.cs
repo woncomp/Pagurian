@@ -19,7 +19,7 @@ internal static class SessionCellLayout
     internal static double LargeProjectNameWidth => LargeWidth -
         2 * (PaddingDip + IconDip + GapDip);
 
-    internal static double LargeNameWidthWithBoundaries => LargeWidth -
+    internal static double LargeProjectNameWidthWithBoundaries => LargeProjectNameWidth -
         MeasureCaptionWidth("[") - MeasureCaptionWidth("]");
 
     internal static double MeasureWidth(CopilotSessionIconSize iconSize = CopilotSessionIconSize.Medium)
@@ -33,12 +33,12 @@ internal static class SessionCellLayout
             : medium;
     }
 
-    internal static bool HasRoomForLargeNameBoundaries(string name)
+    internal static bool HasRoomForLargeProjectBoundaries(string projectName)
     {
-        if (string.IsNullOrWhiteSpace(name))
+        if (string.IsNullOrWhiteSpace(projectName))
             return false;
 
-        return MeasureCaptionWidth(name) <= LargeNameWidthWithBoundaries;
+        return MeasureCaptionWidth(projectName) <= LargeProjectNameWidthWithBoundaries;
     }
 
     private static double MeasureCaptionWidth(string value)

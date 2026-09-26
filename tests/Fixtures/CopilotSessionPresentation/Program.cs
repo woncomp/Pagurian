@@ -45,14 +45,14 @@ sealed class CellProbe(
     string project,
     string name,
     bool isLarge,
-    bool hasNameBoundaries)
+    bool hasProjectBoundaries)
 {
     public ShellCellProps Props { get; } = props;
     public string Status { get; } = status;
     public string Project { get; } = project;
     public string Name { get; } = name;
     public bool IsLarge { get; set; } = isLarge;
-    public bool HasNameBoundaries { get; } = hasNameBoundaries;
+    public bool HasProjectBoundaries { get; } = hasProjectBoundaries;
     public FrameworkElement? Root;
 }
 
@@ -270,7 +270,7 @@ sealed class Harness
             ? New("CopilotSessionCellModel", session, EnumValue("CopilotSessionIconSize", "Large"))
             : session;
         return new(new(_shell, model, null, null, null), status, project, name, isLarge,
-            isLarge && name == "Short session");
+            isLarge && project == "Short");
     }
 
     private static void SetIconSize(CellProbe cell, string size) =>
@@ -392,20 +392,24 @@ sealed class Harness
                     name.TextTrimming == TextTrimming.CharacterEllipsis,
                 "session name does not use single-line character ellipsis");
             var boundaries = labels.Where(text => text.Text is "[" or "]").ToArray();
-            Require(boundaries.Length == (cell.HasNameBoundaries ? 2 : 0),
-                "Large session title boundary markers do not match the available name width");
-            if (cell.HasNameBoundaries)
+            Require(boundaries.Length == (cell.HasProjectBoundaries ? 2 : 0),
+                "Large project boundary markers do not match the available project width");
+            if (cell.HasProjectBoundaries)
             {
                 var left = boundaries.Single(text => text.Text == "[");
                 var right = boundaries.Single(text => text.Text == "]");
                 var leftPoint = left.TransformToVisual(root).TransformPoint(new Point());
                 var rightPoint = right.TransformToVisual(root).TransformPoint(new Point());
                 Require(leftPoint.X <= .5 && rightPoint.X + right.ActualWidth >= root.ActualWidth - .5,
-                    "Large session title boundary markers are not at the shell cell edges");
+                    "Large project boundary markers are not at the shell cell edges");
+                Require(Math.Abs(leftPoint.Y - projectPoint.Y) <= 1,
+                    "Large project boundary markers are not on the first row");
             }
             if (cell.Project.Length > 16)
                 Require(project.IsTextTrimmed, "Large project is not ellipsized in its finite column");
-            if (cell.HasNameBoundaries)
+            if (cell.HasProjectBoundaries)
+                Require(!project.IsTextTrimmed, "Short Large project was unexpectedly ellipsized");
+            if (cell.Name == "Short session")
                 Require(!name.IsTextTrimmed, "Short Large session title was unexpectedly ellipsized");
             else
                 Require(name.IsTextTrimmed, "Large session title is not ellipsized in its finite row");
