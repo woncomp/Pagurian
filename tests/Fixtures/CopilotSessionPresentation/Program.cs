@@ -270,7 +270,7 @@ sealed class Harness
             ? New("CopilotSessionCellModel", session, EnumValue("CopilotSessionIconSize", "Large"))
             : session;
         return new(new(_shell, model, null, null, null), status, project, name, isLarge,
-            isLarge && project == "Short");
+            isLarge);
     }
 
     private static void SetIconSize(CellProbe cell, string size) =>
@@ -407,7 +407,7 @@ sealed class Harness
             }
             if (cell.Project.Length > 16)
                 Require(project.IsTextTrimmed, "Large project is not ellipsized in its finite column");
-            if (cell.HasProjectBoundaries)
+            if (cell.Project == "Short")
                 Require(!project.IsTextTrimmed, "Short Large project was unexpectedly ellipsized");
             if (cell.Name == "Short session")
                 Require(!name.IsTextTrimmed, "Short Large session title was unexpectedly ellipsized");

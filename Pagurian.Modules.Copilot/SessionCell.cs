@@ -130,15 +130,7 @@ class SessionCell : ShellCell
             .TextWrapping(TextWrapping.NoWrap)
             .TextTrimming(TextTrimming.CharacterEllipsis)
             .TextAlignment(TextAlignment.Center)
-            .ToolTip(projectName);
-
-        if (!SessionCellLayout.HasRoomForLargeProjectBoundaries(projectName))
-            return label
-                .Width(SessionCellLayout.LargeProjectNameWidth)
-                .HAlign(HorizontalAlignment.Center)
-                .VAlign(VerticalAlignment.Center);
-
-        label = label
+            .ToolTip(projectName)
             .Width(SessionCellLayout.LargeProjectNameWidthWithBoundaries)
             .HAlign(HorizontalAlignment.Center)
             .VAlign(VerticalAlignment.Center);
