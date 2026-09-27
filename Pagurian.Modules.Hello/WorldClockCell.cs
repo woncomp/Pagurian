@@ -92,6 +92,7 @@ class WorldClockCell : ShellCell
                         .FontSize(FontSizeDip)
                         .TextAlignment(TextAlignment.Center)
                         .Width(timeWidth)
+                        .HAlign(HorizontalAlignment.Center)
                         .Foreground(Theme.TextBrush),
                     TextBlock(label)
                         .FontSize(FontSizeDip)
@@ -99,6 +100,7 @@ class WorldClockCell : ShellCell
                         .Width(labelWidth)
                         .MaxLines(1)
                         .TextTrimming(TextTrimming.CharacterEllipsis)
+                        .HAlign(HorizontalAlignment.Center)
                         .Foreground(Theme.TextBrush))
                     .VerticalAlignment(VerticalAlignment.Center))
             .Padding(PaddingXDip, 0, PaddingXDip, 0);
