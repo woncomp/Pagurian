@@ -29,6 +29,12 @@ class SettingsView : Component
     public SettingsView(ShellNavigationDiagnostics navigationDiagnostics) =>
         _navigationDiagnostics = navigationDiagnostics;
 
+    // Live display tiles of the expanded layout panel that accept a drag
+    // hover as "switch to this display". Tiles unmount when the panel
+    // collapses, so cross-display dragging exists only while the panel is
+    // expanded.
+    private readonly Dictionary<string, FrameworkElement> _displayDragTargets = [];
+
     private static readonly ConditionalWeakTable<FrameworkElement, InstantTooltipBinding>
         InstantTooltipBindings = new();
     private static readonly HashSet<InstantTooltipBinding> MountedInstantTooltipBindings = [];
@@ -231,6 +237,7 @@ class SettingsView : Component
     private enum ShellDropZone
     {
         Tray,
+        Display,
         Remove,
     }
 
@@ -300,8 +307,7 @@ class SettingsView : Component
         var (draft, setDraft) = UseState(initialDraft);
         var (dirty, setDirty) = UseState(false);
         var (selectedTrayId, setSelectedTrayId) = UseState(TrayId.PrimaryLeft);
-        var (monitorPickerOpen, setMonitorPickerOpen) = UseState(false);
-        var (monitorPickerOffset, setMonitorPickerOffset) = UseState(new Point(0, 0));
+        var (layoutExpanded, setLayoutExpanded) = UseState(false);
         var (dragSession, setDragSession) = UseState<ShellDragSession?>(null);
         var (activeTrayDragId, setActiveTrayDragId) = UseState<string?>(null);
         var (discardDialogOpen, setDiscardDialogOpen) = UseState(false);
@@ -314,7 +320,6 @@ class SettingsView : Component
         var trayScrollerRef = this.UseElementRef<ScrollView>();
         var rightTrayScrollerRef = this.UseElementRef<ScrollView>();
         var rightTrayTargetRef = this.UseElementRef<Border>();
-        var monitorButtonRef = this.UseElementRef<Microsoft.UI.Xaml.Controls.Button>();
         var windowRootRef = this.UseElementRef<Grid>();
         var activeTrayDragRef = UseRef<string?>(null);
         var draftRef = UseRef(draft);
@@ -471,62 +476,29 @@ class SettingsView : Component
         {
             selectedTrayRef.Current = id;
             setSelectedTrayId(id);
-            setMonitorPickerOpen(false);
         }
 
-        void OpenMonitorPicker()
+        void ToggleDisplayLayout()
         {
-            // Pick up hot-plugged displays immediately rather than waiting
-            // for the controller's throttled refresh.
-            DisplayTopology.Refresh();
-            if (monitorButtonRef.Current is { } button && windowRootRef.Current is { } root)
-            {
-                var (width, height) = EstimatePickerSize();
-                var origin = button.TransformToVisual(root).TransformPoint(new Point(0, 0));
-                // The button sits at the bottom edge of the window: open the
-                // picker fully above it (right-aligned), clamped inside the
-                // window — like FlyoutPlacementMode.TopEdgeAlignedRight.
-                var x = Math.Clamp(
-                    origin.X + button.ActualWidth - width,
-                    8,
-                    Math.Max(8, root.ActualWidth - width - 8));
-                var y = Math.Clamp(
-                    origin.Y - height - 4,
-                    8,
-                    Math.Max(8, root.ActualHeight - height - 8));
-                setMonitorPickerOffset(new Point(x, y));
-            }
-            setMonitorPickerOpen(true);
+            if (!layoutExpanded)
+                // Pick up hot-plugged displays immediately rather than waiting
+                // for the controller's throttled refresh.
+                DisplayTopology.Refresh();
+            setLayoutExpanded(!layoutExpanded);
         }
 
-        // Mirrors the BuildMonitorPicker layout math so OpenMonitorPicker can
-        // place the popup without a measure pass. Slightly overestimates
-        // height, which only shifts the popup further into the window.
-        (double Width, double Height) EstimatePickerSize()
-        {
-            var displays = DisplayTopology.Displays;
-            double canvasWidth = 0, canvasHeight = 0;
-            if (displays.Count > 0)
+            Element DisplayDragTile(Element tile, string monitorKey)
             {
-                var originX = displays.Min(d => d.Rect.Left);
-                var originY = displays.Min(d => d.Rect.Top);
-                var virtualWidth = displays.Max(d => d.Rect.Right) - originX;
-                var virtualHeight = displays.Max(d => d.Rect.Bottom) - originY;
-                const double maxWidth = 320, maxHeight = 180;
-                var scale = Math.Min(
-                    maxWidth / Math.Max(1, virtualWidth),
-                    maxHeight / Math.Max(1, virtualHeight));
-                canvasWidth = virtualWidth * scale;
-                canvasHeight = virtualHeight * scale;
+                return tile
+                    .WithKey($"display-tile:{monitorKey}")
+                    .OnMountAdd(element => _displayDragTargets[monitorKey] = element)
+                    .OnUnmountAdd(element =>
+                    {
+                        if (_displayDragTargets.TryGetValue(monitorKey, out var current) &&
+                            ReferenceEquals(current, element))
+                            _displayDragTargets.Remove(monitorKey);
+                    });
             }
-            var tileKeys = displays.Select(d => TrayIdForDisplay(d).MonitorKey).ToHashSet();
-            var extras = draftRef.Current.Count(tray => !tileKeys.Contains(tray.Id.MonitorKey));
-            // 16 padding per side; extras cost ~22 for the header caption and
-            // ~50 per row; 24 slack for borders and estimate drift.
-            var width = Math.Max(canvasWidth, 200) + 32;
-            var height = canvasHeight + (extras > 0 ? 22 + extras * 50 : 0) + 32 + 24;
-            return (width, height);
-        }
 
         UseEffect(() =>
         {
@@ -753,6 +725,30 @@ class SettingsView : Component
 
             try
             {
+                // Display tiles of the expanded layout panel win over the tray
+                // zones: hovering one switches the edited display mid-drag so
+                // the pointer can continue into that display's tray strip.
+                foreach (var (monitorKey, tile) in _displayDragTargets)
+                {
+                    var tileOrigin = tile.TransformToVisual(root).TransformPoint(new Point(0, 0));
+                    var inTile = rootPoint.X >= tileOrigin.X &&
+                        rootPoint.X <= tileOrigin.X + tile.ActualWidth &&
+                        rootPoint.Y >= tileOrigin.Y &&
+                        rootPoint.Y <= tileOrigin.Y + tile.ActualHeight;
+                    if (!inTile)
+                        continue;
+
+                    resolved = new ShellDragSession(
+                        payload,
+                        ShellDropZone.Display,
+                        -1,
+                        new TrayId(monitorKey, TrayEdge.Left));
+                    operation = payload.InstanceId == null
+                        ? DragOperations.Copy
+                        : DragOperations.Move;
+                    return true;
+                }
+
                 foreach (var (edge, scroll) in new (TrayEdge Edge, ScrollView? Scroll)[]
                          {
                              (TrayEdge.Left, trayScrollerRef.Current),
@@ -872,6 +868,20 @@ class SettingsView : Component
             }
 
             args.AcceptedOperation = operation;
+            if (resolved.Zone == ShellDropZone.Display)
+            {
+                // Hovering a display tile switches the edited display so the
+                // next DragOver resolves the new display's tray strip. The
+                // tile highlight is the feedback — no drag caption, since
+                // dropping on the tile itself only switches and moves nothing.
+                if (resolved.Tray.MonitorKey != selectedTrayRef.Current.MonitorKey)
+                    SelectTray(resolved.Tray);
+                args.UIOverride.IsCaptionVisible = false;
+                SetDragSessionState(resolved);
+                StopAutoScroll();
+                return;
+            }
+
             var movingAcrossTrays = resolved.Payload.InstanceId != null &&
                 TrayContaining(resolved.Payload.InstanceId) is { } fromTray &&
                 fromTray != resolved.Tray;
@@ -895,6 +905,13 @@ class SettingsView : Component
             EndTrayDrag();
             string? removedId = null;
             string? crossTrayRemovedId = null;
+            // The owning tray must be captured before the insert below: a
+            // cross-tray insert briefly duplicates the instance id across two
+            // draft trays, so a by-id search afterwards could find the copy
+            // just inserted into the target instead of the original.
+            TrayId? crossTraySource = resolved.Payload.InstanceId == null
+                ? null
+                : TrayContaining(resolved.Payload.InstanceId);
             // StartDragAsync still owns the dragged element while OnDrop runs.
             // A keyed Spring move would claim that same Composition Visual and
             // can leave stale offsets or opacity behind, so the mutation
@@ -962,9 +979,9 @@ class SettingsView : Component
                 return changedInner ? next : entries;
             });
 
-            if (crossTrayRemovedId != null)
+            if (crossTrayRemovedId != null && crossTraySource != null)
             {
-                changed |= MutateTrayContaining(crossTrayRemovedId, entries =>
+                changed |= MutateTrayEntries(crossTraySource.Value, entries =>
                 {
                     var next = entries.Where(entry => entry.Id != crossTrayRemovedId).ToList();
                     return next.Count == entries.Count ? entries : next;
@@ -1193,16 +1210,13 @@ class SettingsView : Component
             var insertionOffset = 0d;
             if (insertionIndicatorVisible && zoneSession != null)
             {
-                var insertionIndex = Math.Clamp(
-                    zoneSession.CandidateIndex,
-                    0,
-                    entries.Count - (zoneSession.Payload.InstanceId == null ? 0 : 1));
-                // For the right zone InsertionOffsetFor's result is a
-                // distance from the chips' right edge — exactly where the
-                // indicator anchors.
+                // InsertionOffsetFor clamps the candidate against the visible
+                // chips itself: a cross-tray payload is visible-silent in its
+                // source tray only, so every slot of the target tray — the
+                // innermost one included — stays reachable.
                 insertionOffset = InsertionOffsetFor(
                     zoneSession.Payload,
-                    insertionIndex,
+                    zoneSession.CandidateIndex,
                     entries);
             }
             var indicator = (Border(null) with
@@ -1521,50 +1535,72 @@ class SettingsView : Component
                     .HAlign(HorizontalAlignment.Right)
                     .Grid(row: 0, column: 1),
             ]);
-        var trayFooter = Border(
-                FlexColumn(
-                    Grid(
-                        [GridSize.Star(), GridSize.Auto],
-                        [GridSize.Auto],
-                        [
-                            Subtitle("Tray")
-                                .HeadingLevel(AutomationHeadingLevel.Level2)
-                                .VAlign(VerticalAlignment.Center)
-                                .Grid(row: 0, column: 0),
-                            Button(TrayLabel(selectedTrayId, out _), OpenMonitorPicker)
-                                .Ref(monitorButtonRef)
-                                .AutomationName("Choose display")
-                                .HelpText("Choose which display's trays to edit.")
-                                .VAlign(VerticalAlignment.Center)
-                                .Grid(row: 0, column: 1),
-                        ]),
-                    zoneCaptions.Margin(0, 8, 0, 0),
-                    Body("Drag module icons into either tray to add them. The right tray sits left of the system clock and notification area. An insertion line shows the pending position; drop a Tray icon onto the Modules panel to remove it.")
-                        .TextWrapping(TextWrapping.WrapWholeWords)
-                        .Foreground(Theme.SecondaryText)
-                        .Margin(0, 4, 0, 0),
-                    trayColumns))
+        var chevron = layoutExpanded ? "\uE70D" : "\uE70E";
+        var displayButton = Button(
+                HStack(4,
+                        TextBlock(TrayLabel(selectedTrayId, out _))
+                            .VAlign(VerticalAlignment.Center),
+                        TextBlock(chevron)
+                            .FontSize(12)
+                            .Foreground(Theme.SecondaryText)
+                            .Set(tb =>
+                                tb.FontFamily = (FontFamily)Application.Current.Resources[
+                                    "SymbolThemeFontFamily"])
+                            .AccessibilityHidden()
+                            .VAlign(VerticalAlignment.Center)),
+                ToggleDisplayLayout)
+            .AutomationName("Choose display")
+            .HelpText("Show or hide the display layout. While the layout is visible, hover a dragged icon over a display to switch which display's trays you are editing.")
+            .VAlign(VerticalAlignment.Center)
+            .Grid(row: 0, column: 1);
+
+        var trayChildren = new List<Element>();
+        if (layoutExpanded)
+            trayChildren.Add(BuildDisplayLayoutPanel());
+        trayChildren.Add(Grid(
+                [GridSize.Star(), GridSize.Auto],
+                [GridSize.Auto],
+                [
+                    Subtitle("Tray")
+                        .HeadingLevel(AutomationHeadingLevel.Level2)
+                        .VAlign(VerticalAlignment.Center)
+                        .Grid(row: 0, column: 0),
+                    displayButton,
+                ]));
+        trayChildren.Add(zoneCaptions.Margin(0, 8, 0, 0));
+        trayChildren.Add(Body("Drag module icons into either tray to add them. The right tray sits left of the system clock and notification area. An insertion line shows the pending position; drop a Tray icon onto the Modules panel to remove it. With the display layout expanded, hover a dragged icon over a display to switch to it, then drop into its tray; dropping onto a display itself only switches and does not move the icon.")
+            .TextWrapping(TextWrapping.WrapWholeWords)
+            .Foreground(Theme.SecondaryText)
+            .Margin(0, 4, 0, 0));
+        trayChildren.Add(trayColumns);
+
+        var trayFooter = Border(FlexColumn(trayChildren.ToArray()))
             .Padding(24, 12, 24, 16)
             .CornerRadius(8)
             .Margin(24, 0, 24, 24)
             .Background(highContrast
                 ? Theme.Ref("SystemColorWindowColorBrush")
                 : Theme.CardBackground)
-            .WithBorder(highContrast
-                ? Theme.Ref("SystemColorWindowTextColorBrush")
-                : Theme.CardStroke, highContrast ? 2 : 1);
+            .WithBorder(
+                highContrast
+                    ? Theme.Ref("SystemColorWindowTextColorBrush")
+                    : Theme.CardStroke,
+                highContrast ? 2 : 1);
 
-        // The monitor picker: a scaled preview of the physical display layout
-        // (friendly names, never display numbers) plus rows for configured
-        // trays whose display is currently disconnected or otherwise not
-        // reachable through a tile. Picking one switches the tray being
-        // edited; selection alone never dirties the draft.
-        Element BuildMonitorPicker()
+        // The display layout: an inline expansion of the Tray card. A scaled
+        // preview of the physical display layout (friendly names, never
+        // display numbers) plus rows for configured trays whose display is
+        // currently disconnected or otherwise not reachable through a tile.
+        // Picking one switches the tray being edited and leaves the layout
+        // open, so the user can flip freely between displays; selection alone
+        // never dirties the draft. Hovering a dragged icon over a display
+        // switches the edited display mid-drag.
+        Element BuildDisplayLayoutPanel()
         {
-            var cardFill = highContrast ? Theme.Ref("SystemColorWindowColorBrush") : Theme.CardBackground;
-            var cardStroke = highContrast ? Theme.Ref("SystemColorWindowTextColorBrush") : Theme.CardStroke;
             var tileStroke = highContrast ? Theme.Ref("SystemColorWindowTextColorBrush") : Theme.ControlStroke;
             var selectedStroke = highContrast ? Theme.Ref("SystemColorHighlightColorBrush") : Theme.Accent;
+            var hotFill = highContrast ? Theme.Ref("SystemColorWindowColorBrush") : Theme.SystemAttentionBackground;
+            var hotStroke = highContrast ? Theme.Ref("SystemColorHighlightColorBrush") : Theme.Accent;
 
             var displays = DisplayTopology.Displays
                 .OrderBy(d => d.Rect.Left)
@@ -1593,6 +1629,8 @@ class SettingsView : Component
                 {
                     var trayId = TrayIdForDisplay(display);
                     var selected = trayId == selectedTrayId;
+                    var hot = dragSession?.Zone == ShellDropZone.Display &&
+                              dragSession.Tray.MonitorKey == trayId.MonitorKey;
                     var lines = new List<Element>
                     {
                         BodyStrong(display.FriendlyName)
@@ -1617,36 +1655,40 @@ class SettingsView : Component
                         (display.HasTaskbar
                             ? ""
                             : "; its taskbar is hidden, so shells fall back to another display");
-                    tiles.Add(Border(
-                            VStack(2, lines.ToArray())
-                                .HAlign(HorizontalAlignment.Center)
-                                .VAlign(VerticalAlignment.Center)
-                                .Margin(4, 0, 4, 0))
-                        .Width(Math.Max(44, display.Rect.Width * scale))
-                        .Height(Math.Max(32, display.Rect.Height * scale))
-                        .CornerRadius(4)
-                        .Background(selected ? Theme.SubtleFill : Theme.LayerFill)
-                        .WithBorder(selected ? selectedStroke : tileStroke, selected ? 2 : 1)
-                        .Canvas(
-                            (display.Rect.Left - originX) * scale,
-                            (display.Rect.Top - originY) * scale)
-                        .AutomationName($"Edit the tray on {display.FriendlyName}")
-                        .HelpText(tooltip)
-                        .IsTabStop(true)
-                        .OnTapped((_, _) => SelectTray(trayId))
-                        .OnKeyDown((_, args) =>
-                        {
-                            if (args.Key is VirtualKey.Enter or VirtualKey.Space)
+                    tiles.Add(DisplayDragTile(
+                        Border(
+                                VStack(2, lines.ToArray())
+                                    .HAlign(HorizontalAlignment.Center)
+                                    .VAlign(VerticalAlignment.Center)
+                                    .Margin(4, 0, 4, 0))
+                            .Width(Math.Max(44, display.Rect.Width * scale))
+                            .Height(Math.Max(32, display.Rect.Height * scale))
+                            .CornerRadius(4)
+                            .Background(hot ? hotFill : selected ? Theme.SubtleFill : Theme.LayerFill)
+                            .WithBorder(hot ? hotStroke : selected ? selectedStroke : tileStroke, hot || selected ? 2 : 1)
+                            .Canvas(
+                                (display.Rect.Left - originX) * scale,
+                                (display.Rect.Top - originY) * scale)
+                            .AutomationName($"Edit the tray on {display.FriendlyName}")
+                            .HelpText(tooltip)
+                            .IsTabStop(true)
+                            .OnTapped((_, _) => SelectTray(trayId))
+                            .OnKeyDown((_, args) =>
                             {
-                                SelectTray(trayId);
-                                args.Handled = true;
-                            }
-                        }));
+                                if (args.Key is VirtualKey.Enter or VirtualKey.Space)
+                                {
+                                    SelectTray(trayId);
+                                    args.Handled = true;
+                                }
+                            }),
+                        trayId.MonitorKey));
                 }
-                content.Add(Canvas(tiles.ToArray())
-                    .Width(virtualWidth * scale)
-                    .Height(virtualHeight * scale)
-                    .HAlign(HorizontalAlignment.Left));
+                content.Add(Border(
+                        Canvas(tiles.ToArray())
+                            .Width(virtualWidth * scale)
+                            .Height(virtualHeight * scale))
+                    .HAlign(HorizontalAlignment.Center)
+                    .WithKey("display-layout-canvas"));
             }
 
             // Configured trays not reachable through a tile: disconnected
@@ -1674,6 +1716,8 @@ class SettingsView : Component
                             ? "Left + right tray"
                             : "Connected";
                     var selected = trayId.MonitorKey == selectedTrayId.MonitorKey;
+                    var hot = dragSession?.Zone == ShellDropZone.Display &&
+                              dragSession.Tray.MonitorKey == trayId.MonitorKey;
                     var rowContent = new List<Element>
                     {
                         VStack(0,
@@ -1687,34 +1731,40 @@ class SettingsView : Component
                         rowContent.Insert(0, BodyStrong("⚠")
                             .Foreground(highContrast ? Theme.PrimaryText : Theme.SystemCaution)
                             .VAlign(VerticalAlignment.Center));
-                    content.Add(Border(HStack(10, rowContent.ToArray()))
-                        .Padding(10, 6, 10, 6)
-                        .CornerRadius(4)
-                        .Background(selected ? Theme.SubtleFill : Theme.LayerFill)
-                        .WithBorder(selected ? selectedStroke : tileStroke, selected ? 2 : 1)
-                        .HAlign(HorizontalAlignment.Stretch)
-                        .AutomationName($"Edit the trays on {label} ({status})")
-                        .IsTabStop(true)
-                        .OnTapped((_, _) => SelectTray(trayId))
-                        .OnKeyDown((_, args) =>
-                        {
-                            if (args.Key is VirtualKey.Enter or VirtualKey.Space)
+                    content.Add(DisplayDragTile(
+                        Border(HStack(10, rowContent.ToArray()))
+                            .Padding(10, 6, 10, 6)
+                            .CornerRadius(4)
+                            .Background(hot ? hotFill : selected ? Theme.SubtleFill : Theme.LayerFill)
+                            .WithBorder(hot ? hotStroke : selected ? selectedStroke : tileStroke, hot || selected ? 2 : 1)
+                            .HAlign(HorizontalAlignment.Stretch)
+                            .AutomationName($"Edit the trays on {label} ({status})")
+                            .IsTabStop(true)
+                            .OnTapped((_, _) => SelectTray(trayId))
+                            .OnKeyDown((_, args) =>
                             {
-                                SelectTray(trayId);
-                                args.Handled = true;
-                            }
-                        }));
+                                if (args.Key is VirtualKey.Enter or VirtualKey.Space)
+                                {
+                                    SelectTray(trayId);
+                                    args.Handled = true;
+                                }
+                            }),
+                        trayId.MonitorKey));
                 }
             }
 
-            var picker = Border(FlexColumn(content.ToArray()))
-                .Padding(16)
-                .CornerRadius(8)
-                .Background(cardFill)
-                .WithBorder(cardStroke, highContrast ? 2 : 1);
-            return Popup(picker, monitorPickerOpen, () => setMonitorPickerOpen(false))
-                .Offset(monitorPickerOffset.X, monitorPickerOffset.Y)
-                .IsLightDismissEnabled(true);
+            return FlexColumn(
+                [
+                    .. content
+                        .Select((element, index) => element.Margin(0, index == 0 ? 0 : 8, 0, 0)),
+                    Border(null)
+                        .Height(1)
+                        .Background(Theme.DividerStroke)
+                        .AccessibilityHidden()
+                        .WithKey("display-layout-divider"),
+                ])
+                .Margin(0, 0, 0, 12)
+                .WithKey("display-layout-panel");
         }
 
 
@@ -1857,7 +1907,7 @@ class SettingsView : Component
                 {
                     EndTrayDrag();
                     ClearDragSession();
-                    setMonitorPickerOpen(false);
+                    setLayoutExpanded(false);
                 }
                 _navigationDiagnostics.Record($"page-request source=navigation-view target={nextPage}");
                 configurationTransitions.SetVisible(nextPage == SettingsPage.Shells);
@@ -1880,7 +1930,6 @@ class SettingsView : Component
                         .Landmark(AutomationLandmarkType.Navigation)
                         .Grid(row: 1, column: 0),
                     discardDialog.Grid(row: 1, column: 0),
-                    BuildMonitorPicker().Grid(row: 1, column: 0),
                 ])
             .Ref(windowRootRef)
             .OnKeyDown((_, args) =>
@@ -1895,6 +1944,12 @@ class SettingsView : Component
                 {
                     EndTrayDrag();
                     ClearDragSession();
+                    return;
+                }
+
+                if (layoutExpanded)
+                {
+                    setLayoutExpanded(false);
                     return;
                 }
 

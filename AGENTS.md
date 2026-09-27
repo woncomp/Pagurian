@@ -204,12 +204,22 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   edge, ordered outward from the system area; insertion candidates are
   measured as distance from that edge, so the config-order spacing math is
   shared). Dragging an icon across halves moves it between trays. The draft
-  is a list of per-display trays; a monitor-picker button at the right end
-  of the Tray
-  container's title row opens a scaled display-layout preview (friendly
-  names, never display numbers; disconnected configured displays listed
-  below, one row per display covering both edges)
+  is a list of per-display trays; the display button at the right end of the
+  Tray
+  container's title row (text + up/down chevron) expands the tray card
+  upward to reveal an inline display layout — a scaled preview of the
+  physical display layout (friendly names, never display numbers;
+  disconnected configured displays listed below, one row per display
+  covering both edges)
   and switches which display's trays are being edited. Selecting a display
+  leaves the layout open, so displays can be flipped freely; Esc collapses
+  the layout before closing the window, and leaving the Shells page
+  collapses it too. While the layout is expanded, hovering a dragged icon
+  over a display tile switches the edited display mid-drag, after which the
+  icon drops into that display's left or right tray at the desired position
+  (dropping onto a display tile itself only switches and moves nothing);
+  cross-tray and cross-display moves carry the existing `TrayConfig.Entry`
+  verbatim, preserving the shell id and its settings. Selecting a display
   alone never dirties the draft. The center keeps the Modules page mounted
   and fixed while each `ShellConfiguration` visit uses its own opaque,
   clipped overlay and smooth horizontal motion. A configuration enters from
