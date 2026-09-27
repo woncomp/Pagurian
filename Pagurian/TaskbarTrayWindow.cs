@@ -109,16 +109,20 @@ class TaskbarTrayWindow : Component
 
     public static readonly Windows.UI.Color HoverOverlayHidden = Windows.UI.Color.FromArgb(0, 0, 0, 0);
 
-    // SubtleFillColorSecondary (hover) / SubtleFillColorTertiary (pressed):
-    // ~6%/~4% white on dark taskbars, ~4%/~2.5% black on light ones.
+    // Win11 taskbar buttons lighten on hover regardless of taskbar theme
+    // (unlike the Fluent SubtleFill recipe, which darkens on light). Dark
+    // taskbars keep SubtleFillColorSecondary/Tertiary (~6%/~4% white). On
+    // light taskbars the native hover measures white at ~50% alpha
+    // (pixel-measured from a live Start-button hover on a light taskbar);
+    // pressed keeps the Fluent Secondary→Tertiary ~2/3 ratio.
     public static Windows.UI.Color HoverOverlayColorFor(bool isDark, bool pressed) =>
         isDark
             ? (pressed
                 ? Windows.UI.Color.FromArgb(0x0A, 255, 255, 255)
                 : Windows.UI.Color.FromArgb(0x0F, 255, 255, 255))
             : (pressed
-                ? Windows.UI.Color.FromArgb(0x06, 0, 0, 0)
-                : Windows.UI.Color.FromArgb(0x09, 0, 0, 0));
+                ? Windows.UI.Color.FromArgb(0x55, 255, 255, 255)
+                : Windows.UI.Color.FromArgb(0x80, 255, 255, 255));
 
     public override Element Render()
     {
