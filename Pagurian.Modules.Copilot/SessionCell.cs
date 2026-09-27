@@ -98,7 +98,7 @@ class SessionCell : ShellCell
     }
 
     private static Element LargeContent(CopilotSession session, Brush statusBrush) =>
-        Grid(
+        (Grid(
             [GridSize.Star()],
             [GridSize.Auto, GridSize.Auto],
             Image(CopilotModule.ClientIconPath(session.Client))
@@ -115,10 +115,12 @@ class SessionCell : ShellCell
                 .Margin(left: SessionCellLayout.GapDip, top: 0,
                     right: SessionCellLayout.PaddingDip, bottom: 0)
                 .HAlign(HorizontalAlignment.Right)
+                .VAlign(VerticalAlignment.Center)
                 .Grid(row: 0),
             LargeName(session.Name)
-                .Grid(row: 1))
-            .HAlign(HorizontalAlignment.Stretch);
+                .Grid(row: 1)) with { RowSpacing = 2 })
+            .HAlign(HorizontalAlignment.Stretch)
+            .VAlign(VerticalAlignment.Center);
 
     private static Element LargeProjectName(string projectName)
     {
@@ -169,7 +171,8 @@ class SessionCell : ShellCell
             .TextAlignment(TextAlignment.Center)
             .ToolTip(name)
             .Width(SessionCellLayout.LargeWidth)
-            .HAlign(HorizontalAlignment.Center);
+            .HAlign(HorizontalAlignment.Center)
+            .VAlign(VerticalAlignment.Center);
 
     private static Element StatusIcon(CopilotSessionStatus status, Brush brush) =>
         status == CopilotSessionStatus.Working
