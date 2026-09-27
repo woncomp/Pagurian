@@ -1,10 +1,8 @@
 using Microsoft.UI.Reactor;
-using Microsoft.UI.Reactor.Controls;
 using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Xaml;
 using Pagurian.Sdk;
 using ReactorTheme = Microsoft.UI.Reactor.Core.Theme;
-using static Microsoft.UI.Reactor.Controls.AutoSuggestDsl;
 using static Microsoft.UI.Reactor.Factories;
 
 namespace Pagurian.Modules.Hello;
@@ -25,9 +23,18 @@ class WorldClockConfiguration : ShellConfiguration
         var format = WorldClockSettings.Format(Settings);
 
         var cities = WorldClockCities.All;
+
+        string DisplayText(WorldClockCities.City city) =>
+            $"{city.Name} — {WorldClockCities.OffsetText(
+                WorldClockCities.Resolve(city.TimeZoneId).BaseUtcOffset)}";
+
+        // The box Text tracks the configured city; an unset Text (no city yet)
+        // leaves the placeholder visible. Optional<string>.Unset means "the
+        // control owns its text", which also lets the user type freely.
         var selected = cityName.Length > 0
             ? WorldClockCities.Find(cityName, timeZoneId)
             : WorldClockCities.Find(timeZoneId);
+        var selectedText = selected is null ? null : DisplayText(selected);
 
         var formatIndex = format switch
         {
@@ -36,46 +43,56 @@ class WorldClockConfiguration : ShellConfiguration
             _ => 0,
         };
 
-        var cityPicker = AutoSuggest<WorldClockCities.City?>(
-                selected,
-                city =>
+        // Search state lives in the component so the suggestion list is a
+        // plain reactive projection of the query. AutoSuggestBox has no
+        // built-in filter, so we drive Suggestions from the typed text.
+        var (query, setQuery) = UseState("");
+        var trimmed = query.Trim();
+        var suggestions = (trimmed.Length == 0
+                ? cities
+                : cities.Where(c => c.Name.Contains(
+                    trimmed, StringComparison.OrdinalIgnoreCase)))
+            .Take(MaxSuggestions)
+            .Select(DisplayText)
+            .ToArray();
+        // Keep the list open while typing a fresh query, but not once a city
+        // is selected (its display text then fills the box).
+        var listOpen = trimmed.Length > 0 && trimmed != selectedText;
+
+        // REACTOR_A11Y_003: the label is set via the fluent .Header("City")
+        // below; the analyzer only recognizes a `header:` factory argument,
+        // which this factory does not accept.
+#pragma warning disable REACTOR_A11Y_003
+        var cityPicker = AutoSuggestBox(
+                text: selectedText ?? Optional<string>.Unset,
+                onTextChanged: text => setQuery(text ?? ""))
+            with
+            {
+                PlaceholderText = "Search cities…",
+                Suggestions = suggestions,
+                IsSuggestionListOpen = listOpen,
+                OnSuggestionChosen = chosen =>
                 {
-                    if (city is null)
-                        return;
-                    SetSettings(WorldClockSettings.Write(
-                        city.TimeZoneId, city.Name, label, format));
+                    var city = cities.FirstOrDefault(
+                        c => DisplayText(c) == chosen);
+                    if (city is not null)
+                        SetSettings(WorldClockSettings.Write(
+                            city.TimeZoneId, city.Name, label, format));
                 },
-                (query, _) =>
-                {
-                    var text = (query ?? "").Trim();
-                    var matches = text.Length == 0
-                        ? cities.Take(MaxSuggestions)
-                        : cities
-                            .Where(city => city.Name.Contains(
-                                text, StringComparison.OrdinalIgnoreCase))
-                            .Take(MaxSuggestions);
-                    return Task.FromResult(
-                        (IReadOnlyList<WorldClockCities.City?>)matches
-                            .Cast<WorldClockCities.City?>()
-                            .ToArray());
-                },
-                city => city is null ? "" : $"{city.Name} — {WorldClockCities.OffsetText(
-                    WorldClockCities.Resolve(city.TimeZoneId).BaseUtcOffset)}",
-                "Search cities…")
-            with { EmptyMessage = "No cities match" };
+            };
+#pragma warning restore REACTOR_A11Y_003
 
         return FlexColumn(
             Body("Search for the city this clock follows. Drag more World Clock " +
                  "shells into the tray for additional cities.")
                 .TextWrapping(TextWrapping.WrapWholeWords)
                 .Foreground(ReactorTheme.SecondaryText),
-            Caption("City")
-                .Margin(0, 8, 0, 0),
             cityPicker
+                .Header("City")
                 .AutomationName("City")
                 .MinWidth(280)
                 .HorizontalAlignment(HorizontalAlignment.Left)
-                .Margin(0, 4, 0, 0),
+                .Margin(0, 8, 0, 0),
             TextBox(
                     label,
                     value => SetSettings(WorldClockSettings.Write(
