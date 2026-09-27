@@ -17,6 +17,8 @@ var tests = new (string Name, Action Run)[]
     ("working child overrides idle parent", AggregatePriority),
     ("Done falls back to Idle on acknowledgement", DonePriority),
     ("sessionStart is not a completion", SessionStartIsNotDone),
+    ("App turn completion retains Done status", AppTurnCompletionRetainsDone),
+    ("child stop completes to Done", ChildStopCompletesToDone),
     ("child completion and exit preserve the stable owner", ChildLifecycle),
     ("child-only discovery preserves owner after child exit", SyntheticOwnerPreserved),
     ("multi-turn child resumes after subagentStop", ChildResume),
@@ -321,6 +323,31 @@ static void SessionStartIsNotDone()
     r.Advance(1000);
     Check(r.Cell().Status == CopilotSessionStatus.Idle, "A fresh session start is not a completion");
     Check(r.State.AcknowledgeDone("root") == false, "Nothing pending after the fresh start");
+}
+
+static void AppTurnCompletionRetainsDone()
+{
+    var r = new Rig(); r.Group();
+    r.Event("userPromptSubmitted", "root");
+    Check(r.Cell().Status == CopilotSessionStatus.Working);
+    r.Event("agentStop", "root");
+    Check(r.Cell().Status == CopilotSessionStatus.Done);
+    r.Event("sessionEnd", "root"); // app-turn-complete deactivates root, but Done must be retained
+    Check(r.Cell().Status == CopilotSessionStatus.Done, "App turn completion retains Done status");
+    Check(r.State.AcknowledgeDone("root") && r.Cell().Status == CopilotSessionStatus.Idle,
+        "Acknowledging turns Done back to Idle");
+}
+
+static void ChildStopCompletesToDone()
+{
+    var r = new Rig(); r.Group();
+    r.Event("sessionStart", "root");
+    r.Event("preToolUse", "a");
+    Check(r.Cell().Status == CopilotSessionStatus.Working);
+    r.Event("agentStop", "a");
+    Check(r.Cell().Status == CopilotSessionStatus.Done, "Child agentStop completes to Done");
+    Check(r.State.AcknowledgeDone("root") && r.Cell().Status == CopilotSessionStatus.Idle,
+        "Acknowledging turns Done back to Idle");
 }
 
 static void ChildLifecycle()

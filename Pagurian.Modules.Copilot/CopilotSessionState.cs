@@ -505,12 +505,19 @@ sealed class CopilotSessionState
         source.StateEvent = hook.Name;
         source.Status = status.Value;
         source.Active = hook.Name is not ("sessionEnd" or "subagentStop");
-        if (before == CopilotSessionStatus.Working && status.Value == CopilotSessionStatus.Idle &&
+        if (!lifecycle && before == CopilotSessionStatus.Working && status.Value == CopilotSessionStatus.Idle &&
             hook.Name is "agentStop" or "subagentStop" or "sessionEnd")
             source.CompletionPendingAck = true; // a fresh sessionStart or new work below supersedes
         else if (status.Value is CopilotSessionStatus.Working or CopilotSessionStatus.Blocked ||
             (status.Value == CopilotSessionStatus.Idle && hook.Name == "sessionStart"))
+        {
             source.CompletionPendingAck = false;
+            if (source.Identity.Kind is CopilotIdentityKind.AppRoot or CopilotIdentityKind.Cli)
+            {
+                foreach (var member in _sources.Values.Where(s => s.Identity.OwnerId == source.Identity.SourceId))
+                    member.CompletionPendingAck = false;
+            }
+        }
         if (hook.Name == "sessionStart")
         {
             if (source.Ended)
@@ -650,7 +657,7 @@ sealed class CopilotSessionState
                 members.Any(m => m.Identity.SourceId == t.SourceId)).TakeLast(64).ToArray();
             var candidate = session.BlockingSources.Count > 0 ? CopilotSessionStatus.Blocked
                 : active.Any(s => s.Status == CopilotSessionStatus.Working) ? CopilotSessionStatus.Working
-                : active.Any(s => s.CompletionPendingAck) ? CopilotSessionStatus.Done
+                : members.Any(s => s.CompletionPendingAck && InOwnerGeneration(s, s.StateAt)) ? CopilotSessionStatus.Done
                 : CopilotSessionStatus.Idle;
             UpdateCandidate(session, candidate, _clock());
             if (created)
@@ -688,15 +695,13 @@ sealed class CopilotSessionState
     {
         // Mirrors the aggregate candidate computed in Reconcile for an owner
         // whose pending-completion flags may have changed outside a reconcile.
-        var active = session.Nodes
-            .Select(n => _sources.TryGetValue(n.SessionId, out var source) &&
-                source.Identity.OwnerId == session.SessionId ? source : null)
-            .Where(s => s is not null && s.Active && !s.Ended)
-            .Cast<Source>()
+        var members = _sources.Values
+            .Where(s => s.Identity.OwnerId == session.SessionId)
             .ToArray();
+        var active = members.Where(s => s.Active && !s.Ended && InOwnerGeneration(s, s.StateAt)).ToArray();
         return session.BlockingSources.Count > 0 ? CopilotSessionStatus.Blocked
             : active.Any(s => s.Status == CopilotSessionStatus.Working) ? CopilotSessionStatus.Working
-            : active.Any(s => s.CompletionPendingAck) ? CopilotSessionStatus.Done
+            : members.Any(s => s.CompletionPendingAck && InOwnerGeneration(s, s.StateAt)) ? CopilotSessionStatus.Done
             : CopilotSessionStatus.Idle;
     }
 
