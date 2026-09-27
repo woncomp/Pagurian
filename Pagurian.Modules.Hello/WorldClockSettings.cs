@@ -34,6 +34,19 @@ static class WorldClockSettings
         return "";
     }
 
+    // The picked city name, persisted alongside the zone id so cities sharing
+    // one zone (Berlin/Vienna) keep their own label. Absent in legacy configs.
+    public static string CityName(JsonElement? settings)
+    {
+        if (settings is { ValueKind: JsonValueKind.Object } value &&
+            value.TryGetProperty("city", out var city) &&
+            city.ValueKind == JsonValueKind.String)
+        {
+            return city.GetString() ?? "";
+        }
+        return "";
+    }
+
     public static string Format(JsonElement? settings)
     {
         if (settings is { ValueKind: JsonValueKind.Object } value &&
@@ -50,17 +63,21 @@ static class WorldClockSettings
         return FormatSystem;
     }
 
-    // The cell/billboard second line: a custom label wins, then the curated
-    // city name for the stored zone, then a safe fallback.
+    // The cell/billboard second line: a custom label wins, then the persisted
+    // city pick, then the curated city name for the stored zone (legacy
+    // configs), then a safe fallback.
     public static string DisplayLabel(JsonElement? settings)
     {
         var label = Label(settings);
         if (label.Length > 0)
             return label;
+        var city = CityName(settings);
+        if (city.Length > 0)
+            return city;
         var timeZoneId = TimeZoneId(settings);
-        var city = WorldClockCities.Find(timeZoneId);
-        if (city is not null)
-            return city.Name;
+        var match = WorldClockCities.Find(timeZoneId);
+        if (match is not null)
+            return match.Name;
         return timeZoneId == TimeZoneInfo.Local.Id ? "Local" : timeZoneId;
     }
 
@@ -80,6 +97,6 @@ static class WorldClockSettings
             _ => time.ToString("T", CultureInfo.CurrentCulture),
         };
 
-    public static JsonElement Write(string timeZoneId, string label, string format) =>
-        JsonSerializer.SerializeToElement(new { timeZone = timeZoneId, label, format });
+    public static JsonElement Write(string timeZoneId, string cityName, string label, string format) =>
+        JsonSerializer.SerializeToElement(new { timeZone = timeZoneId, city = cityName, label, format });
 }
