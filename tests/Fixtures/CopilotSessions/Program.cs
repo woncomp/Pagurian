@@ -926,12 +926,18 @@ static void MetadataParsing()
     f.Resolver.Observe("root");
     f.Metadata("root", "client_name: \"github/autopilot\nname: broken\n");
     Check(f.Identity("root").Kind == CopilotIdentityKind.Unknown);
-    f.Metadata("root", "  client_name: github/autopilot\nname: nested ignored\n");
-    Check(f.Identity("root").Kind == CopilotIdentityKind.Unknown);
+    f.Metadata("root", "outer:\n  client_name: github/autopilot\nname: nested ignored\n");
+    Check(f.Identity("root") is { Kind: CopilotIdentityKind.Unknown, Name: "nested ignored" });
     f.Metadata("root", "client_name: github/autopilot\nclient_name: cli\n");
     Check(f.Identity("root").Kind == CopilotIdentityKind.Unknown);
     f.Metadata("root", "\ufeffclient_name: 'github/autopilot' # comment\nname: 'It''s a fixture'\n");
     Check(f.Identity("root") is { Kind: CopilotIdentityKind.AppRoot, Name: "It's a fixture" });
+    f.Metadata("root", "client_name: github/autopilot\nname: |-\n  World Clock: Add more major cities\n\n  - Allow searching in city selection\n");
+    Check(f.Identity("root") is { Kind: CopilotIdentityKind.AppRoot, Name: "World Clock: Add more major cities\n\n- Allow searching in city selection" });
+    f.Metadata("root", "client_name: github/autopilot\nname: >\n  Folded\n  name\n");
+    Check(f.Identity("root") is { Kind: CopilotIdentityKind.AppRoot, Name: "Folded name" });
+    f.Metadata("root", "client_name: github/autopilot\nname: [broken\n");
+    Check(f.Identity("root") is { Kind: CopilotIdentityKind.AppRoot, Name: "Folded name" });
     f.Metadata("root", "client_name:\nname:\n");
     Check(f.Identity("root").Kind == CopilotIdentityKind.AppRoot);
 }

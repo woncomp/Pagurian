@@ -66,8 +66,10 @@ cwd is display metadata only, never ownership evidence.
 Positive identity evidence is cached for the resolver lifetime, including
 across transcript rotation and multi-turn child completion. Client identity
 is immutable for a session; partial rewrites cannot downgrade a known App root
-to CLI. Incomplete App-marker prefixes remain unknown. A final arbitrary CLI
-client scalar must be newline-terminated before it is trusted.
+to CLI. Incomplete App-marker prefixes remain unknown. `workspace.yaml` is
+parsed as real YAML — App-written `name` values may be block or folded
+scalars with embedded newlines (chomping trailers are trimmed) — and a
+malformed document is ignored without erasing cached positive evidence.
 
 ## Icon admission and directory cleanup
 

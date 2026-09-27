@@ -6,6 +6,8 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using YamlDotNet.Core;
+using YamlDotNet.RepresentationModel;
 
 namespace Pagurian.Modules.Copilot;
 
@@ -810,40 +812,46 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
         return read == count ? bytes : bytes[..read];
     }
 
+    // Real YAML, not a line scanner: App-written names may be block scalars
+    // ("name: |-" with embedded newlines), which a strict scalar reader
+    // rejected as malformed and discarded the whole file's identity.
     private static bool TryMetadata(string text, out string? client, out string? name, out string? cwd)
     {
         client = null;
         name = null;
         cwd = null;
-        bool hasClient = false;
-        bool hasName = false;
-        bool hasCwd = false;
-        var lines = text.TrimStart('\ufeff').Split('\n');
-        for (int lineIndex = 0; lineIndex < lines.Length; lineIndex++)
+        YamlStream yaml;
+        try
         {
-            var raw = lines[lineIndex];
-            var line = raw.TrimEnd('\r');
-            if (line.Length == 0 || char.IsWhiteSpace(line[0]) || line[0] == '#')
+            yaml = new YamlStream();
+            yaml.Load(new StringReader(text.TrimStart('\ufeff')));
+        }
+        catch (YamlException)
+        {
+            return false;
+        }
+        if (yaml.Documents.Count == 0 || yaml.Documents[0].RootNode is not YamlMappingNode root)
+            return true;
+        bool hasClient = false, hasName = false, hasCwd = false;
+        foreach (var pair in root.Children)
+        {
+            if (pair.Key is not YamlScalarNode { Value: "client_name" or "name" or "cwd" } key)
                 continue;
-            int separator = line.IndexOf(':');
-            if (separator < 0)
-                continue;
-            string key = line[..separator];
-            if (key is not ("client_name" or "name" or "cwd"))
-                continue;
-            if (!TryScalar(line[(separator + 1)..], out var value))
+            if (pair.Value is not null and not YamlScalarNode)
                 return false;
-            if (key == "client_name")
+            string? value = ((YamlScalarNode?)pair.Value)?.Value is "~" or "null" or "Null" or "NULL" or "" ? null : ((YamlScalarNode?)pair.Value)?.Value;
+            // Block/folded scalars carry YAML chomping newlines; a session
+            // name never intentionally ends with line breaks.
+            if (value is not null && key.Value is "name" or "cwd")
+                value = value.TrimEnd('\r', '\n');
+            if (key.Value == "client_name")
             {
                 if (hasClient)
                     return false;
-                // A plain scalar still being appended is not complete evidence
-                // of an arbitrary CLI client. The exact App marker is safe.
-                client = lineIndex == lines.Length - 1 && value != "github/autopilot"
-                    ? null : value;
+                client = value;
                 hasClient = true;
             }
-            else if (key == "name")
+            else if (key.Value == "name")
             {
                 if (hasName)
                     return false;
@@ -858,54 +866,6 @@ internal sealed class CopilotSessionIdentityResolver : IDisposable
                 hasCwd = true;
             }
         }
-        return true;
-    }
-
-    private static bool TryScalar(string text, out string? value)
-    {
-        value = null;
-        text = text.Trim();
-        if (text.Length == 0 || text[0] == '#')
-            return true;
-        if (text[0] is '\'' or '"')
-        {
-            char quote = text[0];
-            var scalar = new StringBuilder();
-            for (int i = 1; i < text.Length; i++)
-            {
-                char c = text[i];
-                if (c == quote)
-                {
-                    if (quote == '\'' && i + 1 < text.Length && text[i + 1] == '\'')
-                    {
-                        scalar.Append('\'');
-                        i++;
-                        continue;
-                    }
-                    string rest = text[(i + 1)..].TrimStart();
-                    if (rest.Length != 0 && rest[0] != '#')
-                        return false;
-                    value = scalar.ToString();
-                    return true;
-                }
-                if (quote == '"' && c == '\\')
-                {
-                    if (++i >= text.Length)
-                        return false;
-                    c = text[i] switch { 'n' => '\n', 'r' => '\r', 't' => '\t', '"' => '"', '\\' => '\\', _ => '\0' };
-                    if (c == '\0')
-                        return false;
-                }
-                scalar.Append(c);
-            }
-            return false;
-        }
-        if (text[0] is '|' or '>' or '[' or '{' or '&' or '*' or '!' || text.Contains(": ", StringComparison.Ordinal))
-            return false;
-        int comment = text.IndexOf(" #", StringComparison.Ordinal);
-        value = (comment < 0 ? text : text[..comment]).TrimEnd();
-        if (value is "~" or "null" or "Null" or "NULL")
-            value = null;
         return true;
     }
 

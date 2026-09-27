@@ -10,6 +10,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.13" />
+    <PackageReference Include="YamlDotNet" Version="18.1.0" />
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotApp*.cs" />
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotArchiveReader.cs" />
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSessionIdentityResolver.cs" />

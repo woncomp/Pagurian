@@ -9,6 +9,9 @@
     <DefineConstants>$(DefineConstants);HOOK_EVENT_LOG_TESTS</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="YamlDotNet" Version="18.1.0" />
+  </ItemGroup>
+  <ItemGroup>
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotAppLifecycle.cs" Link="CopilotAppLifecycle.cs" />
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSessionDetails.cs" Link="CopilotSessionDetails.cs" />
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSessionIdentityResolver.cs" Link="CopilotSessionIdentityResolver.cs" />

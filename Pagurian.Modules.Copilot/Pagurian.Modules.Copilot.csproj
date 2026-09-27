@@ -21,6 +21,7 @@
     <PackageReference Include="GitHub.Copilot.SDK" Version="1.0.13" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.13" />
+    <PackageReference Include="YamlDotNet" Version="18.1.0" />
     <PackageReference Include="Microsoft.UI.Reactor" Version="0.1.0-preview.12">
       <ExcludeAssets>runtime</ExcludeAssets>
     </PackageReference>
@@ -48,7 +49,8 @@
           Or '%(ReferenceCopyLocalPaths.NuGetPackageId)' == 'Microsoft.Extensions.Logging.Abstractions'
           Or '%(ReferenceCopyLocalPaths.NuGetPackageId)' == 'Microsoft.Data.Sqlite.Core'
           Or $([System.String]::Copy('%(ReferenceCopyLocalPaths.NuGetPackageId)').StartsWith('SQLitePCLRaw.'))
-          Or '%(ReferenceCopyLocalPaths.NuGetPackageId)' == 'Microsoft.Extensions.DependencyInjection.Abstractions'" />
+          Or '%(ReferenceCopyLocalPaths.NuGetPackageId)' == 'Microsoft.Extensions.DependencyInjection.Abstractions'
+          Or '%(ReferenceCopyLocalPaths.NuGetPackageId)' == 'YamlDotNet'" />
       <ModuleCopilotRuntime Include="@(ContentWithTargetPath)"
         Condition="'%(ContentWithTargetPath.TargetPath)' != ''
           And $([System.String]::Copy('%(ContentWithTargetPath.TargetPath)').StartsWith('runtimes\'))" />
