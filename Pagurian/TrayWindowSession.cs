@@ -21,7 +21,7 @@ internal sealed class TrayWindowSession
     private readonly int _id = ++_nextId;
     private readonly DispatcherQueue _dispatcher = DispatcherQueue.GetForCurrentThread();
     private readonly Border _root = new();
-    private readonly Border _target = new() { HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
+    private readonly Border _target = new() { HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Stretch };
     private readonly UISettings _uiSettings = new();
     private readonly AccessibilitySettings _accessibility = new();
     private readonly Func<TaskbarTrayPlacement.Surface?> _getSurface;

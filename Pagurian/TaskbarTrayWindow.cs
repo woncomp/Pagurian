@@ -24,10 +24,12 @@ class TaskbarTrayWindow : Component
     public const double WindowInsetYDip = 2;
     public const double ContentHeightDip = WindowHeightDip - 2 * WindowInsetYDip;
 
-    // Native cell hover visual: a SubtleFill overlay inset from the cell
-    // edges with the control corner radius (like every Win11 taskbar button).
+    // Native cell hover visual: a SubtleFill overlay stretched to the full
+    // row height with the control corner radius. The 2 DIP hover margin plus
+    // the window's own 2 DIP taskbar inset leaves the highlight 40 DIP tall,
+    // 4 DIP from the taskbar edges — matching every Win11 taskbar button.
     public const double HoverMarginXDip = 3;
-    public const double HoverMarginYDip = 4;
+    public const double HoverMarginYDip = 2;
     public const double HoverCornerRadiusDip = 4;
 
     private readonly TaskbarTrayLayout _layout;
@@ -144,11 +146,12 @@ class TaskbarTrayWindow : Component
                 with { CornerRadius = HoverCornerRadiusDip })
                 .Background(HoverBrushFor(cell.Key))
                 .Margin(HoverMarginXDip, HoverMarginYDip, HoverMarginXDip, HoverMarginYDip)
+                .VerticalAlignment(Microsoft.UI.Xaml.VerticalAlignment.Stretch)
                 .Ref(_layout.RefFor(cell.Key))
                 .OnMount(_ => _layout.Mounted(cell.Key))
                 .OnUnmount(_ => _layout.Unmounted(cell.Key))
                 .WithKey(cell.Key)).ToArray())
             .HorizontalAlignment(Microsoft.UI.Xaml.HorizontalAlignment.Left)
-            .VerticalAlignment(Microsoft.UI.Xaml.VerticalAlignment.Top);
+            .VerticalAlignment(Microsoft.UI.Xaml.VerticalAlignment.Stretch);
     }
 }
