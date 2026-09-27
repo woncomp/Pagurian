@@ -1,6 +1,7 @@
 using System.Globalization;
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
+using Microsoft.UI.Reactor.Layout;
 using Microsoft.UI.Xaml;
 using Pagurian.Sdk;
 using static Microsoft.UI.Reactor.Factories;
@@ -80,28 +81,35 @@ class WorldClockCell : ShellCell
 
         // Anti-jitter floor (measured, so it stays font/locale-correct): the
         // time line is exactly as wide as its worst-case rendering across all
-        // formats; the label line is capped so long labels stay compact.
+        // formats; the label line is capped so long labels can't grow the cell.
+        // Both lines share the resulting cell width so their centered text
+        // shares a single vertical axis.
         var timeWidth = WorstTimeWidth();
+        var labelCap = Math.Max(timeWidth, MinLabelWidthDip);
         var labelWidth = Math.Min(
             TextMeasurement.MeasureWidth(label, FontSizeDip),
-            Math.Max(timeWidth, MinLabelWidthDip));
+            labelCap);
+        var cellWidth = Math.Max(timeWidth, labelWidth);
 
         return Border(
-                FlexColumn(
+                (FlexColumn(
                     TextBlock(time)
                         .FontSize(FontSizeDip)
                         .TextAlignment(TextAlignment.Center)
-                        .Width(timeWidth)
+                        .Width(cellWidth)
                         .HAlign(HorizontalAlignment.Center)
                         .Foreground(Theme.TextBrush),
                     TextBlock(label)
                         .FontSize(FontSizeDip)
                         .TextAlignment(TextAlignment.Center)
-                        .Width(labelWidth)
+                        .Width(cellWidth)
                         .MaxLines(1)
                         .TextTrimming(TextTrimming.CharacterEllipsis)
                         .HAlign(HorizontalAlignment.Center)
-                        .Foreground(Theme.TextBrush))
+                        .Foreground(Theme.TextBrush)) with
+                {
+                    AlignItems = FlexAlign.Center,
+                })
                     .VerticalAlignment(VerticalAlignment.Center))
             .Padding(PaddingXDip, 0, PaddingXDip, 0);
     }
