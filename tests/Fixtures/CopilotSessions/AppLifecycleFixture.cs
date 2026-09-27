@@ -236,8 +236,14 @@ internal static class AppLifecycleFixture
         state.Resolve([], Snapshot(3, 30, App(3, 25), ("root", CopilotArchiveState.Live, 26)));
         Check(state.Find("root")!.BlockingSources.Single().SourceId == "root",
             "Fresh hooks beat delayed initial Idle");
+        Check(state.Find("root")!.Status == CopilotSessionStatus.Idle,
+            "A runtime reset clears the committed Blocked status for delayed delivery");
+        state.AcknowledgeDone("root");
+        state.Handle(new("permissionRequest", "root", Time.AddSeconds(33), ""));
+        now = Time.AddSeconds(34);
+        state.CommitStableStatuses();
         Check(state.Find("root")!.Status == CopilotSessionStatus.Blocked,
-            "Initial snapshot cannot overwrite an already committed fresh status");
+            "Fresh hooks cannot re-commit after acknowledgement, but new ones can");
         Check(state.Find("root")!.GroupDetails.InputTokens == 100, "Fresh state does not change historical telemetry");
         using (var doc = JsonDocument.Parse("""
             {"id":"shutdown","type":"session.shutdown","timestamp":"2026-09-11T10:00:40Z","data":{}}

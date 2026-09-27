@@ -199,6 +199,10 @@ class SessionCell : ShellCell
                         .Foreground(brush)
                         .HAlign(HorizontalAlignment.Center)
                         .VAlign(VerticalAlignment.Center),
+                    CopilotSessionStatus.Done => Caption("✓")
+                        .Foreground(brush)
+                        .HAlign(HorizontalAlignment.Center)
+                        .VAlign(VerticalAlignment.Center),
                     CopilotSessionStatus.Unknown => Caption("?")
                         .Foreground(brush)
                         .HAlign(HorizontalAlignment.Center)

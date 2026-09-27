@@ -3,7 +3,7 @@ using System.Text.Json;
 
 namespace Pagurian.Modules.Copilot;
 
-enum CopilotSessionStatus { Idle, Working, Blocked, Unknown }
+enum CopilotSessionStatus { Idle, Working, Blocked, Unknown, Done }
 
 sealed record CopilotBlocker(
     string SourceId, string OwnerId, DateTimeOffset BlockedSince,
@@ -131,6 +131,9 @@ sealed class CopilotSessionState
         public bool Ended;
         public DateTimeOffset EndedAt = DateTimeOffset.MinValue;
         public CopilotSessionStatus Status;
+        // Done is a display-only aggregate (Working -> Idle completion pending
+        // user acknowledgement); each source keeps its real Status of Idle.
+        public bool CompletionPendingAck;
         public CopilotBlocker? Blocker;
         public DateTimeOffset StateAt = DateTimeOffset.MinValue;
         public string StateEvent = "";
@@ -341,6 +344,7 @@ sealed class CopilotSessionState
                     member.Active = false;
                     member.Status = CopilotSessionStatus.Idle;
                     member.Blocker = null;
+                    member.CompletionPendingAck = false;
                     if (member.Lifecycle is { } end) member.AppliedLifecycle = end.Sequence;
                     if (member.LifecycleStart is { } start) member.AppliedLifecycleStart = start.Sequence;
                 }
@@ -398,6 +402,7 @@ sealed class CopilotSessionState
                         }
                         member.Status = CopilotSessionStatus.Idle;
                         member.Blocker = null;
+                        member.CompletionPendingAck = false;
                         member.Active = member == owner;
                         member.Ended = false;
                         member.EndedAt = floor;
@@ -418,6 +423,8 @@ sealed class CopilotSessionState
                         if (cell.Status != candidate) cell.Status = CopilotSessionStatus.Idle;
                         if (cell.PendingStatus != candidate || cell.PendingStatusSince < floor)
                             cell.PendingStatus = null;
+                        if (cell.Status != CopilotSessionStatus.Idle)
+                            cell.Status = CopilotSessionStatus.Idle;
                     }
                     Trace(owner, new("appRestore", owner.Identity.SourceId, entry.At, ""),
                         CopilotSessionStatus.Idle, "app-runtime-restored");
@@ -438,6 +445,7 @@ sealed class CopilotSessionState
             member.Active = false;
             member.Blocker = null;
             member.Status = CopilotSessionStatus.Idle;
+            member.CompletionPendingAck = false;
         }
         Trace(owner, new("appVisibility", owner.Identity.SourceId, at, ""), owner.Status, reason);
     }
@@ -497,6 +505,12 @@ sealed class CopilotSessionState
         source.StateEvent = hook.Name;
         source.Status = status.Value;
         source.Active = hook.Name is not ("sessionEnd" or "subagentStop");
+        if (before == CopilotSessionStatus.Working && status.Value == CopilotSessionStatus.Idle &&
+            hook.Name is "agentStop" or "subagentStop" or "sessionEnd")
+            source.CompletionPendingAck = true; // a fresh sessionStart or new work below supersedes
+        else if (status.Value is CopilotSessionStatus.Working or CopilotSessionStatus.Blocked ||
+            (status.Value == CopilotSessionStatus.Idle && hook.Name == "sessionStart"))
+            source.CompletionPendingAck = false;
         if (hook.Name == "sessionStart")
         {
             if (source.Ended)
@@ -550,6 +564,7 @@ sealed class CopilotSessionState
                     source.Active = false;
                     source.Status = CopilotSessionStatus.Idle;
                     source.Blocker = null;
+                    source.CompletionPendingAck = false;
                     if (source.Latest is { } latest)
                         Trace(source, latest, before, "owner-generation-ended");
                 }
@@ -635,6 +650,7 @@ sealed class CopilotSessionState
                 members.Any(m => m.Identity.SourceId == t.SourceId)).TakeLast(64).ToArray();
             var candidate = session.BlockingSources.Count > 0 ? CopilotSessionStatus.Blocked
                 : active.Any(s => s.Status == CopilotSessionStatus.Working) ? CopilotSessionStatus.Working
+                : active.Any(s => s.CompletionPendingAck) ? CopilotSessionStatus.Done
                 : CopilotSessionStatus.Idle;
             UpdateCandidate(session, candidate, _clock());
             if (created)
@@ -648,6 +664,42 @@ sealed class CopilotSessionState
         }
     }
 
+    public bool AcknowledgeDone(string ownerId)
+    {
+        if (!_sources.TryGetValue(ownerId, out var owner))
+            return false;
+        bool cleared = false;
+        foreach (var member in _sources.Values.Where(s => s.Identity.OwnerId == owner.Identity.SourceId))
+        {
+            if (!member.CompletionPendingAck)
+                continue;
+            member.CompletionPendingAck = false;
+            cleared = true;
+        }
+        if (!cleared)
+            return false;
+        if (_sessions.TryGetValue(owner.Identity.SourceId, out var session) &&
+            session.Status == CopilotSessionStatus.Done)
+            UpdateCandidate(session, CandidateStatus(session), _clock());
+        return true;
+    }
+
+    private CopilotSessionStatus CandidateStatus(CopilotSession session)
+    {
+        // Mirrors the aggregate candidate computed in Reconcile for an owner
+        // whose pending-completion flags may have changed outside a reconcile.
+        var active = session.Nodes
+            .Select(n => _sources.TryGetValue(n.SessionId, out var source) &&
+                source.Identity.OwnerId == session.SessionId ? source : null)
+            .Where(s => s is not null && s.Active && !s.Ended)
+            .Cast<Source>()
+            .ToArray();
+        return session.BlockingSources.Count > 0 ? CopilotSessionStatus.Blocked
+            : active.Any(s => s.Status == CopilotSessionStatus.Working) ? CopilotSessionStatus.Working
+            : active.Any(s => s.CompletionPendingAck) ? CopilotSessionStatus.Done
+            : CopilotSessionStatus.Idle;
+    }
+
     private void ReconcileTranscriptTerminal(Source source)
     {
         if (source.Identity.Details?.TerminalAt is not { } at ||
@@ -658,9 +710,12 @@ sealed class CopilotSessionState
         source.TranscriptTerminalAt = at;
         if (source.StateAt <= at)
         {
+            var wasWorking = source.Status == CopilotSessionStatus.Working;
             source.Active = false;
             source.Status = CopilotSessionStatus.Idle;
             source.Blocker = null;
+            if (wasWorking || source.CompletionPendingAck)
+                source.CompletionPendingAck = true;
             source.StateAt = at;
         }
         else if (source.Blocker is { } blocker && blocker.BlockedSince <= at)

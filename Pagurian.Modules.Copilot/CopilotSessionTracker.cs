@@ -90,6 +90,21 @@ static class CopilotSessionTracker
         NotifyChanged();
     }
 
+    // Billboard opening acknowledges a displayed Done completion; runs on the
+    // UI thread like every other state mutation.
+    public static void AcknowledgeDone(string sessionId)
+    {
+        if (_state is not { } state)
+            return;
+        ReactorApp.UIDispatcher!.TryEnqueue(() =>
+        {
+            if (!ReferenceEquals(_state, state))
+                return;
+            if (state.AcknowledgeDone(sessionId))
+                NotifyChanged();
+        });
+    }
+
     private static void OnStarted(CopilotSession session) => SessionStarted?.Invoke(session);
     private static void OnEnded(CopilotSession session) => SessionEnded?.Invoke(session);
     private static void OnTick(DispatcherQueueTimer sender, object args)

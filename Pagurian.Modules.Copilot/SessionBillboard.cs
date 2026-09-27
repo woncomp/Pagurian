@@ -4,6 +4,7 @@ using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using Pagurian.Sdk;
 using static Microsoft.UI.Reactor.Factories;
 using ReactorTheme = Microsoft.UI.Reactor.Core.Theme;
@@ -19,6 +20,14 @@ class SessionBillboard : Billboard
     public override double WidthDip => 600;
     public override double HeightDip => 640;
     public override string Title => "Copilot Session";
+
+    public override void OnOpened()
+    {
+        // Opening the billboard acknowledges a pending completion: the tray
+        // cell's Done state falls back to ordinary Idle.
+        if (!_session.IsSdk)
+            CopilotSessionTracker.AcknowledgeDone(_session.SessionId);
+    }
 
     public override Element Render()
     {
@@ -72,7 +81,7 @@ class SessionBillboard : Billboard
                 .ToolTip(_session.ClientMarker ?? CopilotModule.ClientLabel(_session.Client))
                 .Foreground(ReactorTheme.SecondaryText)
                 .Margin(12, 4, 0, 0).Grid(row: 1, column: 1),
-            StatusBadge(_session.Status.ToString(), _session.Status, hc)
+            StatusBadge(_session.Status.ToString(), _session.Status, hc, Theme.IsDark)
                 .Margin(8, 0, 0, 0).VAlign(VerticalAlignment.Top)
                 .Grid(row: 0, column: 2, rowSpan: 2));
 
@@ -279,18 +288,32 @@ class SessionBillboard : Billboard
                 .TextTrimming(TextTrimming.CharacterEllipsis)
                 .ToolTip(value ?? "Unavailable").Grid(column: 1));
 
-    private static BorderElement StatusBadge(string label, CopilotSessionStatus status, bool hc)
+    private static BorderElement StatusBadge(string label, CopilotSessionStatus status, bool hc, bool isDark)
     {
-        var foreground = hc ? ReactorTheme.Ref("SystemColorWindowTextColorBrush") : status switch
+        var foreground = new SolidColorBrush(CopilotStatusColors.StatusColorFor(status, isDark));
+        var badge = Border(Caption(label).SemiBold().Padding(0))
+            .Padding(8, 4).CornerRadius(4);
+        badge = status switch
         {
-            CopilotSessionStatus.Working => ReactorTheme.SystemSuccess,
-            CopilotSessionStatus.Blocked => ReactorTheme.SystemCaution,
-            _ => ReactorTheme.SystemNeutral,
+            CopilotSessionStatus.Done => badge.Background(ReactorTheme.SystemSuccessBackground),
+            CopilotSessionStatus.Blocked => badge.Background(ReactorTheme.SystemCautionBackground),
+            // Working has no System*Background token; tint the card with the
+            // same hue at low opacity instead.
+            CopilotSessionStatus.Working => badge.Background(WorkingBackground(isDark)),
+            _ => badge.Background(ReactorTheme.SystemNeutralBackground),
         };
-        return Border(Caption(label).SemiBold().Foreground(foreground))
-            .Padding(8, 4).CornerRadius(4)
-            .Background(hc ? ReactorTheme.Ref("SystemColorWindowColorBrush") : ReactorTheme.CardBackground)
-            .WithBorder(foreground, hc ? 2 : 1);
+        badge = hc
+            ? badge.Background(ReactorTheme.Ref("SystemColorWindowColorBrush"))
+            : badge;
+        return hc
+            ? badge.WithBorder(ReactorTheme.Ref("SystemColorWindowTextColorBrush"), 2)
+            : badge.WithBorder(foreground, 1);
+    }
+
+    private static string WorkingBackground(bool isDark)
+    {
+        var c = CopilotStatusColors.StatusColorFor(CopilotSessionStatus.Working, isDark);
+        return $"#{(isDark ? 0x33 : 0x1A):X2}{c.R:X2}{c.G:X2}{c.B:X2}";
     }
 
     private static BorderElement MaterialCard(Element content, bool hc) =>

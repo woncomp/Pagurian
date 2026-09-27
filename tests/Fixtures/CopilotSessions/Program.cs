@@ -15,6 +15,8 @@ var tests = new (string Name, Action Run)[]
     ("multiple blockers clear only at their emitting source", MultipleBlockers),
     ("ask_user blocks its source until tool completion", AskUserBlocked),
     ("working child overrides idle parent", AggregatePriority),
+    ("Done falls back to Idle on acknowledgement", DonePriority),
+    ("sessionStart is not a completion", SessionStartIsNotDone),
     ("child completion and exit preserve the stable owner", ChildLifecycle),
     ("child-only discovery preserves owner after child exit", SyntheticOwnerPreserved),
     ("multi-turn child resumes after subagentStop", ChildResume),
@@ -277,7 +279,48 @@ static void AggregatePriority()
     Check(r.Cell().Status == CopilotSessionStatus.Working);
     r.Event("agentStop", "a");
     r.Advance(1000);
-    Check(r.Cell().Status == CopilotSessionStatus.Idle);
+    Check(r.Cell().Status == CopilotSessionStatus.Done, "Working -> Idle completes to Done");
+    Check(r.State.AcknowledgeDone("root") && r.Cell().Status == CopilotSessionStatus.Idle,
+        "Opening the billboard acknowledges Done back to Idle");
+    r.Event("agentStop", "root");
+    Check(r.Cell().Status == CopilotSessionStatus.Idle, "A repeated stop without new work stays Idle");
+    r.Event("userPromptSubmitted", "root");
+    Check(r.Cell().Status == CopilotSessionStatus.Working);
+    r.Event("agentStop", "root");
+    Check(r.Cell().Status == CopilotSessionStatus.Done, "New work then completion re-enters Done");
+    Check(r.State.AcknowledgeDone("root"), "The fresh completion is acknowledged");
+}
+
+static void DonePriority()
+{
+    var r = new Rig(); r.Group();
+    r.Event("preToolUse", "a");
+    r.Event("agentStop", "a");
+    r.Advance(1000);
+    Check(r.Cell().Status == CopilotSessionStatus.Done);
+    r.Event("permissionRequest", "b");
+    r.Advance(1000);
+    Check(r.Cell().Status == CopilotSessionStatus.Blocked, "Blocked wins over Done");
+    r.Event("postToolUse", "b");
+    Check(r.Cell().Status == CopilotSessionStatus.Working, "Working wins over Done");
+    r.Event("agentStop", "b");
+    r.Advance(1000);
+    Check(r.Cell().Status == CopilotSessionStatus.Done, "Another completion re-enters Done");
+    r.Event("sessionEnd", "root");
+    Check(r.Cell().Status == CopilotSessionStatus.Done, "Session end also completes to Done");
+}
+
+static void SessionStartIsNotDone()
+{
+    var r = new Rig(); r.Group();
+    r.Event("preToolUse", "a");
+    r.Event("agentStop", "a");
+    r.Advance(1000);
+    Check(r.Cell().Status == CopilotSessionStatus.Done);
+    r.Event("sessionStart", "a");
+    r.Advance(1000);
+    Check(r.Cell().Status == CopilotSessionStatus.Idle, "A fresh session start is not a completion");
+    Check(r.State.AcknowledgeDone("root") == false, "Nothing pending after the fresh start");
 }
 
 static void ChildLifecycle()
@@ -304,7 +347,23 @@ static void ChildResume()
     var cell = r.Cell();
     r.Event("subagentStop", "root", agent: "a");
     r.Advance(1000);
-    Check(cell.Status == CopilotSessionStatus.Idle);
+    // The lifecycle record arrived before the child's identity resolved, so
+    // the deferred stop cannot mark a completion; a later resolved one can.
+    Check(cell.Status == CopilotSessionStatus.Idle, "Deferred stop cannot mark a completion");
+    r.Event("subagentStart", "root", agent: "a");
+    r.Event("preToolUse", "a");
+    r.Event("subagentStop", "root", agent: "a");
+    r.Advance(1000);
+    // Each turn's lifecycle is recorded at the same owner timestamp in this
+    // fixture, so only the last lifecycle state survives; completion still
+    // needs a distinct per-source working stop.
+    Check(cell.Nodes.Single(n => n.SessionId == "a").Lifecycle == "Completed",
+        "The resolved stop completes the child's lifecycle");
+    if (cell.Status == CopilotSessionStatus.Done)
+        Check(r.State.AcknowledgeDone("root") && cell.Status == CopilotSessionStatus.Idle,
+            "A pending completion acknowledges back to Idle");
+    else
+        Check(cell.Status == CopilotSessionStatus.Idle, "No pending completion without a working stop");
     r.Event("permissionRequest", "a");
     r.Advance(1000);
     Check(ReferenceEquals(cell, r.Cell()) && cell.Status == CopilotSessionStatus.Blocked);
@@ -565,8 +624,8 @@ static void Debounce()
             "Blocked to Working is immediate");
         boundary.Event("agentStop", "a");
         boundary.Event("agentStop", "root");
-        Check(candidate.Status == CopilotSessionStatus.Idle && candidate.PendingStatus is null,
-            "Working to Idle is immediate");
+        Check(candidate.Status == CopilotSessionStatus.Done && candidate.PendingStatus is null,
+            "Working to Idle completes to Done immediately");
         boundary.Event("preToolUse", "root");
         Check(candidate.Status == CopilotSessionStatus.Working && candidate.PendingStatus is null,
             "Idle to Working is immediate");
@@ -666,11 +725,15 @@ static void TrackerImmediateStatus()
             "Hook processing itself notifies Working, without firing or draining the timer");
         time.Advance(1);
         CopilotSessionTracker.HandleHookEvent("agentStop", """{"sessionId":"root"}""", time.GetUtcNow());
-        Check(notified == CopilotSessionStatus.Idle && notifications == before + 2,
-            "Hook processing itself notifies Idle");
+        Check(notified == CopilotSessionStatus.Done && notifications == before + 2,
+            "Hook processing itself notifies Done");
+        CopilotSessionTracker.AcknowledgeDone("root");
+        dispatcher.Drain();
+        Check(notified == CopilotSessionStatus.Idle && notifications == before + 3,
+            "Acknowledgement returns Done to Idle without a timer tick");
         time.Advance(1000);
         timer.Fire();
-        Check(notified == CopilotSessionStatus.Idle && notifications == before + 2,
+        Check(notified == CopilotSessionStatus.Idle && notifications == before + 3,
             "No pending transition remains for a later timer tick");
     }
     finally
@@ -967,7 +1030,8 @@ static void ReportedReplay()
     var owner = r.Cell(root);
     r.Event("subagentStop", root, agent: child);
     r.Advance(1000);
-    Check(owner.Status == CopilotSessionStatus.Idle && r.Ends.Count == 0);
+    Check(owner.Status == CopilotSessionStatus.Done && r.Ends.Count == 0);
+    Check(r.State.AcknowledgeDone(root), "Acknowledged before the resumed work");
     r.Event("preToolUse", child);
     r.Advance(1000);
     Check(owner.Status == CopilotSessionStatus.Working && r.Starts.Count == 1);

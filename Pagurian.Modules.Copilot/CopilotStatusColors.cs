@@ -37,20 +37,28 @@ static class CopilotStatusColors
     private static string Key(CopilotSession session) =>
         (session.IsSdk ? "sdk:" : "hook:") + session.SessionId;
 
+    // Single, unified palette for both tray cells and billboards. Token
+    // values (SystemSuccess/SystemCaution) are inlined so dark/light pairs
+    // match exactly on the sampled taskbar; Cyan has no SystemFillColor
+    // counterpart and is hand-picked.
     public static Windows.UI.Color StatusColorFor(CopilotSessionStatus status, bool isDark) =>
         status switch
         {
             CopilotSessionStatus.Working =>
                 isDark
-                    ? Windows.UI.Color.FromArgb(255, 0x6C, 0xCB, 0x5F)
-                    : Windows.UI.Color.FromArgb(255, 0x10, 0x7C, 0x10),
+                    ? Windows.UI.Color.FromArgb(255, 0x4C, 0xC1, 0xD4)
+                    : Windows.UI.Color.FromArgb(255, 0x03, 0x83, 0x87),
             CopilotSessionStatus.Blocked =>
                 isDark
-                    ? Windows.UI.Color.FromArgb(255, 0xF7, 0x63, 0x0C)
-                    : Windows.UI.Color.FromArgb(255, 0xCA, 0x50, 0x10),
+                    ? Windows.UI.Color.FromArgb(255, 0xFC, 0xE1, 0x00)
+                    : Windows.UI.Color.FromArgb(255, 0x9D, 0x5D, 0x00),
+            CopilotSessionStatus.Done =>
+                isDark
+                    ? Windows.UI.Color.FromArgb(255, 0x6C, 0xCB, 0x5F)
+                    : Windows.UI.Color.FromArgb(255, 0x0F, 0x7B, 0x0F),
             _ =>
                 isDark
-                    ? Windows.UI.Color.FromArgb(255, 0xC8, 0xC8, 0xC8)
-                    : Windows.UI.Color.FromArgb(255, 0x5C, 0x5C, 0x5C),
+                    ? Windows.UI.Color.FromArgb(255, 0x9A, 0x9A, 0x9A)
+                    : Windows.UI.Color.FromArgb(255, 0x86, 0x86, 0x86),
         };
 }

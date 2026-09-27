@@ -152,16 +152,25 @@ Repeated waiting signals preserve the original blocked-since timestamp.
 At equal `preToolUse` timestamps the waiting signal wins over ordinary work;
 older hooks cannot undo a newer completion.
 
-The aggregate is **Blocked > Working > Idle** over active members. The
+The aggregate is **Blocked > Working > Done > Idle** over active members. The
 one-second visual debounce applies only to **entering Blocked**: the aggregate
 must stay continuously Blocked for one second before the existing timer commits
 it. Until then the previous visible state is retained. Any non-Blocked aggregate
-(Working or Idle) is displayed immediately and cancels the pending candidate;
+(Working, Done or Idle) is displayed immediately and cancels the pending candidate;
 subsequent Blocked re-entry starts a fresh interval. Permission ownership and
 end bookkeeping remain immediate. A sibling cannot clear a blocker or restart
 an unchanged Blocked candidate's timer, even when blocker ownership changes.
 A newly discovered or restored Working/Idle group displays its state immediately;
 a new Blocked group starts visually Idle while its entry interval elapses.
+
+**Done** is a display-only aggregate state: it appears when an active member's
+per-source state transitions from Working to Idle (agent/subagent stop or
+session end), and each member still records its real per-source state of Idle.
+Opening the billboard acknowledges the completion: the cell falls back to
+ordinary Idle. New work (including a fresh `sessionStart`) supersedes a pending
+completion. Status colors use one shared, theme-aware palette for both the tray
+cell and the billboard badge: Done = green, Working = cyan, Blocked = caution
+yellow, Idle/Unknown = neutral gray.
 
 Hook `timestamp` (ISO timestamp or Unix milliseconds) orders each source.
 Without it, the bridge's `ReceivedAt` is used. Duplicate/older status and
@@ -340,7 +349,7 @@ project name is short; long project names ellipsize. The second row spans the
 cell and shows the session title with ellipsis. Large status icons use the
 same theme-aware color policy as Medium status text: Idle is a hollow circle,
 Working is an active WinUI progress ring, Blocked is a circle containing `!`,
-and Unknown is a circle containing `?`. In High Contrast, status visuals use
+and Unknown is a circle containing `?`; Done is a circle containing `✓`. In High Contrast, status visuals use
 the system window-text brush. The host's tooltip callback exposes full
 name/cwd. The three client icons deploy with the module and resolve with
 `ModuleAssets`, never from developer installation/download paths.
