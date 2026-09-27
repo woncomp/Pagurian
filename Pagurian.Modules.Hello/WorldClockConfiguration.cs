@@ -48,23 +48,37 @@ class WorldClockConfiguration : ShellConfiguration
         // built-in filter, so we drive Suggestions from the typed text.
         var (query, setQuery) = UseState("");
         var trimmed = query.Trim();
-        var suggestions = (trimmed.Length == 0
+
+        // Once a city is picked the box text equals its display text; treat
+        // that as "no query" so the list shows all cities again instead of
+        // filtering on the "Name — UTC±HH:MM" string.
+        var isShowingSelection = selectedText is not null &&
+                                 trimmed.Equals(selectedText, StringComparison.Ordinal);
+        var effectiveQuery = isShowingSelection ? "" : trimmed;
+
+        var suggestions = (effectiveQuery.Length == 0
                 ? cities
                 : cities.Where(c => c.Name.Contains(
-                    trimmed, StringComparison.OrdinalIgnoreCase)))
+                    effectiveQuery, StringComparison.OrdinalIgnoreCase)))
             .Take(MaxSuggestions)
             .Select(DisplayText)
             .ToArray();
         // Keep the list open while typing a fresh query, but not once a city
         // is selected (its display text then fills the box).
-        var listOpen = trimmed.Length > 0 && trimmed != selectedText;
+        var listOpen = !isShowingSelection && effectiveQuery.Length > 0;
 
         // REACTOR_A11Y_003: the label is set via the fluent .Header("City")
         // below; the analyzer only recognizes a `header:` factory argument,
         // which this factory does not accept.
 #pragma warning disable REACTOR_A11Y_003
+        // While the user is typing (query diverged from the selection) the
+        // box must reflect the typed text, not the selected city — otherwise
+        // every keystroke is overwritten by the controlled selectedText value.
+        var boxText = isShowingSelection
+            ? selectedText ?? Optional<string>.Unset
+            : trimmed;
         var cityPicker = AutoSuggestBox(
-                text: selectedText ?? Optional<string>.Unset,
+                text: boxText,
                 onTextChanged: text => setQuery(text ?? ""))
             with
             {
