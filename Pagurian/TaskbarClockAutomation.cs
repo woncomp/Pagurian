@@ -190,6 +190,11 @@ internal static class TaskbarClockAutomation
             Property(element, ClassNameProperty) is string actual &&
             string.Equals(actual, className, StringComparison.Ordinal);
 
+        private bool HasClockButtonClass(IUIAutomationElement element) =>
+            Property(element, ClassNameProperty) is string actual &&
+            (actual is "SystemTray.OmniButton" or "SystemTray.OmniButtonLeft" or "SystemTray.OmniButtonRight" ||
+             actual.StartsWith("SystemTray.OmniButton", StringComparison.Ordinal));
+
         private bool HasType(IUIAutomationElement element, int type) =>
             Property(element, ControlTypeProperty) is int actual && actual == type;
 
@@ -284,7 +289,7 @@ internal static class TaskbarClockAutomation
                 return new(null, _missingReason);
 
             if (HasId(element, "SystemTrayIcon") &&
-                HasClass(element, "SystemTray.OmniButton") && HasType(element, ButtonControlType))
+                HasClockButtonClass(element) && HasType(element, ButtonControlType))
             {
                 if (!Visible(element))
                     _missingReason = "uia-clock-offscreen";
