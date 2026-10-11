@@ -321,10 +321,8 @@ sealed class Harness
                     ((SolidColorBrush)greenFill.Background).Color == UsageTint.ColorFor(6, true) &&
                     ((SolidColorBrush)redFill.Background).Color == UsageTint.ColorFor(-6, true),
                     "bar heights or 5%/10% color endpoints are wrong");
-                var symbols = Descendants<XamlText>(root).Select(t => t.Text).ToArray();
-                Require(new[] { "☀️", "🌙", "♂️", "☿️", "♃", "♀️", "♄" }
-                        .All(symbols.Contains) &&
-                    Descendants<XamlText>(root).Any(t => t.Text == "Sep 1") &&
+                CheckWeekdayIcons(root, dark: true, highContrast: false);
+                Require(Descendants<XamlText>(root).Any(t => t.Text == "Sep 1") &&
                     !texts.Any(t => t.Contains("Color: 0%")),
                     "weekday symbols/date markers or chart-only presentation missing");
                 var marker = Descendants<XamlText>(root).Single(t => t.Text == "Sep 1");
@@ -529,9 +527,11 @@ sealed class Harness
                 Dark = false; Theme.Set(false); Changed?.Invoke();
             });
             CaptureStep("02-light-saved");
+            CaptureStep("02c-light-history-billboard", billboard: true);
             Step(() =>
             {
                 CheckCalendar(); CheckBalance();
+                CheckWeekdayIcons(_billboardWindow.NativeWindow.Content, dark: false, highContrast: false);
                 var missing = HistoryBar(new(2026, 9, 5));
                 var zero = HistoryBar(new(2026, 9, 6));
                 Require(missing.Background is SolidColorBrush { Color: var missingColor } &&
@@ -551,6 +551,7 @@ sealed class Harness
                 Require(_openTip!.IsOpen && ReferenceEquals(_openTip, UsageBalanceTooltip.For((Microsoft.UI.Xaml.Controls.Border)Balance).Tip),
                     "theme reconciliation replaced/closed live tooltip");
                 CheckTooltipPalette(true, false);
+                CheckWeekdayIcons(_billboardWindow.NativeWindow.Content, dark: true, highContrast: false);
                 Theme.Set(false);
             });
             Step(() => { CheckBalance(); CheckTooltipPalette(false, false); CloseTip(); });
@@ -607,6 +608,7 @@ sealed class Harness
                 Require(ReferenceEquals(HistoryBar(Root, new(2026, 9, 5)).Background,
                     UsageTint.SystemBrush("SystemColorWindowTextColorBrush")),
                     "HC missing-day placeholder must use the system foreground");
+                CheckWeekdayIcons(Root, Dark, highContrast: true);
                 CheckAxis(100, 100);
             });
             CaptureStep("06b-system-color-tooltip", tooltip: true);
@@ -1323,8 +1325,7 @@ sealed class Harness
             Require(hover.Tip.IsOpen, "history tooltip closed on an internal boundary");
         }
         _historyOwner.UpdateLayout();
-        var weekday = Descendants<XamlText>(
-            ((Microsoft.UI.Xaml.Controls.Grid)_historyOwner.Child).Children[0]).Last();
+        var weekday = Descendants<UsageHistoryWeekdayIcon>(_historyOwner).Single();
         var weekdayBottom = weekday.TransformToVisual(_historyOwner)
             .TransformPoint(new Point(0, weekday.ActualHeight)).Y;
         var markerTop = Descendants<UsageHistoryDateMarker>(_historyOwner).Single()
@@ -1335,7 +1336,7 @@ sealed class Harness
             _historyOutline.ActualWidth == width &&
             Math.Abs(outlineBottom - weekdayBottom) < 1 &&
             Math.Abs(markerTop - outlineBottom - 3) < 1,
-            "history outline must end below the emoji, exclude the date marker and preserve column geometry");
+            "history outline must end below the weekday icon, exclude the date marker and preserve column geometry");
     }
     private void CheckLoadedHistoryHover()
     {
@@ -1403,6 +1404,14 @@ sealed class Harness
         var title = Descendants<XamlText>(root).Single(text => text.Text == "History");
         var labelTopInHeader = marker.Label.TransformToVisual(
             (UIElement)VisualTreeHelper.GetParent(title)).TransformPoint(new()).Y;
+        DependencyObject? card = marker;
+        while (card is not null &&
+            card is not Microsoft.UI.Xaml.Controls.Border { CornerRadius.TopLeft: 8, Padding.Top: 12 })
+            card = VisualTreeHelper.GetParent(card);
+        if (card is not Microsoft.UI.Xaml.Controls.Border historyCard)
+            throw new InvalidOperationException("History card not found for Today padding check");
+        var labelTopInCard = marker.Label.TransformToVisual(historyCard).TransformPoint(new()).Y;
+        var titleTopInCard = title.TransformToVisual(historyCard).TransformPoint(new()).Y;
         Require(ReferenceEquals(VisualTreeHelper.GetParent(title), VisualTreeHelper.GetParent(marker)) &&
             ReferenceEquals(VisualTreeHelper.GetParent(chart), VisualTreeHelper.GetParent(arrow)) &&
             !Descendants<UsageHistoryTodayMarker>(day).Any() &&
@@ -1414,12 +1423,15 @@ sealed class Harness
             Math.Abs(arrow.Stem.ActualHeight - 9) < .1 &&
             Math.Abs(arrow.Tip.ActualHeight - 5) < .1 &&
             Math.Abs(tipCenter - dayCenter) < 1 &&
-            labelTopInHeader >= -16 && labelTopInHeader <= 0 &&
+            labelTopInHeader >= 0 && labelTopInHeader <= 16 &&
+            labelTopInCard >= 11.5 &&
+            titleTopInCard >= 12 && titleTopInCard <= 24 &&
             labelLeft >= -.1 && labelLeft + marker.Label.ActualWidth <= chart.ViewportWidth + .1,
-            $"Today arrow missed the chart's top or entered the hover column: " +
+            $"Today label lacks top padding, or arrow missed the chart or entered the hover column: " +
             $"stem={stemTop}, tip={tipBottom}, plot={plotTop}, " +
             $"tipCenter={tipCenter}, dayCenter={dayCenter}, " +
-            $"labelLeft={labelLeft}, viewport={chart.ViewportWidth}, chartHeight={chart.ExtentHeight}");
+            $"labelTopInCard={labelTopInCard}, titleTopInCard={titleTopInCard}, labelLeft={labelLeft}, " +
+            $"viewport={chart.ViewportWidth}, chartHeight={chart.ExtentHeight}");
     }
 
     private void CheckHistoryPagerPlacement(DependencyObject root, ScrollViewer chart)
@@ -1438,17 +1450,21 @@ sealed class Harness
             .TransformPoint(new Point(header.ActualWidth / 2, 0)).X;
         var headingCenter = heading.TransformToVisual(visualRoot)
             .TransformPoint(new Point(0, heading.ActualHeight / 2)).Y;
+        var arrowCenter = chartTop -
+            (UsageHistoryTodayArrow.StemHeight + UsageHistoryTodayArrow.TipHeight) / 2;
         Require(ReferenceEquals(VisualTreeHelper.GetParent(pager), header) &&
-            Math.Abs(pagerTop - headerTop) < 1 &&
             header.ActualHeight <= 28 &&
-            Math.Abs(pagerCenter - headingCenter) < 5 &&
-            chartTop - headerTop <= 36 &&
+            Math.Abs(headingCenter - headerTop - header.ActualHeight / 2) < 5 &&
+            Math.Abs(pagerCenter - arrowCenter) < 7 &&
+            pagerTop + pager.ActualHeight <= chartTop + 1 &&
+            Math.Abs(chartTop - headerTop - header.ActualHeight -
+                8 - UsageHistoryTodayMarker.VerticalOffset) < 1 &&
             Math.Abs(pagerCenterX - headerCenterX) < 1 &&
             VisualTreeHelper.FindElementsInHostCoordinates(
                 new Point(pagerCenterX, pagerCenter), visualRoot).Contains(pager),
-            $"PipsPager must share History's compact title row without pushing down the chart: " +
+            $"PipsPager must sit near Today's arrow without moving the heading or chart: " +
             $"header={headerTop}, height={header.ActualHeight}, headingCenter={headingCenter}, " +
-            $"pagerTop={pagerTop}, pagerHeight={pager.ActualHeight}, chart={chartTop}, " +
+            $"pagerTop={pagerTop}, pagerHeight={pager.ActualHeight}, arrowCenter={arrowCenter}, chart={chartTop}, " +
             $"pagerX={pagerCenterX}, headerX={headerCenterX}");
     }
 
@@ -1471,6 +1487,7 @@ sealed class Harness
             AutomationProperties.GetAutomationId(s) == "UsageHistoryChartScroller");
         CheckTodayMarker(root, chart, plots);
         CheckHistoryPagerPlacement(root, chart);
+        CheckWeekdayIcons(root, dark: true, highContrast: false);
         for (var column = 0; column < plots.Length; column++)
         {
             var day = SavedA.History.Days[start + column];
@@ -1495,6 +1512,62 @@ sealed class Harness
                 $"used={day.Used}, height={bar.Height}, actual={bar.ActualHeight}, " +
                 $"visibility={bar.Visibility}, fill={fill?.Color}");
         }
+    }
+
+    private void CheckWeekdayIcons(DependencyObject root, bool dark, bool highContrast)
+    {
+        var columns = Descendants<Microsoft.UI.Xaml.Controls.Border>(root)
+            .Where(column => AutomationProperties.GetAutomationId(column).StartsWith("UsageHistory-"))
+            .ToArray();
+        string[] names = ["Sun", "Moon", "Mars", "Mercury", "Jupiter", "Venus", "Saturn"];
+        int[] figureCounts = [9, 2, 3, 4, 2, 3, 3];
+        Point[] starts = [new(16, 12), new(20.1, 14.2), new(15, 14.5), new(16, 10.5),
+            new(5.5, 5.5), new(17.5, 8.5), new(8, 3)];
+        var seen = new HashSet<DayOfWeek>();
+        var foreground = highContrast ? UsageTint.SystemBrush("SystemColorWindowTextColorBrush")
+            : UsageBalanceTooltip.ThemeBrush("TextFillColorPrimaryBrush", dark);
+        Require(columns.Length == 20, "weekday icon checks require a complete History page");
+        foreach (var column in columns)
+        {
+            var date = DateOnly.ParseExact(AutomationProperties.GetAutomationId(column)["UsageHistory-".Length..],
+                "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+            var weekday = (int)date.DayOfWeek;
+            var icon = Descendants<UsageHistoryWeekdayIcon>(column).Single();
+            var path = Descendants<Microsoft.UI.Xaml.Shapes.Path>(icon).Single();
+            var peer = FrameworkElementAutomationPeer.CreatePeerForElement(icon);
+            Require(icon.Weekday == date.DayOfWeek && !icon.IsHitTestVisible &&
+                peer is not null && peer.GetAutomationControlType() == AutomationControlType.Image &&
+                peer.GetName() == $"{date:dddd}, {names[weekday]}",
+                $"weekday icon lost its date mapping or accessible image name: {date}");
+            Require(icon.Width == 14 && icon.Height == 14 &&
+                Math.Abs(icon.ActualWidth - 14) < .1 && Math.Abs(icon.ActualHeight - 14) < .1 &&
+                icon.Content is Viewbox { Stretch: Stretch.Uniform, Child: Canvas { Width: 24, Height: 24 } } &&
+                !icon.IsTabStop && path.Fill is null &&
+                path.StrokeThickness == 2 && path.StrokeStartLineCap == PenLineCap.Round &&
+                path.StrokeEndLineCap == PenLineCap.Round && path.StrokeLineJoin == PenLineJoin.Round &&
+                (highContrast ? ReferenceEquals(path.Stroke, foreground)
+                    : path.Stroke is SolidColorBrush stroke &&
+                        foreground is SolidColorBrush expected && stroke.Color == expected.Color) &&
+                !Descendants<XamlText>(icon).Any(),
+                $"weekday icon changed the approved grid, stroke, size or theme: {date}, " +
+                $"size={icon.Width}x{icon.Height}, actual={icon.ActualWidth}x{icon.ActualHeight}, " +
+                $"stroke={(path.Stroke as SolidColorBrush)?.Color}, expected={(foreground as SolidColorBrush)?.Color}");
+            Require(path.Data is PathGeometry geometry &&
+                geometry.Figures.Count == figureCounts[weekday] &&
+                Math.Abs(geometry.Figures[0].StartPoint.X - starts[weekday].X) < .001 &&
+                Math.Abs(geometry.Figures[0].StartPoint.Y - starts[weekday].Y) < .001 &&
+                geometry.Bounds.X >= 1 && geometry.Bounds.Y >= 1 &&
+                geometry.Bounds.Right <= 23 && geometry.Bounds.Bottom <= 23,
+                $"weekday icon has the wrong glyph or clipped artwork: {date}");
+            var bar = Descendants<Microsoft.UI.Xaml.Controls.Border>(column)
+                .Single(border => border.Width == 12 && border.VerticalAlignment == VerticalAlignment.Bottom);
+            var iconCenter = icon.TransformToVisual(column).TransformPoint(new(7, 0)).X;
+            var barCenter = bar.TransformToVisual(column).TransformPoint(new(6, 0)).X;
+            Require(Math.Abs(iconCenter - barCenter) < 1,
+                $"weekday icon is not centered beneath its bar: {date}");
+            seen.Add(icon.Weekday);
+        }
+        Require(seen.Count == 7, "History page must render all seven weekday glyphs");
     }
     private IEnumerable<T> Find<T>() where T : DependencyObject => Descendants<T>(Root);
     private static IEnumerable<T> Descendants<T>(DependencyObject root) where T : DependencyObject

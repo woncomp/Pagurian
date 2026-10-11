@@ -82,11 +82,20 @@ applied to these estimates when rendering, without modifying the samples.
 Observed bars stay green through 5% of that cycle's monthly entitlement,
 then blend to red at 10% (and saturate above it); bar height also saturates
 at 10%. A cycle without a known entitlement uses 75,000 Credits for the chart.
-Each bar has a weekday celestial symbol beneath it. A short tick points to
+Each bar has a 14-DIP, single-color vector weekday symbol beneath it:
+Sun, Moon, Mars, Mercury, Jupiter, Venus and Saturn from Sunday to Saturday.
+The symbols use a shared 24-unit grid with 2-unit round strokes, not emoji
+or font glyphs. Their foreground follows the billboard theme and uses the
+system text brush in High Contrast; accessible names retain the weekday and
+celestial body. A short tick points to
 month-and-day labels (for example, `Sep 21`) on the 1st, 11th and 21st.
 On the newest page a two-line `Today` / month-and-day label occupies the
-right side of the History heading; its longer arrow points to the top of the
-chart area, independent of the day's bar height. Neither enters a day's hover
+right side of the History heading, inset from the card's top edge while the
+heading stays in place. The chart sits lower so its longer arrow still points
+to the chart top, independent of the day's bar height.
+The centered PipsPager sits beside the arrow above the chart without moving
+the History heading or the chart.
+Neither enters a day's hover
 rectangle.
 The full-height column, its weekday symbol and date label share a hover
 target with an immediate softly rounded outline covering the plot and weekday symbol,
@@ -97,8 +106,9 @@ workdays the starting total follows the same gap allocation and is marked
 estimated; days with no baseline show Unavailable. On a local day spanning a reset,
 the starting total belongs to the earliest cycle, not the sum of both counters.
 There is no separate color legend beneath the chart.
-History file errors are shown on the card and logged in `pagurian.log`;
-live Credits queries continue to work.
+History file errors and the no-history message appear below the chart at the
+bottom of the card. File errors are also logged in `pagurian.log`; live Credits
+queries continue to work.
 
 Regression checks: `tests\Verify-CopilotSessions.ps1 -Platform x64` and the
 fake-source, in-memory UI harness

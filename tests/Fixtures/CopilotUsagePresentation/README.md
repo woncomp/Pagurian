@@ -30,15 +30,21 @@ estimated cycles, zero workdays, day/reset observation, and the Metrics
 The isolated Usage billboard also exercises the final History bar chart
 with synthetic account samples: username-only title-row placement, account
 updates and missing-account behavior, card ordering, 60-day projection, three
-20-day pages, PipsPager centered on the compact History heading row
-with accessible click targets and no extra chart offset,
-weekday symbols, month/day markers with ticks, an edge-clamped two-line
-Today label in the History heading
+20-day pages, PipsPager centered near the Today arrow with accessible click
+targets while the History heading stays at the top and the chart retains its
+16-DIP offset,
+all seven native vector weekday symbols (Sunday-first date mapping, accessible
+image names, 24-unit geometry, round strokes, 14-DIP centered placement,
+theme changes and system-color High Contrast strokes after repeated paging),
+month/day markers with ticks, an edge-clamped two-line
+Today label in the History heading with a 12-DIP card-top inset while the
+History heading stays at its original height
 and a 14-DIP arrow touching the plot top without changing chart geometry,
 rounded full-column hover targets and multiline tooltips, and visible
 neutral no-sample placeholders and green zero-use bars after repeated paging,
 bar heights, observed/today values, a yellow `?` estimate, hover text, and
-green-through-5% / 10% red thresholds. High Contrast probes verify a
+green-through-5% / 10% red thresholds. History file errors and no-history
+messages appear beneath the chart. High Contrast probes verify a
 system-color fill with the visible estimate marker. Separate temporary-directory storage
 and reset/gap projection checks run in `tests\Verify-CopilotSessions.ps1`.
 History hover probes exercise synchronous outline/tooltip opening, top placement,

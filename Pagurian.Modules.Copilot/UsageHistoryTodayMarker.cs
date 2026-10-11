@@ -27,6 +27,8 @@ internal sealed record UsageHistoryTodayMarkerElement : Element
 
 internal sealed class UsageHistoryTodayMarker : Panel
 {
+    internal const double VerticalOffset = 16;
+
     private readonly TextBlock _label = new()
     {
         TextAlignment = TextAlignment.Center,
@@ -59,7 +61,7 @@ internal sealed class UsageHistoryTodayMarker : Panel
     protected override Size ArrangeOverride(Size finalSize)
     {
         _label.Arrange(new Rect(finalSize.Width - _label.DesiredSize.Width,
-            finalSize.Height - _label.DesiredSize.Height - 8,
+            finalSize.Height - _label.DesiredSize.Height - 8 + VerticalOffset,
             _label.DesiredSize.Width, _label.DesiredSize.Height));
         return finalSize;
     }

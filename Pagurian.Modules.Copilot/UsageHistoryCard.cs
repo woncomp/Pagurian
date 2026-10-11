@@ -38,10 +38,10 @@ internal static class UsageHistoryPalette
 internal static class UsageHistoryCard
 {
     private static readonly CultureInfo English = CultureInfo.GetCultureInfo("en-US");
-    private static readonly string[] Celestial = ["☀️", "🌙", "♂️", "☿️", "♃", "♀️", "♄"];
     private static readonly string[] CelestialNames =
         ["Sun", "Moon", "Mars", "Mercury", "Jupiter", "Venus", "Saturn"];
     private const double PlotHeight = 96;
+    private const double PagerVerticalOffset = 24;
 
     internal static Element Render(
         CopilotUsageHistoryProjection history, bool dark, bool highContrast,
@@ -57,8 +57,8 @@ internal static class UsageHistoryCard
             columns.Add(Border((Grid([GridSize.Star()], [GridSize.Auto, GridSize.Auto],
                     VStack(3,
                         Plot(day, dark, highContrast),
-                        Caption(Celestial[weekday])
-                            .TextAlignment(TextAlignment.Center)
+                        new UsageHistoryWeekdayIconElement()
+                            .Set(icon => icon.Update(day.Date.DayOfWeek, dark, highContrast))
                             .AutomationName($"{day.Date:dddd}, {CelestialNames[weekday]}")),
                     new UsageHistoryDateMarkerElement()
                         .Set(marker => marker.Update(
@@ -95,21 +95,14 @@ internal static class UsageHistoryCard
                     .NextButtonVisibility(PipsPagerButtonVisibility.Visible)
                     .AutomationId("UsageHistoryPager")
                     .HorizontalAlignment(HorizontalAlignment.Center)
-                    .VAlign(VerticalAlignment.Bottom),
+                    .VAlign(VerticalAlignment.Bottom)
+                    .Set(pager => pager.RenderTransform = new TranslateTransform { Y = PagerVerticalOffset }),
                 page == CopilotUsageHistoryCalculator.PageCount - 1
                     ? new UsageHistoryTodayMarkerElement()
                         .Set(marker => marker.Update(
                             history.Today.ToString("MMM d", English), dark, highContrast))
                     : null)
                 .HorizontalAlignment(HorizontalAlignment.Stretch),
-            history.Error is null ? null
-                : Body(history.Error)
-                    .Foreground(ReactorTheme.SystemCritical)
-                    .TextWrapping(TextWrapping.WrapWholeWords),
-            history.Error is null && history.Days.All(day => day.Used is null)
-                ? Caption("No usage history yet. Samples are recorded when Credits refresh.")
-                    .TextWrapping(TextWrapping.WrapWholeWords)
-                : null,
             Grid([GridSize.Star()], [GridSize.Auto],
                 ScrollViewer(chart)
                     .AutomationId("UsageHistoryChartScroller")
@@ -123,7 +116,16 @@ internal static class UsageHistoryCard
                     ? new UsageHistoryTodayArrowElement()
                         .Set(arrow => arrow.Update(
                             CopilotUsageHistoryCalculator.DaysPerPage, dark, highContrast))
-                    : null));
+                    : null)
+                .Margin(0, UsageHistoryTodayMarker.VerticalOffset, 0, 0),
+            history.Error is null ? null
+                : Body(history.Error)
+                    .Foreground(ReactorTheme.SystemCritical)
+                    .TextWrapping(TextWrapping.WrapWholeWords),
+            history.Error is null && history.Days.All(day => day.Used is null)
+                ? Caption("No usage history yet. Samples are recorded when Credits refresh.")
+                    .TextWrapping(TextWrapping.WrapWholeWords)
+                : null);
     }
 
     private static Element Plot(
