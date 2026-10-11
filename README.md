@@ -56,6 +56,10 @@ The top taskbar gauge and bottom percentage still mean Credits used.
 
 ## Copilot Usage history
 
+The Usage billboard shows the signed-in username alone at the far right of
+its title row, rather than in a separate Account card. No username placeholder
+appears before the account is known.
+
 Each successful authenticated premium-interactions quota read records that
 local day's first and latest used-request counts, together with its reset cycle
 and entitlement.
@@ -64,7 +68,8 @@ The versioned JSON history is kept per GitHub host/account under
 of `config.json`. Older samples stay in the file; the billboard's final
 **History** card shows the last 60 days across three 20-day bar-chart pages,
 opening on the most recent page with today on the right. A WinUI PipsPager
-provides the arrows and three page dots beneath the chart. It uses
+provides the arrows and three page dots centered on the same compact row as
+the History heading, without reserving extra height above the chart. It uses
 the first sample of the next consecutive day to calculate a completed day's
 usage, and today's latest sample (or the last sample before a missing day)
 otherwise. Missing workdays between two observations in the *same* reset
@@ -79,8 +84,12 @@ then blend to red at 10% (and saturate above it); bar height also saturates
 at 10%. A cycle without a known entitlement uses 75,000 Credits for the chart.
 Each bar has a weekday celestial symbol beneath it. A short tick points to
 month-and-day labels (for example, `Sep 21`) on the 1st, 11th and 21st.
+On the newest page a two-line `Today` / month-and-day label occupies the
+right side of the History heading; its longer arrow points to the top of the
+chart area, independent of the day's bar height. Neither enters a day's hover
+rectangle.
 The full-height column, its weekday symbol and date label share a hover
-target with an immediate rectangular outline covering the plot and weekday symbol,
+target with an immediate softly rounded outline covering the plot and weekday symbol,
 but not the date label below. Its tooltip opens above the column
 without a dwell delay and gives the full date, weekday, observed or estimated use
 (including zero), and total used Credits at the day's first sample. For estimated

@@ -28,9 +28,14 @@ rows and temporal states (including disabled dates), shared draft tint/saturatio
 estimated cycles, zero workdays, day/reset observation, and the Metrics
 12-DIP-label baseline in a 48-DIP cell.
 The isolated Usage billboard also exercises the final History bar chart
-with synthetic account samples: card ordering, 60-day projection, three
-20-day pages, native PipsPager navigation, weekday symbols, month/day markers
-with ticks, full-column hover targets and multiline tooltips, and visible
+with synthetic account samples: username-only title-row placement, account
+updates and missing-account behavior, card ordering, 60-day projection, three
+20-day pages, PipsPager centered on the compact History heading row
+with accessible click targets and no extra chart offset,
+weekday symbols, month/day markers with ticks, an edge-clamped two-line
+Today label in the History heading
+and a 14-DIP arrow touching the plot top without changing chart geometry,
+rounded full-column hover targets and multiline tooltips, and visible
 neutral no-sample placeholders and green zero-use bars after repeated paging,
 bar heights, observed/today values, a yellow `?` estimate, hover text, and
 green-through-5% / 10% red thresholds. High Contrast probes verify a

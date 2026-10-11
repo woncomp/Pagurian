@@ -66,7 +66,7 @@ internal static class UsageHistoryCard
                                 ? day.Date.ToString("MMM d", English) : "",
                             columnIndex, dark, highContrast))
                         .Grid(row: 1),
-                    Border(null)) with { RowSpacing = 3 })
+                    Border(null).CornerRadius(3)) with { RowSpacing = 3 })
                     .Set(content => content.IsHitTestVisible = false))
                     .Set(owner => UsageHistoryTooltip.Attach(owner, tooltip, dark, highContrast))
 #pragma warning disable REACTOR_THEME_004 // Transparent full-height date hover target.
@@ -85,7 +85,23 @@ internal static class UsageHistoryCard
             [GridSize.Auto], columns.ToArray());
 
         return VStack(8,
-            BodyStrong("History").HeadingLevel(AutomationHeadingLevel.Level2),
+            Grid([GridSize.Star()], [GridSize.Star()],
+                BodyStrong("History")
+                    .HeadingLevel(AutomationHeadingLevel.Level2)
+                    .VAlign(VerticalAlignment.Top),
+                PipsPager(CopilotUsageHistoryCalculator.PageCount, page, setPage)
+                    .MaxVisiblePips(CopilotUsageHistoryCalculator.PageCount)
+                    .PreviousButtonVisibility(PipsPagerButtonVisibility.Visible)
+                    .NextButtonVisibility(PipsPagerButtonVisibility.Visible)
+                    .AutomationId("UsageHistoryPager")
+                    .HorizontalAlignment(HorizontalAlignment.Center)
+                    .VAlign(VerticalAlignment.Bottom),
+                page == CopilotUsageHistoryCalculator.PageCount - 1
+                    ? new UsageHistoryTodayMarkerElement()
+                        .Set(marker => marker.Update(
+                            history.Today.ToString("MMM d", English), dark, highContrast))
+                    : null)
+                .HorizontalAlignment(HorizontalAlignment.Stretch),
             history.Error is null ? null
                 : Body(history.Error)
                     .Foreground(ReactorTheme.SystemCritical)
@@ -94,20 +110,20 @@ internal static class UsageHistoryCard
                 ? Caption("No usage history yet. Samples are recorded when Credits refresh.")
                     .TextWrapping(TextWrapping.WrapWholeWords)
                 : null,
-            ScrollViewer(chart)
-                .AutomationId("UsageHistoryChartScroller")
-                .HorizontalContentAlignment(HorizontalAlignment.Stretch)
-                .Set(scroll =>
-                {
-                    scroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Auto;
-                    scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Disabled;
-                }),
-            PipsPager(CopilotUsageHistoryCalculator.PageCount, page, setPage)
-                .MaxVisiblePips(CopilotUsageHistoryCalculator.PageCount)
-                .PreviousButtonVisibility(PipsPagerButtonVisibility.Visible)
-                .NextButtonVisibility(PipsPagerButtonVisibility.Visible)
-                .AutomationId("UsageHistoryPager")
-                .HorizontalAlignment(HorizontalAlignment.Center));
+            Grid([GridSize.Star()], [GridSize.Auto],
+                ScrollViewer(chart)
+                    .AutomationId("UsageHistoryChartScroller")
+                    .HorizontalContentAlignment(HorizontalAlignment.Stretch)
+                    .Set(scroll =>
+                    {
+                        scroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Auto;
+                        scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Disabled;
+                    }),
+                page == CopilotUsageHistoryCalculator.PageCount - 1
+                    ? new UsageHistoryTodayArrowElement()
+                        .Set(arrow => arrow.Update(
+                            CopilotUsageHistoryCalculator.DaysPerPage, dark, highContrast))
+                    : null));
     }
 
     private static Element Plot(

@@ -269,6 +269,7 @@ sealed class Harness
                     texts.Count(t => t == "History") == 1 &&
                     Array.IndexOf(texts, "History") > Array.IndexOf(texts, "Used Percentage"),
                     "billboard titles/card order or duplicate row");
+                CheckUsageBillboardHeader("fixture-account");
                 var plots = Descendants<Microsoft.UI.Xaml.Controls.Border>(root)
                     .Where(t => AutomationProperties.GetAutomationId(t).StartsWith("UsageHistory-"))
                     .ToArray();
@@ -349,11 +350,31 @@ sealed class Harness
                     AutomationProperties.GetAutomationId(s) == "UsageHistoryChartScroller");
                 Require(chart.ScrollableWidth < 1,
                     $"20 bars do not fit the billboard width: extent={chart.ExtentWidth}, viewport={chart.ViewportWidth}, overflow={chart.ScrollableWidth}");
+                CheckTodayMarker(root, chart, plots);
+                CheckHistoryPagerPlacement(root, chart);
                 CheckHistoryPage(40, 2);
                 var scroll = Descendants<ScrollViewer>(root).First();
                 scroll.ChangeView(null, scroll.ScrollableHeight, null, true);
             });
             CaptureStep("01b-production-billboard", billboard: true);
+            Step(() => _source.Publish(_source.State with
+            {
+                Account = new("another-login", "github.com", "fake"),
+            }));
+            Step(() => CheckUsageBillboardHeader("another-login"));
+            var longLogin = new string('x', 80);
+            Step(() => _source.Publish(_source.State with
+            {
+                Account = new(longLogin, "github.com", "fake"),
+            }));
+            Step(() => CheckUsageBillboardHeader(longLogin));
+            Step(() => _source.Publish(_source.State with { Account = null }));
+            Step(() => CheckUsageBillboardHeader(null));
+            Step(() => _source.Publish(_source.State with
+            {
+                Account = new("fixture-account", "github.com", "fake"),
+            }));
+            Step(() => CheckUsageBillboardHeader("fixture-account"));
             foreach (var day in new[] { 1, 5, 6, 9, 10 })
             {
                 var date = new DateOnly(2026, 9, day);
@@ -428,11 +449,35 @@ sealed class Harness
                         .Any(text => text.Text == "History fixture: file cannot be saved.") &&
                     Descendants<XamlText>(root).Any(text => text.Text == "Credits"),
                     "history file error suppressed the error card or live Credits");
+                CheckTodayMarker(root, Descendants<ScrollViewer>(root).Single(scroll =>
+                        AutomationProperties.GetAutomationId(scroll) == "UsageHistoryChartScroller"),
+                    Descendants<Microsoft.UI.Xaml.Controls.Border>(root)
+                        .Where(border => AutomationProperties.GetAutomationId(border)
+                            .StartsWith("UsageHistory-")).ToArray());
                 _source.Publish(_source.State with
                 {
                     History = _source.State.History with { Error = null },
                 });
             });
+            var sampledHistory = _source.State.History;
+            Step(() => _source.Publish(_source.State with
+            {
+                History = CopilotUsageHistoryState.Empty,
+            }));
+            Step(() =>
+            {
+                var root = _billboardWindow.NativeWindow.Content;
+                Require(Descendants<XamlText>(root).Any(text =>
+                    text.Text == "No usage history yet. Samples are recorded when Credits refresh."),
+                    "empty history message missing");
+                CheckTodayMarker(root, Descendants<ScrollViewer>(root).Single(scroll =>
+                        AutomationProperties.GetAutomationId(scroll) == "UsageHistoryChartScroller"),
+                    Descendants<Microsoft.UI.Xaml.Controls.Border>(root)
+                        .Where(border => AutomationProperties.GetAutomationId(border)
+                            .StartsWith("UsageHistory-")).ToArray());
+            });
+            Step(() => _source.Publish(_source.State with { History = sampledHistory }));
+            Step(() => CheckHistoryPage(40, 2));
             Step(() => Toggle(new(2026, 9, 10)));
             Step(() =>
             {
@@ -1205,6 +1250,40 @@ sealed class Harness
         var button = Find<Microsoft.UI.Xaml.Controls.Button>().Single(b => b.Content?.ToString() == content);
         ((IInvokeProvider)new ButtonAutomationPeer(button).GetPattern(PatternInterface.Invoke)).Invoke();
     }
+    private void CheckUsageBillboardHeader(string? login)
+    {
+        var root = _billboardWindow.NativeWindow.Content;
+        var texts = Descendants<XamlText>(root).ToArray();
+        Require(!texts.Any(text => text.Text is "Account" or "Username"),
+            "billboard retained the Account card or Username label");
+        var title = texts.Single(text => text.Text == "Copilot Usage");
+        var header = VisualTreeHelper.GetParent(title) as Microsoft.UI.Xaml.Controls.Grid
+            ?? throw new InvalidOperationException("billboard title row is not a grid");
+        if (login is null)
+        {
+            Require(header.Children.OfType<XamlText>().Count() == 1 &&
+                !texts.Any(text => text.Text is "fixture-account" or "another-login"),
+                "missing account left a username or placeholder in the title row");
+            return;
+        }
+
+        var username = texts.Single(text => text.Text == login);
+        var right = username.TransformToVisual(header)
+            .TransformPoint(new Point(username.ActualWidth, 0)).X;
+        var left = username.TransformToVisual(header).TransformPoint(new()).X;
+        Require(ReferenceEquals(VisualTreeHelper.GetParent(username), header) &&
+            username.TextAlignment == TextAlignment.Right &&
+            Math.Abs(right - header.ActualWidth) < 1.5 &&
+            left >= title.ActualWidth + 10 &&
+            username.ActualWidth <= 200,
+            $"username must be the sole right-aligned value in the title row: " +
+            $"parent={ReferenceEquals(VisualTreeHelper.GetParent(username), header)}, " +
+            $"alignment={username.TextAlignment}, left={left}, titleWidth={title.ActualWidth}, " +
+            $"right={right}, headerWidth={header.ActualWidth}, " +
+            $"horizontal={username.HorizontalAlignment}, column={Microsoft.UI.Xaml.Controls.Grid.GetColumn(username)}, " +
+            $"columns={string.Join(',', header.ColumnDefinitions.Select(column => column.ActualWidth))}");
+    }
+
     private PipsPager HistoryPager => Descendants<PipsPager>(_billboardWindow.NativeWindow.Content)
         .Single(p => AutomationProperties.GetAutomationId(p) == "UsageHistoryPager");
     private static string HistoryTipText(Microsoft.UI.Xaml.Controls.Border owner) =>
@@ -1221,6 +1300,7 @@ sealed class Harness
         _historyOpenEvents = 0;
         hover.Tip.Opened += (_, _) => _historyOpenEvents++;
         Require(!hover.Tip.IsOpen && _historyOutline.BorderBrush is null &&
+            _historyOutline.CornerRadius.TopLeft == 3 &&
             ToolTipService.GetToolTip(_historyOwner) is null &&
             AutomationProperties.GetHelpText(_historyOwner) == HistoryTipText(_historyOwner),
             "history column retained hover state or lacked accessible tooltip text");
@@ -1293,6 +1373,85 @@ sealed class Harness
             .Single(b => b.Width == 12 && b.VerticalAlignment == VerticalAlignment.Bottom);
     }
     private void SelectHistoryPage(int index) => HistoryPager.SelectedPageIndex = index;
+    private void CheckTodayMarker(DependencyObject root, ScrollViewer chart,
+        Microsoft.UI.Xaml.Controls.Border[] plots)
+    {
+        var markers = Descendants<UsageHistoryTodayMarker>(root).ToArray();
+        var arrows = Descendants<UsageHistoryTodayArrow>(root).ToArray();
+        if (HistoryPager.SelectedPageIndex != CopilotUsageHistoryCalculator.PageCount - 1)
+        {
+            Require(markers.Length == 0 && arrows.Length == 0,
+                "Today label or arrow appears on an earlier history page");
+            return;
+        }
+        Require(markers.Length == 1 && arrows.Length == 1,
+            "latest history page must have exactly one Today label and arrow");
+        var marker = markers[0];
+        var arrow = arrows[0];
+        var day = plots[^1];
+        var plot = Descendants<Microsoft.UI.Xaml.Controls.Border>(day)
+            .Single(border => border.Height == 96 && double.IsNaN(border.Width));
+        var tipBottom = arrow.Tip.TransformToVisual(chart)
+            .TransformPoint(new Point(0, arrow.Tip.ActualHeight)).Y;
+        var stemTop = arrow.Stem.TransformToVisual(chart).TransformPoint(new()).Y;
+        var plotTop = plot.TransformToVisual(chart).TransformPoint(new()).Y;
+        var dayCenter = day.TransformToVisual(chart).TransformPoint(new()).X +
+            day.ActualWidth / 2;
+        var tipCenter = arrow.Tip.TransformToVisual(chart)
+            .TransformPoint(new Point(arrow.Tip.ActualWidth / 2, 0)).X;
+        var labelLeft = marker.Label.TransformToVisual(chart).TransformPoint(new()).X;
+        var title = Descendants<XamlText>(root).Single(text => text.Text == "History");
+        var labelTopInHeader = marker.Label.TransformToVisual(
+            (UIElement)VisualTreeHelper.GetParent(title)).TransformPoint(new()).Y;
+        Require(ReferenceEquals(VisualTreeHelper.GetParent(title), VisualTreeHelper.GetParent(marker)) &&
+            ReferenceEquals(VisualTreeHelper.GetParent(chart), VisualTreeHelper.GetParent(arrow)) &&
+            !Descendants<UsageHistoryTodayMarker>(day).Any() &&
+            !Descendants<UsageHistoryTodayArrow>(day).Any() &&
+            marker.Label.Text == $"Today\n{SavedA.History.Today.ToString("MMM d", System.Globalization.CultureInfo.GetCultureInfo("en-US"))}" &&
+            chart.ExtentHeight < 150 &&
+            Math.Abs(tipBottom - plotTop) < 1 &&
+            Math.Abs(tipBottom - stemTop - 14) < 1 &&
+            Math.Abs(arrow.Stem.ActualHeight - 9) < .1 &&
+            Math.Abs(arrow.Tip.ActualHeight - 5) < .1 &&
+            Math.Abs(tipCenter - dayCenter) < 1 &&
+            labelTopInHeader >= -16 && labelTopInHeader <= 0 &&
+            labelLeft >= -.1 && labelLeft + marker.Label.ActualWidth <= chart.ViewportWidth + .1,
+            $"Today arrow missed the chart's top or entered the hover column: " +
+            $"stem={stemTop}, tip={tipBottom}, plot={plotTop}, " +
+            $"tipCenter={tipCenter}, dayCenter={dayCenter}, " +
+            $"labelLeft={labelLeft}, viewport={chart.ViewportWidth}, chartHeight={chart.ExtentHeight}");
+    }
+
+    private void CheckHistoryPagerPlacement(DependencyObject root, ScrollViewer chart)
+    {
+        var visualRoot = (UIElement)root;
+        var pager = HistoryPager;
+        var heading = Descendants<XamlText>(root).Single(text => text.Text == "History");
+        var header = (FrameworkElement)VisualTreeHelper.GetParent(heading);
+        var headerTop = header.TransformToVisual(visualRoot).TransformPoint(new()).Y;
+        var chartTop = chart.TransformToVisual(visualRoot).TransformPoint(new()).Y;
+        var pagerTop = pager.TransformToVisual(visualRoot).TransformPoint(new()).Y;
+        var pagerCenter = pagerTop + pager.ActualHeight / 2;
+        var pagerCenterX = pager.TransformToVisual(visualRoot)
+            .TransformPoint(new Point(pager.ActualWidth / 2, 0)).X;
+        var headerCenterX = header.TransformToVisual(visualRoot)
+            .TransformPoint(new Point(header.ActualWidth / 2, 0)).X;
+        var headingCenter = heading.TransformToVisual(visualRoot)
+            .TransformPoint(new Point(0, heading.ActualHeight / 2)).Y;
+        Require(ReferenceEquals(VisualTreeHelper.GetParent(pager), header) &&
+            Math.Abs(pagerTop - headerTop) < 1 &&
+            header.ActualHeight <= 28 &&
+            Math.Abs(pagerCenter - headingCenter) < 5 &&
+            chartTop - headerTop <= 36 &&
+            Math.Abs(pagerCenterX - headerCenterX) < 1 &&
+            VisualTreeHelper.FindElementsInHostCoordinates(
+                new Point(pagerCenterX, pagerCenter), visualRoot).Contains(pager),
+            $"PipsPager must share History's compact title row without pushing down the chart: " +
+            $"header={headerTop}, height={header.ActualHeight}, headingCenter={headingCenter}, " +
+            $"pagerTop={pagerTop}, pagerHeight={pager.ActualHeight}, chart={chartTop}, " +
+            $"pagerX={pagerCenterX}, headerX={headerCenterX}");
+    }
+
     private void CheckHistoryPage(int start, int selectedIndex)
     {
         var root = _billboardWindow.NativeWindow.Content;
@@ -1308,6 +1467,10 @@ sealed class Harness
         Require(HistoryPager.NumberOfPages == 3 &&
             HistoryPager.SelectedPageIndex == selectedIndex,
             "native PipsPager did not follow history navigation");
+        var chart = Descendants<ScrollViewer>(root).Single(s =>
+            AutomationProperties.GetAutomationId(s) == "UsageHistoryChartScroller");
+        CheckTodayMarker(root, chart, plots);
+        CheckHistoryPagerPlacement(root, chart);
         for (var column = 0; column < plots.Length; column++)
         {
             var day = SavedA.History.Days[start + column];

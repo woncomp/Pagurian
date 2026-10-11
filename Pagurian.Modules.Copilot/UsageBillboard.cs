@@ -58,7 +58,6 @@ class UsageBillboard : Billboard
             ShouldShowStatusCard(state)
                 ? StatusCard(state, highContrast)
                 : null,
-            AccountCard(state.Account, highContrast),
             PremiumInteractionsCard(usage.PremiumInteractions, highContrast),
             Component<UsagePaceCard, UsagePaceCardProps>(
                 new(_service.Pace, Theme.IsDark, highContrast)),
@@ -67,8 +66,26 @@ class UsageBillboard : Billboard
                 highContrast));
 
         var content = FlexColumn(
-            Subtitle("Copilot Usage")
-                .HeadingLevel(AutomationHeadingLevel.Level1),
+            Grid(
+                [GridSize.Star(), GridSize.Auto],
+                [GridSize.Auto],
+                Subtitle("Copilot Usage")
+                    .HeadingLevel(AutomationHeadingLevel.Level1)
+                    .Grid(column: 0),
+                string.IsNullOrWhiteSpace(state.Account?.Login)
+                    ? null
+                    : Body(state.Account.Login)
+                        .Foreground(ReactorTheme.SecondaryText)
+                        .TextAlignment(TextAlignment.Right)
+                        .HorizontalAlignment(HorizontalAlignment.Right)
+                        .MaxWidth(200)
+                        .MaxLines(1)
+                        .TextTrimming(TextTrimming.CharacterEllipsis)
+                        .VAlign(VerticalAlignment.Center)
+                        .Grid(column: 1)) with
+            {
+                ColumnSpacing = 12,
+            },
             (ScrollViewer(scrollContent) with
             {
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
@@ -200,16 +217,6 @@ class UsageBillboard : Billboard
             false);
     }
 
-    private static BorderElement AccountCard(
-        CopilotUsageAccount? account,
-        bool highContrast) =>
-        MaterialCard(
-            VStack(8,
-                BodyStrong("Account")
-                    .HeadingLevel(AutomationHeadingLevel.Level2),
-                ValueRow("Username", Display(account?.Login))),
-            highContrast);
-
     private static bool ShouldShowStatusCard(CopilotUsageState state) =>
         state.Status != CopilotUsageStatus.Ready ||
         state.IsRefreshing ||
@@ -269,9 +276,6 @@ class UsageBillboard : Billboard
         {
             ColumnSpacing = 12,
         });
-
-    private static string Display(string? value) =>
-        string.IsNullOrWhiteSpace(value) ? "--" : value;
 
     private static string FormatCount(long value) =>
         value.ToString("N0", CultureInfo.CurrentCulture);
