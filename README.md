@@ -54,6 +54,43 @@ colors rather than the ordinary palette.
 At reset the comparison stays unavailable until a fresh-cycle quota arrives.
 The top taskbar gauge and bottom percentage still mean Credits used.
 
+## Copilot Usage history
+
+Each successful authenticated premium-interactions quota read records that
+local day's first and latest used-request counts, together with its reset cycle
+and entitlement.
+The versioned JSON history is kept per GitHub host/account under
+`%LOCALAPPDATA%\Pagurian\Copilot\usage-history-<account-hash>.json`, independently
+of `config.json`. Older samples stay in the file; the billboard's final
+**History** card shows the last 60 days across three 20-day bar-chart pages,
+opening on the most recent page with today on the right. A WinUI PipsPager
+provides the arrows and three page dots beneath the chart. It uses
+the first sample of the next consecutive day to calculate a completed day's
+usage, and today's latest sample (or the last sample before a missing day)
+otherwise. Missing workdays between two observations in the *same* reset
+cycle split their unobserved difference evenly; yellow `?` bars and hover
+text identify these as estimates. Missing rest days, unknown spans and
+cross-cycle gaps remain without data, shown as short neutral placeholders
+instead of green zero-use bars. Workday overrides in each shell are
+applied to these estimates when rendering, without modifying the samples.
+
+Observed bars stay green through 5% of that cycle's monthly entitlement,
+then blend to red at 10% (and saturate above it); bar height also saturates
+at 10%. A cycle without a known entitlement uses 75,000 Credits for the chart.
+Each bar has a weekday celestial symbol beneath it. A short tick points to
+month-and-day labels (for example, `Sep 21`) on the 1st, 11th and 21st.
+The full-height column, its weekday symbol and date label share a hover
+target with an immediate rectangular outline covering the plot and weekday symbol,
+but not the date label below. Its tooltip opens above the column
+without a dwell delay and gives the full date, weekday, observed or estimated use
+(including zero), and total used Credits at the day's first sample. For estimated
+workdays the starting total follows the same gap allocation and is marked
+estimated; days with no baseline show Unavailable. On a local day spanning a reset,
+the starting total belongs to the earliest cycle, not the sum of both counters.
+There is no separate color legend beneath the chart.
+History file errors are shown on the card and logged in `pagurian.log`;
+live Credits queries continue to work.
+
 Regression checks: `tests\Verify-CopilotSessions.ps1 -Platform x64` and the
 fake-source, in-memory UI harness
 `tests\Verify-CopilotUsagePresentation.ps1 -Platform x64`. See its

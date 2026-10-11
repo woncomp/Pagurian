@@ -28,6 +28,8 @@ class UsageBillboard : Billboard
     public override Element Render()
     {
         var (_, setVersion) = UseState(0);
+        var (historyPage, setHistoryPage) =
+            UseState(CopilotUsageHistoryCalculator.PageCount - 1);
         var tick = UseRef(0);
         var colorScheme = UseColorScheme();
 
@@ -59,7 +61,10 @@ class UsageBillboard : Billboard
             AccountCard(state.Account, highContrast),
             PremiumInteractionsCard(usage.PremiumInteractions, highContrast),
             Component<UsagePaceCard, UsagePaceCardProps>(
-                new(_service.Pace, Theme.IsDark, highContrast)));
+                new(_service.Pace, Theme.IsDark, highContrast)),
+            MaterialCard(UsageHistoryCard.Render(_service.History, Theme.IsDark, highContrast,
+                    historyPage, setHistoryPage),
+                highContrast));
 
         var content = FlexColumn(
             Subtitle("Copilot Usage")

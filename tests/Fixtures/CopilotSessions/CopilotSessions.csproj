@@ -21,6 +21,8 @@
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSessionTracker.cs" Link="CopilotSessionTracker.cs" />
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotSessionDirectoryReader.cs" Link="CopilotSessionDirectoryReader.cs" />
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotUsageState.cs" Link="CopilotUsageState.cs" />
+    <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotUsageHistory.cs" Link="CopilotUsageHistory.cs" />
+    <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotUsageHistoryProjection.cs" Link="CopilotUsageHistoryProjection.cs" />
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotUsageCalendar.cs" Link="CopilotUsageCalendar.cs" />
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotUsageSettings.cs" Link="CopilotUsageSettings.cs" />
     <Compile Include="..\..\..\Pagurian.Modules.Copilot\CopilotUsageModel.cs" Link="CopilotUsageModel.cs" />

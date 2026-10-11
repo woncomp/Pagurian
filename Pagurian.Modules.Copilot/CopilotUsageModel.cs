@@ -29,6 +29,7 @@ internal sealed class CopilotUsageModel : IDisposable
     // from a view could pair its new quota with our still-queued old pace.
     public CopilotUsageState State { get; private set; }
     public CopilotUsagePace Pace { get; private set; }
+    public CopilotUsageHistoryProjection History { get; private set; }
     public CopilotUsageSettings Schedule => _settings;
     public event Action? Changed;
 
@@ -45,6 +46,7 @@ internal sealed class CopilotUsageModel : IDisposable
         _settings = CopilotUsageSettings.Read(settings, warn);
         State = source.State;
         Pace = CopilotUsageCalendar.Calculate(State, _settings, _now(), _zone());
+        History = CopilotUsageHistoryCalculator.Calculate(State.History, _settings, _now(), _zone());
         _source.Changed += SourceChanged;
         ObserveClock();
         if (observeClock)
@@ -113,6 +115,7 @@ internal sealed class CopilotUsageModel : IDisposable
         if (_disposed) return;
         State = _source.State;
         Pace = CopilotUsageCalendar.Calculate(State, _settings, now, zone);
+        History = CopilotUsageHistoryCalculator.Calculate(State.History, _settings, now, zone);
         Changed?.Invoke();
         RequestFreshCycle(now);
     }

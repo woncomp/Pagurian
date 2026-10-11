@@ -2,6 +2,7 @@
 
 using System.Diagnostics;
 using System.Globalization;
+using System.Text.Json;
 using GitHub.Copilot;
 using GitHub.Copilot.Rpc;
 using Microsoft.UI.Dispatching;
@@ -24,6 +25,7 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
 
     private readonly object _sync = new();
     private readonly SemaphoreSlim _operationGate = new(1, 1);
+    private readonly CopilotUsageHistoryStore _history = new();
 
     private CancellationTokenSource? _lifetime;
     private DispatcherQueue? _dispatcher;
@@ -315,6 +317,22 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
         }
         var usage = new CopilotUsageSnapshot(
             premium is null ? null : premium with { ReadStartedAt = readStartedAt });
+        CopilotUsageHistoryState history;
+        try
+        {
+            history = premium is null
+                ? _history.Read(account)
+                : _history.Record(account, premium, DateTimeOffset.UtcNow, TimeZoneInfo.Local);
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException or JsonException)
+        {
+            _log?.Warn($"Copilot usage history unavailable ({Describe(error)}).");
+            history = CopilotUsageHistoryState.Empty with
+            {
+                Error = "Usage history could not be read or saved. Check the Pagurian log.",
+            };
+        }
 
         Publish(
             generation,
@@ -322,7 +340,8 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
                 account,
                 usage,
                 DateTimeOffset.UtcNow,
-                finishLogin));
+                finishLogin,
+                history));
     }
 
     private async Task<CopilotClient> EnsureClientAsync(

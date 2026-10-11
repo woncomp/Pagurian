@@ -27,6 +27,18 @@ stable content width on toggles/parent growth/month labels, two reserved text
 rows and temporal states (including disabled dates), shared draft tint/saturation,
 estimated cycles, zero workdays, day/reset observation, and the Metrics
 12-DIP-label baseline in a 48-DIP cell.
+The isolated Usage billboard also exercises the final History bar chart
+with synthetic account samples: card ordering, 60-day projection, three
+20-day pages, native PipsPager navigation, weekday symbols, month/day markers
+with ticks, full-column hover targets and multiline tooltips, and visible
+neutral no-sample placeholders and green zero-use bars after repeated paging,
+bar heights, observed/today values, a yellow `?` estimate, hover text, and
+green-through-5% / 10% red thresholds. High Contrast probes verify a
+system-color fill with the visible estimate marker. Separate temporary-directory storage
+and reset/gap projection checks run in `tests\Verify-CopilotSessions.ps1`.
+History hover probes exercise synchronous outline/tooltip opening, top placement,
+unchanged column geometry, first-sample and estimated starting totals, child
+traversal, exit, theme updates and disposal while a hovered page is replaced.
 
 Screenshots are written to `artifacts/copilot-usage-ui`. Normal views use
 `RenderTargetBitmap`; the isolated billboard uses a screen read of only its

@@ -57,6 +57,7 @@ var tests = new (string Name, Action Run)[]
     ("tracker stop fences queued lifecycle restoration", TrackerLifecycleStop),
     ("hook events rotate into exclusive local app-data JSONL files", HookEventLogRotation),
     ("usage normalization preserves unavailable and unlimited states", UsageFixture.Run),
+    ("usage history persists per account and separates cycles", UsageHistoryFixture.Run),
     ("local telemetry and identity detail scenarios", () => Console.WriteLine($"  {DetailsFixture.Run()} detail scenarios passed")),
     ("session presentation state scenarios", PresentationFixture.Run),
     ("App turn/archive/process generation separation", AppLifecycleFixture.Run),

@@ -112,6 +112,9 @@ sealed class DraftHost : Component
                         ? UsageCalendarView.BalanceRow(h.SavedA.Pace, h.Dark, true)
                             .AutomationId("FixtureHighContrastBalance")
                         : null,
+                    h.HighContrast
+                        ? UsageHistoryCard.Render(h.SavedA.History, h.Dark, true, 2, _ => { })
+                        : null,
                     Caption("No SDK start or credential/configuration IO.")))
                 .HorizontalContentAlignment(HorizontalAlignment.Stretch)
                 .Set(scroll => scroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled)
@@ -161,6 +164,9 @@ sealed class Harness
     private UsageBalanceTooltip? _balanceController;
     private ToolTip? _observedBalanceTip;
     private int _balanceOpenEvents, _balanceCloseEvents;
+    private UsageHistoryTooltip? _historyHover;
+    private Microsoft.UI.Xaml.Controls.Border? _historyOwner, _historyOutline;
+    private int _historyOpenEvents;
     private ResourceDictionary? _originalResources;
     private readonly string _output = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
         "..", "..", "..", "..", "..", "..", "..", "artifacts", "copilot-usage-ui"));
@@ -180,8 +186,23 @@ sealed class Harness
         try
         {
             var reset = new DateTimeOffset(2026, 10, 1, 0, 0, 0, TimeSpan.Zero);
-            _source = new(new(CopilotUsageStatus.Ready, new("fixture-account", "github.com", "fake"),
-                new(new(30, 100, false, 30.25, reset, reset, false, Now)), null, false, false, Now));
+            _source = new(new CopilotUsageState(CopilotUsageStatus.Ready,
+                new("fixture-account", "github.com", "fake"),
+                new(new(30, 100, false, 30.25, reset, reset, false, Now)), null, false, false, Now)
+            {
+                History = new([new(new DateTimeOffset(2026, 9, 1, 0, 0, 0, TimeSpan.Zero),
+                    reset, 100,
+                    [
+                        new(new(2026, 9, 6), new(2026, 9, 6, 8, 0, 0, TimeSpan.FromHours(8)), 5,
+                            new(2026, 9, 6, 8, 0, 0, TimeSpan.FromHours(8)), 5),
+                        new(new(2026, 9, 7), new(2026, 9, 7, 8, 0, 0, TimeSpan.FromHours(8)), 5,
+                            new(2026, 9, 7, 20, 0, 0, TimeSpan.FromHours(8)), 10),
+                        new(new(2026, 9, 8), new(2026, 9, 8, 8, 0, 0, TimeSpan.FromHours(8)), 15,
+                            new(2026, 9, 8, 20, 0, 0, TimeSpan.FromHours(8)), 20),
+                        new(new(2026, 9, 10), new(2026, 9, 10, 8, 0, 0, TimeSpan.FromHours(8)), 30,
+                            new(2026, 9, 10, 12, 0, 0, TimeSpan.FromHours(8)), 34),
+                    ])]),
+            });
             Saved = Draft = JsonSerializer.SerializeToElement(new { unrelated = "preserved" });
             SavedA = Model(Saved); SavedB = Model(null);
             ConfigurationSource = new((settings, _) => _draftModel = Model(settings), () => { });
@@ -244,12 +265,174 @@ sealed class Harness
                 var root = _billboardWindow.NativeWindow.Content;
                 var texts = Descendants<XamlText>(root).Select(t => t.Text).ToArray();
                 Require(texts.Contains("Copilot Usage") && texts.Contains("Credits") &&
-                    texts.Count(t => t == "Used Percentage") == 1 && !texts.Contains("Used percentage"),
+                    texts.Count(t => t == "Used Percentage") == 1 && !texts.Contains("Used percentage") &&
+                    texts.Count(t => t == "History") == 1 &&
+                    Array.IndexOf(texts, "History") > Array.IndexOf(texts, "Used Percentage"),
                     "billboard titles/card order or duplicate row");
-                var scroll = Descendants<ScrollViewer>(root).Single();
+                var plots = Descendants<Microsoft.UI.Xaml.Controls.Border>(root)
+                    .Where(t => AutomationProperties.GetAutomationId(t).StartsWith("UsageHistory-"))
+                    .ToArray();
+                Require(plots.Length == 20 &&
+                    AutomationProperties.GetAutomationId(plots[^1]) == "UsageHistory-2026-09-10" &&
+                    AutomationProperties.GetAutomationId(plots[0]) == "UsageHistory-2026-08-22",
+                    "most-recent page must contain 20 consecutive days ending with today");
+                var estimate = plots.Single(t =>
+                    AutomationProperties.GetAutomationId(t) == "UsageHistory-2026-09-09");
+                Require(AutomationProperties.GetName(estimate)
+                        .Contains("September 9, 2026 Wednesday Estimated 10.0 Credits used (?)") &&
+                    HistoryTipText(estimate) ==
+                        "September 9, 2026\nWednesday\nEstimated 10.0 Credits used (?)\nDay start: 20.0 Credits (estimated)" &&
+                    Descendants<XamlText>(estimate).Any(t => t.Text == "?") &&
+                    ((SolidColorBrush)Descendants<Microsoft.UI.Xaml.Controls.Border>(estimate)
+                        .Single(t => t.Width == 12 &&
+                            t.VerticalAlignment == VerticalAlignment.Bottom).Background).Color ==
+                    UsageHistoryPalette.Estimate(true),
+                    "estimated bar lacks weekday tooltip, marker or yellow fill");
+                Require(AutomationProperties.GetName(plots.Single(t =>
+                        AutomationProperties.GetAutomationId(t) == "UsageHistory-2026-09-10"))
+                    .Contains("4 Credits used"), "today's latest sample is not rendered");
+                var emptyDay = plots.Single(t => AutomationProperties.GetAutomationId(t) ==
+                    "UsageHistory-2026-09-05");
+                Require(emptyDay.ActualHeight >= 96 &&
+                    emptyDay.Background is SolidColorBrush { Color.A: 0 } &&
+                    HistoryTipText(emptyDay) ==
+                        "September 5, 2026\nSaturday\nNo usage data\nDay start: Unavailable" &&
+                    Descendants<XamlText>(emptyDay).All(text => ToolTipService.GetToolTip(text) is null),
+                    "empty day's whole column must share one hit target and multiline tooltip");
+                var zeroDay = plots.Single(t => AutomationProperties.GetAutomationId(t) ==
+                    "UsageHistory-2026-09-06");
+                Require(zeroDay.ActualHeight == emptyDay.ActualHeight &&
+                    HistoryTipText(zeroDay) ==
+                        "September 6, 2026\nSunday\n0 Credits used\nDay start: 5 Credits" &&
+                    Descendants<Microsoft.UI.Xaml.Controls.Border>(zeroDay)
+                        .Single(border => border.Width == 12).Height == 3,
+                    "zero usage must retain the full-height hover target");
+                var green = plots.Single(t => AutomationProperties.GetAutomationId(t) ==
+                    "UsageHistory-2026-09-08");
+                var red = plots.Single(t => AutomationProperties.GetAutomationId(t) ==
+                    "UsageHistory-2026-09-07");
+                var greenFill = Descendants<Microsoft.UI.Xaml.Controls.Border>(green).Single(t => t.Width == 12);
+                var redFill = Descendants<Microsoft.UI.Xaml.Controls.Border>(red).Single(t => t.Width == 12);
+                var todayFill = Descendants<Microsoft.UI.Xaml.Controls.Border>(plots[^1]).Single(t => t.Width == 12);
+                Require(Math.Abs(greenFill.Height - 48) < .1 &&
+                    Math.Abs(redFill.Height - 96) < .1 &&
+                    Math.Abs(todayFill.Height - 38.4) < .1 &&
+                    ((SolidColorBrush)greenFill.Background).Color == UsageTint.ColorFor(6, true) &&
+                    ((SolidColorBrush)redFill.Background).Color == UsageTint.ColorFor(-6, true),
+                    "bar heights or 5%/10% color endpoints are wrong");
+                var symbols = Descendants<XamlText>(root).Select(t => t.Text).ToArray();
+                Require(new[] { "☀️", "🌙", "♂️", "☿️", "♃", "♀️", "♄" }
+                        .All(symbols.Contains) &&
+                    Descendants<XamlText>(root).Any(t => t.Text == "Sep 1") &&
+                    !texts.Any(t => t.Contains("Color: 0%")),
+                    "weekday symbols/date markers or chart-only presentation missing");
+                var marker = Descendants<XamlText>(root).Single(t => t.Text == "Sep 1");
+                var sepFirst = plots.Single(t => AutomationProperties.GetAutomationId(t) ==
+                    "UsageHistory-2026-09-01");
+                var dateMarker = Descendants<UsageHistoryDateMarker>(sepFirst).Single();
+                var dateTick = dateMarker.Tick;
+                var labelCenter = marker.TransformToVisual(root)
+                    .TransformPoint(new Point(marker.ActualWidth / 2, 0)).X;
+                var tickCenter = dateTick.TransformToVisual(root).TransformPoint(new Point(1, 0)).X;
+                Require(ReferenceEquals(marker, dateMarker.Label) &&
+                    dateMarker.ActualWidth >= 18 && dateMarker.ActualWidth <= 20 &&
+                    ToolTipService.GetToolTip(marker) is null &&
+                    Math.Abs(labelCenter - tickCenter) < 1,
+                    $"date label and tick must align within the shared day's hover region: label={labelCenter}, tick={tickCenter}, actual width={marker.ActualWidth}, marker width={dateMarker.ActualWidth}, tooltip={ToolTipService.GetToolTip(marker)}");
+                var pager = Descendants<PipsPager>(root).Single(p =>
+                    AutomationProperties.GetAutomationId(p) == "UsageHistoryPager");
+                Require(pager.NumberOfPages == 3 && pager.SelectedPageIndex == 2 &&
+                    pager.PreviousButtonVisibility == PipsPagerButtonVisibility.Visible &&
+                    pager.NextButtonVisibility == PipsPagerButtonVisibility.Visible,
+                    "native PipsPager must open on the newest of three pages");
+                var chart = Descendants<ScrollViewer>(root).Single(s =>
+                    AutomationProperties.GetAutomationId(s) == "UsageHistoryChartScroller");
+                Require(chart.ScrollableWidth < 1,
+                    $"20 bars do not fit the billboard width: extent={chart.ExtentWidth}, viewport={chart.ViewportWidth}, overflow={chart.ScrollableWidth}");
+                CheckHistoryPage(40, 2);
+                var scroll = Descendants<ScrollViewer>(root).First();
                 scroll.ChangeView(null, scroll.ScrollableHeight, null, true);
             });
             CaptureStep("01b-production-billboard", billboard: true);
+            foreach (var day in new[] { 1, 5, 6, 9, 10 })
+            {
+                var date = new DateOnly(2026, 9, day);
+                Step(() => OpenHistoryHover(date));
+                Step(CheckLoadedHistoryHover);
+                if (day == 10) CaptureStep("01e-history-hover", billboard: true);
+                Step(() => _historyHover!.Cancel());
+            }
+            Step(() => OpenHistoryHover(new(2026, 9, 5)));
+            Step(() => SelectHistoryPage(1));
+            Step(() =>
+            {
+                Require(!_historyHover!.Tip.IsOpen && _historyHover.Tip.Content is null &&
+                    _historyHover.Tip.PlacementTarget is null,
+                    "paging did not dispose the hovered column's tooltip");
+                _historyHover.Enter(new Point(5, 5));
+                Require(!_historyHover.Tip.IsOpen, "disposed history hover reopened after paging");
+                CheckHistoryPage(20, 1);
+                Require(Descendants<XamlText>(_billboardWindow.NativeWindow.Content)
+                        .Any(text => text.Text == "Aug 11") &&
+                    Descendants<XamlText>(_billboardWindow.NativeWindow.Content)
+                        .Any(text => text.Text == "Aug 21"),
+                    "monthly 11th and 21st markers are missing");
+                _source.Publish(_source.State with { IsRefreshing = true });
+            });
+            Step(() =>
+            {
+                CheckHistoryPage(20, 1);
+                _source.Publish(_source.State with { IsRefreshing = false });
+                SelectHistoryPage(0);
+            });
+            Step(() =>
+            {
+                CheckHistoryPage(0, 0);
+                var root = _billboardWindow.NativeWindow.Content;
+                var label = Descendants<XamlText>(root).Single(text => text.Text == "Aug 1");
+                var chart = Descendants<ScrollViewer>(root).Single(scroll =>
+                    AutomationProperties.GetAutomationId(scroll) == "UsageHistoryChartScroller");
+                var left = label.TransformToVisual(chart).TransformPoint(new Point(0, 0)).X;
+                var edgeMarker = Descendants<UsageHistoryDateMarker>(root)
+                    .Single(marker => ReferenceEquals(marker.Label, label));
+                var tickCenter = edgeMarker.Tick.TransformToVisual(chart)
+                    .TransformPoint(new Point(1, 0)).X;
+                Require(left >= -.1 && left + label.ActualWidth <= chart.ViewportWidth + .1 &&
+                    left + label.ActualWidth / 2 < tickCenter,
+                    $"edge-of-page month/day label clipped outside the chart: left={left}, width={label.ActualWidth}, viewport={chart.ViewportWidth}, tick={tickCenter}, extent={chart.ExtentWidth}");
+                SelectHistoryPage(2);
+            });
+            Step(() => CheckHistoryPage(40, 2));
+            foreach (var index in new[] { 1, 2, 0, 2, 1, 0, 2 })
+            {
+                var page = index;
+                Step(() => SelectHistoryPage(page));
+                Step(() => CheckHistoryPage(page * 20, page));
+            }
+            Step(() =>
+            {
+                var date = new DateOnly(2026, 9, 9);
+                SavedA.ApplySettings(SavedA.Schedule.Toggle(date).Write(Saved));
+                Require(SavedA.History.Days.Single(day => day.Date == date).Used is null,
+                    "history gap did not follow the shell's workday setting");
+                SavedA.ApplySettings(Saved);
+                _source.Publish(_source.State with
+                {
+                    History = _source.State.History with { Error = "History fixture: file cannot be saved." },
+                });
+            });
+            Step(() =>
+            {
+                var root = _billboardWindow.NativeWindow.Content;
+                Require(Descendants<XamlText>(root)
+                        .Any(text => text.Text == "History fixture: file cannot be saved.") &&
+                    Descendants<XamlText>(root).Any(text => text.Text == "Credits"),
+                    "history file error suppressed the error card or live Credits");
+                _source.Publish(_source.State with
+                {
+                    History = _source.State.History with { Error = null },
+                });
+            });
             Step(() => Toggle(new(2026, 9, 10)));
             Step(() =>
             {
@@ -301,7 +484,18 @@ sealed class Harness
                 Dark = false; Theme.Set(false); Changed?.Invoke();
             });
             CaptureStep("02-light-saved");
-            Step(() => { CheckCalendar(); CheckBalance(); OpenBalanceTip(); });
+            Step(() =>
+            {
+                CheckCalendar(); CheckBalance();
+                var missing = HistoryBar(new(2026, 9, 5));
+                var zero = HistoryBar(new(2026, 9, 6));
+                Require(missing.Background is SolidColorBrush { Color: var missingColor } &&
+                    missingColor == UsageHistoryPalette.NoSample(false) &&
+                    zero.Background is SolidColorBrush { Color: var zeroColor } &&
+                    zeroColor == UsageHistoryPalette.ColorFor(0, false),
+                    "light theme lost the distinct missing and zero-use bars");
+                OpenBalanceTip();
+            });
             CaptureStep("02b-light-balance-tooltip", tooltip: true);
             Step(() => CloseTip());
             Step(() => CheckTint());
@@ -357,6 +551,17 @@ sealed class Harness
                 Require(((Microsoft.UI.Xaml.Controls.Border)row).BorderThickness.Left == 2 &&
                     ReferenceEquals(((Microsoft.UI.Xaml.Controls.Border)row).BorderBrush, brush),
                     "HC hover border not a reserved system-color border");
+                var hcEstimate = Find<Microsoft.UI.Xaml.Controls.Border>().Single(t =>
+                    AutomationProperties.GetAutomationId(t) == "UsageHistory-2026-09-09");
+                Require(ReferenceEquals(Descendants<Microsoft.UI.Xaml.Controls.Border>(hcEstimate)
+                        .Single(t => t.Width == 12 &&
+                            t.VerticalAlignment == VerticalAlignment.Bottom).Background,
+                    UsageTint.SystemBrush("SystemColorWindowTextColorBrush")) &&
+                    Descendants<XamlText>(hcEstimate).Any(t => t.Text == "?"),
+                    "HC history estimate relies on yellow alone");
+                Require(ReferenceEquals(HistoryBar(Root, new(2026, 9, 5)).Background,
+                    UsageTint.SystemBrush("SystemColorWindowTextColorBrush")),
+                    "HC missing-day placeholder must use the system foreground");
                 CheckAxis(100, 100);
             });
             CaptureStep("06b-system-color-tooltip", tooltip: true);
@@ -920,6 +1125,16 @@ sealed class Harness
             Require(UsageTint.ColorFor(-6, dark) == UsageTint.ColorFor(-16, dark), "debt not saturated at six");
             Require(UsageTint.ColorFor(0, dark) != UsageTint.ColorFor(1, dark), "ramp omitted first day");
             Require(UsageTint.ColorFor(1, dark) != UsageTint.ColorFor(-1, dark), "debt and surplus colors equal");
+            Require(UsageHistoryPalette.ColorFor(0, dark) == UsageTint.ColorFor(6, dark) &&
+                UsageHistoryPalette.ColorFor(2.5, dark) == UsageTint.ColorFor(6, dark),
+                "history 0-5% should stay green");
+            Require(UsageHistoryPalette.ColorFor(5, dark) == UsageTint.ColorFor(6, dark) &&
+                UsageHistoryPalette.ColorFor(10, dark) == UsageTint.ColorFor(-6, dark) &&
+                UsageHistoryPalette.ColorFor(15, dark) == UsageTint.ColorFor(-6, dark),
+                "history color thresholds must be 5% green and 10% saturated red");
+            Require(UsageHistoryPalette.ColorFor(7.5, dark) != UsageTint.ColorFor(-6, dark) &&
+                UsageHistoryPalette.ColorFor(7.5, dark) != UsageTint.ColorFor(6, dark),
+                "history 5-10% interpolation is absent");
         }
 
         Require((SavedA.Pace with { RoundedBalance = 12 }).BalanceText == "You have a surplus of 12 days’ worth of credits.", "balance label incorrectly saturated");
@@ -989,6 +1204,134 @@ sealed class Harness
     {
         var button = Find<Microsoft.UI.Xaml.Controls.Button>().Single(b => b.Content?.ToString() == content);
         ((IInvokeProvider)new ButtonAutomationPeer(button).GetPattern(PatternInterface.Invoke)).Invoke();
+    }
+    private PipsPager HistoryPager => Descendants<PipsPager>(_billboardWindow.NativeWindow.Content)
+        .Single(p => AutomationProperties.GetAutomationId(p) == "UsageHistoryPager");
+    private static string HistoryTipText(Microsoft.UI.Xaml.Controls.Border owner) =>
+        ((XamlText)UsageHistoryTooltip.For(owner).Tip.Content).Text;
+    private void OpenHistoryHover(DateOnly date)
+    {
+        var root = _billboardWindow.NativeWindow.Content;
+        _historyOwner = Descendants<Microsoft.UI.Xaml.Controls.Border>(root)
+            .Single(b => AutomationProperties.GetAutomationId(b) == $"UsageHistory-{date:yyyy-MM-dd}");
+        _historyOutline = ((Microsoft.UI.Xaml.Controls.Grid)_historyOwner.Child).Children
+            .OfType<Microsoft.UI.Xaml.Controls.Border>().Single();
+        _historyHover = UsageHistoryTooltip.For(_historyOwner);
+        var hover = _historyHover;
+        _historyOpenEvents = 0;
+        hover.Tip.Opened += (_, _) => _historyOpenEvents++;
+        Require(!hover.Tip.IsOpen && _historyOutline.BorderBrush is null &&
+            ToolTipService.GetToolTip(_historyOwner) is null &&
+            AutomationProperties.GetHelpText(_historyOwner) == HistoryTipText(_historyOwner),
+            "history column retained hover state or lacked accessible tooltip text");
+        var width = _historyOwner.ActualWidth;
+        var height = _historyOwner.ActualHeight;
+        var origin = _historyOwner.TransformToVisual(root).TransformPoint(new());
+        foreach (var y in new[] { 1d, 48, 100, height - 1 })
+        {
+            Require(VisualTreeHelper.FindElementsInHostCoordinates(
+                    new Point(origin.X + width / 2, origin.Y + y), root).Contains(_historyOwner),
+                $"history column is not hit-testable at y={y}: enabled={_historyOwner.IsHitTestVisible}");
+            hover.Enter(new Point(width / 2, y));
+            Require(hover.Tip.IsOpen && _historyOutline.BorderBrush is not null &&
+                _historyOutline.BorderThickness.Left == 1 &&
+                ReferenceEquals(hover.Tip.PlacementTarget, _historyOwner) &&
+                hover.Tip.Placement == PlacementMode.Top && !hover.Tip.IsHitTestVisible &&
+                ReferenceEquals(ToolTipService.GetToolTip(_historyOwner), hover.Tip),
+                "history plot/symbol/date did not immediately show its outline and top tooltip");
+            hover.Exit(new Point(width / 2, y));
+            Require(hover.Tip.IsOpen, "history tooltip closed on an internal boundary");
+        }
+        _historyOwner.UpdateLayout();
+        var weekday = Descendants<XamlText>(
+            ((Microsoft.UI.Xaml.Controls.Grid)_historyOwner.Child).Children[0]).Last();
+        var weekdayBottom = weekday.TransformToVisual(_historyOwner)
+            .TransformPoint(new Point(0, weekday.ActualHeight)).Y;
+        var markerTop = Descendants<UsageHistoryDateMarker>(_historyOwner).Single()
+            .TransformToVisual(_historyOwner).TransformPoint(new()).Y;
+        var outlineBottom = _historyOutline.TransformToVisual(_historyOwner)
+            .TransformPoint(new Point(0, _historyOutline.ActualHeight)).Y;
+        Require(_historyOwner.ActualWidth == width && _historyOwner.ActualHeight == height &&
+            _historyOutline.ActualWidth == width &&
+            Math.Abs(outlineBottom - weekdayBottom) < 1 &&
+            Math.Abs(markerTop - outlineBottom - 3) < 1,
+            "history outline must end below the emoji, exclude the date marker and preserve column geometry");
+    }
+    private void CheckLoadedHistoryHover()
+    {
+        var hover = _historyHover!;
+        Require(hover.Tip.IsOpen && hover.Tip.ActualHeight > 0 && _historyOpenEvents == 1,
+            "history tooltip failed to render or reopened while crossing child boundaries");
+        var bottom = hover.Tip.TransformToVisual(_historyOwner)
+            .TransformPoint(new Point(0, hover.Tip.ActualHeight)).Y;
+        Require(bottom <= 1, $"history tooltip is not above its column: bottom={bottom}");
+        var text = HistoryTipText(_historyOwner!);
+        UsageHistoryTooltip.Attach(_historyOwner!, text, false, false);
+        Require(_historyOutline!.BorderBrush is SolidColorBrush light &&
+            light.Color == ((SolidColorBrush)UsageBalanceTooltip.ThemeBrush("TextFillColorSecondaryBrush", false)).Color &&
+            hover.Tip.RequestedTheme == ElementTheme.Light,
+            "open history tooltip and outline failed to follow Light theme");
+        UsageHistoryTooltip.Attach(_historyOwner!, text, true, true);
+        Require(ReferenceEquals(_historyOutline.BorderBrush,
+                UsageTint.SystemBrush("SystemColorWindowTextColorBrush")) &&
+            _historyOutline.BorderThickness.Left == 2,
+            "history hover outline lacks High Contrast system color/thickness");
+        UsageHistoryTooltip.Attach(_historyOwner!, text, true, false);
+        hover.Exit(new Point(-1, 50));
+        Require(!hover.Tip.IsOpen && _historyOutline.BorderBrush is null &&
+            ToolTipService.GetToolTip(_historyOwner) is null,
+            "history outline or tooltip survived exiting the rectangle");
+        hover.Enter(new Point(5, 5));
+    }
+    private Microsoft.UI.Xaml.Controls.Border HistoryBar(DateOnly date) =>
+        HistoryBar(_billboardWindow.NativeWindow.Content, date);
+    private static Microsoft.UI.Xaml.Controls.Border HistoryBar(DependencyObject root, DateOnly date)
+    {
+        var day = Descendants<Microsoft.UI.Xaml.Controls.Border>(root)
+            .Single(b => AutomationProperties.GetAutomationId(b) == $"UsageHistory-{date:yyyy-MM-dd}");
+        return Descendants<Microsoft.UI.Xaml.Controls.Border>(day)
+            .Single(b => b.Width == 12 && b.VerticalAlignment == VerticalAlignment.Bottom);
+    }
+    private void SelectHistoryPage(int index) => HistoryPager.SelectedPageIndex = index;
+    private void CheckHistoryPage(int start, int selectedIndex)
+    {
+        var root = _billboardWindow.NativeWindow.Content;
+        var plots = Descendants<Microsoft.UI.Xaml.Controls.Border>(root)
+            .Where(b => AutomationProperties.GetAutomationId(b).StartsWith("UsageHistory-"))
+            .ToArray();
+        Require(plots.Length == 20 &&
+            AutomationProperties.GetAutomationId(plots[0]) ==
+                $"UsageHistory-{SavedA.History.Days[start].Date:yyyy-MM-dd}" &&
+            AutomationProperties.GetAutomationId(plots[^1]) ==
+                $"UsageHistory-{SavedA.History.Days[start + 19].Date:yyyy-MM-dd}",
+            "history page did not display its 20 consecutive dates");
+        Require(HistoryPager.NumberOfPages == 3 &&
+            HistoryPager.SelectedPageIndex == selectedIndex,
+            "native PipsPager did not follow history navigation");
+        for (var column = 0; column < plots.Length; column++)
+        {
+            var day = SavedA.History.Days[start + column];
+            Require(HistoryTipText(plots[column]) == UsageHistoryCard.Describe(day, SavedA.History.Today) &&
+                plots[column].IsHitTestVisible,
+                $"history hover not attached or disabled after page {selectedIndex} for {day.Date}");
+            var bar = Descendants<Microsoft.UI.Xaml.Controls.Border>(plots[column])
+                .Single(border => border.Width == 12 &&
+                    border.VerticalAlignment == VerticalAlignment.Bottom);
+            var fill = bar.Background as SolidColorBrush;
+            var height = day.Used is null ? 2 : Math.Max(3,
+                96 * Math.Clamp(day.PercentOfEntitlement ?? 0, 0, 10) / 10);
+            Require(Math.Abs(bar.Height - height) < .1 &&
+                bar.ActualHeight >= height - 1 &&
+                bar.Visibility == Visibility.Visible &&
+                fill is { Color.A: > 0 } &&
+                (day.Used is not null ||
+                    fill.Color == UsageHistoryPalette.NoSample(true)) &&
+                (day.Used != 0 ||
+                    fill.Color == UsageHistoryPalette.ColorFor(0, true)),
+                $"history bar disappeared after page {selectedIndex} for {day.Date}: " +
+                $"used={day.Used}, height={bar.Height}, actual={bar.ActualHeight}, " +
+                $"visibility={bar.Visibility}, fill={fill?.Color}");
+        }
     }
     private IEnumerable<T> Find<T>() where T : DependencyObject => Descendants<T>(Root);
     private static IEnumerable<T> Descendants<T>(DependencyObject root) where T : DependencyObject

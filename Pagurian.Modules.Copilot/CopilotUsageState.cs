@@ -49,6 +49,8 @@ internal sealed record CopilotUsageState(
     bool IsLoggingIn,
     DateTimeOffset? RefreshedAt)
 {
+    public CopilotUsageHistoryState History { get; init; } = CopilotUsageHistoryState.Empty;
+
     public static CopilotUsageState Initial { get; } = new(
         CopilotUsageStatus.Loading,
         null,
@@ -79,13 +81,19 @@ internal sealed record CopilotUsageState(
         };
 
     public CopilotUsageState WithAccount(CopilotUsageAccount account) =>
-        this with { Account = account };
+        this with
+        {
+            Account = account,
+            History = Account?.Login == account.Login && Account?.Host == account.Host
+                ? History : CopilotUsageHistoryState.Empty,
+        };
 
     public CopilotUsageState Complete(
         CopilotUsageAccount account,
         CopilotUsageSnapshot usage,
         DateTimeOffset refreshedAt,
-        bool finishLogin) =>
+        bool finishLogin,
+        CopilotUsageHistoryState? history = null) =>
         new(
             CopilotUsageStatus.Ready,
             account,
@@ -93,7 +101,10 @@ internal sealed record CopilotUsageState(
             null,
             IsRefreshing: false,
             IsLoggingIn: finishLogin ? false : IsLoggingIn,
-            refreshedAt);
+            refreshedAt)
+        {
+            History = history ?? CopilotUsageHistoryState.Empty,
+        };
 
     public CopilotUsageState CompleteUnauthenticated(
         CopilotUsageAccount account,
