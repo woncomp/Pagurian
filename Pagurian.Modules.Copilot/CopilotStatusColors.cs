@@ -27,12 +27,8 @@ static class CopilotStatusColors
         return brush;
     }
 
-    // Drops a session's cached brush (sessionEnd removes the session, so
-    // without this the cache would grow forever).
+    // Dropping a cell also releases its cached brush.
     public static void Drop(CopilotSession session) => _brushes.Remove(Key(session));
-
-    public static void Drop(string sessionId) =>
-        _brushes.Remove(sessionId);
 
     private static string Key(CopilotSession session) =>
         (session.IsSdk ? "sdk:" : "hook:") + session.SessionId;

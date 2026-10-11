@@ -16,6 +16,7 @@ var tests = new (string Name, Action Run)[]
     ("ask_user blocks its source until tool completion", AskUserBlocked),
     ("working child overrides idle parent", AggregatePriority),
     ("Done falls back to Idle on acknowledgement", DonePriority),
+    ("dismissed cells wait for new owner events", DismissedCellEvents),
     ("sessionStart is not a completion", SessionStartIsNotDone),
     ("App turn completion retains Done status", AppTurnCompletionRetainsDone),
     ("child stop completes to Done", ChildStopCompletesToDone),
@@ -76,6 +77,39 @@ Console.WriteLine($"{passed}/{tests.Length} Copilot session regression scenarios
 static void Check(bool condition, string message = "Assertion failed")
 {
     if (!condition) throw new InvalidOperationException(message);
+}
+
+static void DismissedCellEvents()
+{
+    var r = new Rig();
+    r.Group();
+    r.Event("sessionStart", "root");
+    var session = r.Cell();
+    var visibility = new CopilotSessionCellVisibility();
+    Check(session.Status == CopilotSessionStatus.Idle && session.EventRevision > 0);
+    visibility.Dismiss(session);
+    Check(!visibility.ShouldShow(session));
+    r.Group();
+    r.Advance(1000);
+    Check(!visibility.ShouldShow(session), "Metadata reconciliation and timer cannot restore a dismissed cell");
+    var previousRevision = session.EventRevision;
+    r.Event("preToolUse", "a");
+    Check(session.EventRevision > previousRevision && visibility.ShouldShow(session),
+        "A child event restores its dismissed owner");
+    Check(visibility.DismissedSessions.Count == 0);
+
+    r.Event("agentStop", "a");
+    r.State.AcknowledgeDone("root");
+    Check(session.Status == CopilotSessionStatus.Idle);
+    visibility.Dismiss(session);
+    visibility.Forget(new CopilotSession { SessionId = session.SessionId });
+    Check(!visibility.ShouldShow(session), "An older session's end cannot clear a newer dismissal");
+    visibility.Forget(session);
+    Check(visibility.ShouldShow(session), "Ending the dismissed session clears its suppression");
+
+    visibility.Dismiss(session);
+    var replacement = new CopilotSession { SessionId = session.SessionId };
+    Check(visibility.ShouldShow(replacement), "A new session lifetime is not suppressed by the previous one");
 }
 
 static void HookEventLogRotation()

@@ -14,8 +14,13 @@ namespace Pagurian.Modules.Copilot;
 class SessionBillboard : Billboard
 {
     private readonly CopilotSession _session;
+    private readonly Action _dismiss;
 
-    public SessionBillboard(CopilotSession session) => _session = session;
+    public SessionBillboard(CopilotSession session, Action dismiss)
+    {
+        _session = session;
+        _dismiss = dismiss;
+    }
 
     public override double WidthDip => 600;
     public override double HeightDip => 640;
@@ -72,7 +77,7 @@ class SessionBillboard : Billboard
         });
 
         var header = Grid(
-            [GridSize.Auto, GridSize.Star(), GridSize.Auto],
+            [GridSize.Auto, GridSize.Star(), GridSize.Auto, GridSize.Auto],
             [GridSize.Auto, GridSize.Auto],
             Image(CopilotModule.ClientIconPath(_session.Client))
                 .Width(32).Height(32).AccessibilityHidden()
@@ -90,7 +95,18 @@ class SessionBillboard : Billboard
                 .Margin(12, 4, 0, 0).Grid(row: 1, column: 1),
             StatusBadge(_session.Status.ToString(), _session.Status, hc, Theme.IsDark)
                 .Margin(8, 0, 0, 0).VAlign(VerticalAlignment.Top)
-                .Grid(row: 0, column: 2, rowSpan: 2));
+                .Grid(row: 0, column: 2, rowSpan: 2),
+            _session.Status == CopilotSessionStatus.Idle
+                ? Button("Close", () =>
+                {
+                    if (_session.Status == CopilotSessionStatus.Idle)
+                        _dismiss();
+                })
+                    .AutomationName("Close session from tray")
+                    .ToolTip("Remove session from tray")
+                    .Margin(8, 0, 0, 0).VAlign(VerticalAlignment.Top)
+                    .Grid(row: 0, column: 3, rowSpan: 2)
+                : null);
 
         var overview = MaterialCard(VStack(8,
             Section("Overview"),

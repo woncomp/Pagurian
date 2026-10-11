@@ -9,6 +9,7 @@ namespace Pagurian.Modules.Copilot;
 public sealed class CopilotSdkShell : Shell
 {
     private readonly Dictionary<string, ShellCellHandle> _cells = new();
+    private readonly CopilotSessionCellVisibility _visibility = new();
     private CopilotSdkSessionService? _service;
 
     public override void Startup()
@@ -36,6 +37,7 @@ public sealed class CopilotSdkShell : Shell
             if (_cells.Remove(session.SessionId, out var cell))
                 RemoveCell(cell);
         }
+        _visibility.Clear();
         _service = null;
         service.Release(InstanceId);
     }
@@ -48,12 +50,25 @@ public sealed class CopilotSdkShell : Shell
 
     private void OnSessionStarted(CopilotSession session)
     {
-        if (_cells.ContainsKey(session.SessionId))
+        if (_service?.IsTracked(session) != true ||
+            _cells.ContainsKey(session.SessionId) || !_visibility.ShouldShow(session))
             return;
         _cells[session.SessionId] = AddCell<SessionCell>(
             model: session,
             tooltip: () => SdkTooltip(session),
-            billboard: () => new SessionBillboard(session));
+            billboard: () => new SessionBillboard(session, () => DismissSession(session)));
+    }
+
+    private void DismissSession(CopilotSession session)
+    {
+        if (session.Status != CopilotSessionStatus.Idle ||
+            !_cells.TryGetValue(session.SessionId, out var cell) ||
+            !ReferenceEquals(cell.Props.Model, session))
+            return;
+        _cells.Remove(session.SessionId);
+        _visibility.Dismiss(session);
+        CopilotStatusColors.Drop(session);
+        RemoveCell(cell);
     }
 
     private void OnSessionChanged(CopilotSession session)
@@ -65,6 +80,10 @@ public sealed class CopilotSdkShell : Shell
 
     private void OnSessionEnded(CopilotSession session)
     {
+        _visibility.Forget(session);
+        if (_cells.TryGetValue(session.SessionId, out var current) &&
+            !ReferenceEquals(current.Props.Model, session))
+            return;
         CopilotStatusColors.Drop(session);
         if (_cells.Remove(session.SessionId, out var cell))
             RemoveCell(cell);

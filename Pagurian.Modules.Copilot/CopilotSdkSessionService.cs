@@ -39,6 +39,13 @@ internal sealed class CopilotSdkSessionService
         }
     }
 
+    public bool IsTracked(CopilotSession session)
+    {
+        lock (_sync)
+            return _states.TryGetValue(session.SessionId, out var state) &&
+                ReferenceEquals(state.Session, session);
+    }
+
     public void Acquire(
         string instanceId,
         Logger log,
@@ -587,6 +594,7 @@ internal sealed class CopilotSdkSessionService
         {
             if (!_events.TryAdd(item.EventId, item))
                 return;
+            Session.EventRevision++;
             if (item.Type == "permission.requested" && !item.ResolvedByHook &&
                 item.RequestId is not null)
                 _open[$"permission:{item.AgentId}:{item.RequestId}"] = item;

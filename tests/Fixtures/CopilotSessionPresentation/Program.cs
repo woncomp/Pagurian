@@ -73,6 +73,10 @@ sealed class Harness
     private static readonly Assembly Module = typeof(CopilotShell).Assembly;
     private readonly FixtureTheme _theme = new();
     private readonly FixtureShell _shell = new();
+    private readonly Shell _sessionsShell = new CopilotShell();
+    private readonly Shell _sdkShell = new CopilotSdkShell();
+    private object _sdkService = null!;
+    private object _sdkState = null!;
     private readonly List<CellProbe> _cells = [];
     private readonly Queue<Action> _steps = new();
     private ReactorWindow? _cellWindow;
@@ -122,8 +126,15 @@ sealed class Harness
     {
         try
         {
+            _ = new CopilotModule();
             typeof(Shell).GetProperty(nameof(Shell.Theme))!.SetValue(_shell, _theme);
+            typeof(Shell).GetProperty(nameof(Shell.Theme))!.SetValue(_sessionsShell, _theme);
+            typeof(Shell).GetProperty(nameof(Shell.Theme))!.SetValue(_sdkShell, _theme);
+            _sdkService = New("CopilotSdkSessionService");
+            _sdkShell.GetType().GetField("_service", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .SetValue(_sdkShell, _sdkService);
             VerifyIconSizeSettings();
+            VerifySdkEventRevisions();
             foreach (string status in new[] { "Idle", "Working", "Blocked", "Unknown" })
             foreach (string client in new[] { "App", "Cli", "VSCode", "Other", "Unknown" })
                 _cells.Add(CreateCell(status, client, false,
@@ -296,6 +307,63 @@ sealed class Harness
                         _clipboardHolder.Wait(TimeSpan.FromSeconds(2));
                     }
                 }
+            });
+            foreach (var status in new[] { "Working", "Blocked", "Unknown", "Done" })
+            {
+                _steps.Enqueue(() => SetBillboardStatus(status));
+                _steps.Enqueue(() => Require(!Buttons().Any(button =>
+                        AutomationProperties.GetName(button) == "Close session from tray"),
+                    $"{status} session exposed the Idle-only Close button"));
+            }
+            _steps.Enqueue(() => SetBillboardStatus("Idle"));
+            _steps.Enqueue(() =>
+            {
+                Require(Buttons().Count(button =>
+                    AutomationProperties.GetName(button) == "Close session from tray") == 1,
+                    "Idle session is missing its accessible Close button");
+                Set(_model, "Status", EnumValue("CopilotSessionStatus", "Working"));
+                Invoke("Close session from tray");
+                Require(ShellCells(_sessionsShell).Count == 1,
+                    "A stale Idle button removed a now-working session");
+                Set(_model, "Status", EnumValue("CopilotSessionStatus", "Idle"));
+                Invoke("Close session from tray");
+                Require(ShellCells(_sessionsShell).Count == 0,
+                    "Copilot Sessions Close did not remove its Shell Cell");
+                NotifyShell(_sessionsShell, "OnSessionStarted", _model);
+                Require(ShellCells(_sessionsShell).Count == 0,
+                    "Dismissed Copilot Sessions cell reappeared without a new hook");
+                Set(_model, "EventRevision", 1L);
+                NotifyShell(_sessionsShell, "OnSessionStarted", _model);
+                Require(ShellCells(_sessionsShell).Count == 1,
+                    "A new Copilot Sessions event did not restore the cell");
+                _billboard!.Close();
+                OpenBillboard(sdk: true);
+            });
+            _steps.Enqueue(() =>
+            {
+                Require(_billboard!.State == BillboardSessionState.Visible,
+                    "Copilot SDK billboard did not open");
+                Require(Buttons().Any(button =>
+                    AutomationProperties.GetName(button) == "Close session from tray"),
+                    "Copilot SDK Idle billboard is missing the Close button");
+                Invoke("Close session from tray");
+                Require(ShellCells(_sdkShell).Count == 0,
+                    "Copilot SDK Close did not remove its Shell Cell");
+                NotifyShell(_sdkShell, "OnSessionChanged", _model);
+                Require(ShellCells(_sdkShell).Count == 0,
+                    "Unchanged SDK status polling restored the dismissed cell");
+                _sdkState.GetType().GetMethod("Apply")!.Invoke(_sdkState,
+                    [SdkEvent("new-event")]);
+                NotifyShell(_sdkShell, "OnSessionChanged", _model);
+                Require(ShellCells(_sdkShell).Count == 1,
+                    "A newly processed Copilot SDK event did not restore the cell");
+                ((System.Collections.IDictionary)_sdkService.GetType().GetField(
+                    "_states", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .GetValue(_sdkService)!).Remove("fixture-main-full-session-id");
+                NotifyShell(_sdkShell, "OnSessionEnded", _model);
+                NotifyShell(_sdkShell, "OnSessionChanged", _model);
+                Require(ShellCells(_sdkShell).Count == 0,
+                    "A delayed SDK status callback restored an ended session");
                 Finish();
             });
             _timer = ReactorApp.UIDispatcher!.CreateTimer();
@@ -334,6 +402,50 @@ sealed class Harness
     private static void SetIconSize(CellProbe cell, string size) =>
         cell.Props.Model!.GetType().GetMethod("SetIconSize")!.Invoke(
             cell.Props.Model, [EnumValue("CopilotSessionIconSize", size)]);
+
+    private static IReadOnlyList<ShellCellHandle> ShellCells(Shell shell) =>
+        (IReadOnlyList<ShellCellHandle>)typeof(Shell).GetProperty(
+            "Cells", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(shell)!;
+
+    private static void NotifyShell(Shell shell, string method, object session) =>
+        shell.GetType().GetMethod(method, BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(shell, [session]);
+
+    private void SetBillboardStatus(string status)
+    {
+        Set(_model, "Status", EnumValue("CopilotSessionStatus", status));
+        _model.GetType().GetMethod("NotifyChanged", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(_model, null);
+    }
+
+    private void VerifySdkEventRevisions()
+    {
+        var session = New("CopilotSession");
+        Set(session, "SessionId", "sdk-revision-fixture");
+        var state = SdkState(session);
+        var apply = state.GetType().GetMethod("Apply")!;
+        var first = SdkEvent("first");
+        apply.Invoke(state, [first]);
+        Require((long)session.GetType().GetProperty("EventRevision")!.GetValue(session)! == 1,
+            "First SDK persisted event did not advance the restore revision");
+        apply.Invoke(state, [first]);
+        Require((long)session.GetType().GetProperty("EventRevision")!.GetValue(session)! == 1,
+            "Repeated SDK event/poll advanced the restore revision");
+        apply.Invoke(state, [SdkEvent("second")]);
+        Require((long)session.GetType().GetProperty("EventRevision")!.GetValue(session)! == 2,
+            "New SDK persisted event did not advance the restore revision");
+    }
+
+    private static object SdkState(object session)
+    {
+        var stateType = Type("CopilotSdkSessionService").GetNestedType(
+            "SdkState", BindingFlags.NonPublic)!;
+        return Activator.CreateInstance(stateType, BindingFlags.Instance |
+            BindingFlags.Public | BindingFlags.NonPublic, null, [session], null)!;
+    }
+
+    private static object SdkEvent(string id) => New("CopilotSdkPersistedEvent",
+        id, DateTimeOffset.UtcNow, "turn.completed", null, null, null, null, false, "Completed");
 
     private void VerifyIconSizeSettings()
     {
@@ -384,7 +496,7 @@ sealed class Harness
         .Select(hook => (string)hook.GetType().GetProperty("Line")!.GetValue(hook)!)
         .ToArray();
 
-    private void OpenBillboard()
+    private void OpenBillboard(bool sdk = false)
     {
         _model = New("CopilotSession");
         Set(_model, "SessionId", "fixture-main-full-session-id");
@@ -393,6 +505,7 @@ sealed class Harness
         Set(_model, "ProjectName", "very-long-project");
         Set(_model, "Client", EnumValue("CopilotClientKind", "App"));
         Set(_model, "Status", EnumValue("CopilotSessionStatus", "Idle"));
+        Set(_model, "IsSdk", sdk);
         Set(_model, "Details", Details());
         Set(_model, "GroupDetails", Details());
         _nodes = Array.CreateInstance(Type("CopilotSessionNode"), 3);
@@ -420,10 +533,20 @@ sealed class Harness
         _nodes.SetValue(Node("fixture-child", "fixture-main-full-session-id", "Fixture child", "Blocked", "Active", hooksForChild), 1);
         _nodes.SetValue(Node("fixture-grandchild", "fixture-child", "Fixture grandchild", "Idle", "Completed", hooksForGrandchild), 2);
         Set(_model, "Nodes", _nodes);
-        var view = (Billboard)Activator.CreateInstance(Type("SessionBillboard"), _model)!;
-        var props = new ShellCellProps(_shell, _model, null, null, null);
+        var shell = sdk ? _sdkShell : _sessionsShell;
+        if (sdk)
+        {
+            _sdkState = SdkState(_model);
+            ((System.Collections.IDictionary)_sdkService.GetType().GetField(
+                "_states", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(_sdkService)!).Add("fixture-main-full-session-id", _sdkState);
+        }
+        NotifyShell(shell, "OnSessionStarted", _model);
+        var owner = ShellCells(shell).Single();
+        var view = owner.Props.CreateBillboard!()
+            ?? throw new InvalidOperationException("Session cell has no billboard");
         typeof(Billboard).GetProperty("OwnerCell", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .SetValue(view, new ShellCellHandle("fixture", Type("SessionCell"), props));
+            .SetValue(view, owner);
         var work = Microsoft.UI.Windowing.DisplayArea.Primary.WorkArea;
         var anchor = new BillboardAnchor(new RectInt32(work.X + 32, work.Y + work.Height - 48, 100, 40), work);
         _billboard = new(BillboardSession.CreateSpec(view.Title, view.WidthDip, view.HeightDip), view, _theme,

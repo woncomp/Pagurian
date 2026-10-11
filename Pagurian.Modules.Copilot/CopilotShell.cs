@@ -16,6 +16,7 @@ public sealed class CopilotShell : Shell
 {
     private readonly Dictionary<string, ShellCellHandle> _cells = new();
     private readonly Dictionary<string, CopilotSessionCellModel> _cellModels = new();
+    private readonly CopilotSessionCellVisibility _visibility = new();
     private CopilotSessionIconSize _iconSize;
 
     public override void Startup()
@@ -23,6 +24,7 @@ public sealed class CopilotShell : Shell
         _iconSize = CopilotSettings.Clients(Settings).IconSize;
         CopilotSessionTracker.SessionStarted += OnSessionStarted;
         CopilotSessionTracker.SessionEnded += OnSessionEnded;
+        CopilotSessionTracker.UiChanged += OnTrackerChanged;
         CopilotSessionTracker.Start(Log);
         foreach (var session in CopilotSessionTracker.Sessions)
             OnSessionStarted(session);
@@ -33,14 +35,15 @@ public sealed class CopilotShell : Shell
     {
         CopilotSessionTracker.SessionStarted -= OnSessionStarted;
         CopilotSessionTracker.SessionEnded -= OnSessionEnded;
+        CopilotSessionTracker.UiChanged -= OnTrackerChanged;
         CopilotSessionTracker.Stop();
-        foreach (var (id, cell) in _cells)
-        {
-            CopilotStatusColors.Drop(id);
+        foreach (var model in _cellModels.Values)
+            CopilotStatusColors.Drop(model.Session);
+        foreach (var cell in _cells.Values)
             RemoveCell(cell);
-        }
         _cells.Clear();
         _cellModels.Clear();
+        _visibility.Clear();
         CopilotHookInstaller.Uninstall();
     }
 
@@ -58,14 +61,35 @@ public sealed class CopilotShell : Shell
 
     private void OnSessionStarted(CopilotSession session)
     {
-        if (_cells.ContainsKey(session.SessionId))
+        if (_cells.ContainsKey(session.SessionId) || !_visibility.ShouldShow(session))
             return;
         var model = new CopilotSessionCellModel(session, _iconSize);
         _cellModels[session.SessionId] = model;
         _cells[session.SessionId] = AddCell<SessionCell>(
             model: model,
             tooltip: () => $"{session.Name}\n{(string.IsNullOrWhiteSpace(session.Cwd) ? "Working directory unavailable" : session.Cwd)}",
-            billboard: () => new SessionBillboard(session));
+            billboard: () => new SessionBillboard(session, () => DismissSession(session)));
+    }
+
+    private void DismissSession(CopilotSession session)
+    {
+        if (session.Status != CopilotSessionStatus.Idle ||
+            !_cells.TryGetValue(session.SessionId, out var cell) ||
+            cell.Props.Model is not CopilotSessionCellModel model ||
+            !ReferenceEquals(model.Session, session))
+            return;
+        _cells.Remove(session.SessionId);
+        _visibility.Dismiss(session);
+        _cellModels.Remove(session.SessionId);
+        CopilotStatusColors.Drop(session);
+        RemoveCell(cell);
+    }
+
+    private void OnTrackerChanged()
+    {
+        foreach (var dismissed in _visibility.DismissedSessions)
+            if (CopilotSessionTracker.Find(dismissed.SessionId) is { } session)
+                OnSessionStarted(session);
     }
 
     public override void OnSettingsChanged()
@@ -80,7 +104,8 @@ public sealed class CopilotShell : Shell
 
     private void OnSessionEnded(CopilotSession session)
     {
-        CopilotStatusColors.Drop(session.SessionId);
+        _visibility.Forget(session);
+        CopilotStatusColors.Drop(session);
         _cellModels.Remove(session.SessionId);
         if (_cells.Remove(session.SessionId, out var cell))
             RemoveCell(cell);

@@ -4,6 +4,16 @@ The Copilot Sessions shell publishes one cell per **resolved, named display
 owner**, not per hook `sessionId`. No settings, hook commands, or payload
 formats change. These icon rules do not change the separate Copilot SDK shell.
 
+Both Copilot Sessions and Copilot SDK billboards show **Close** only when the
+session's aggregate status is `Idle` (including after acknowledging `Done`).
+Closing removes that session's Shell Cell from the tray and dismisses its
+billboard; it does not stop tracking, end/archive the session or delete data.
+The cell returns when the same session receives a new valid event: an owner
+or child hook for Copilot Sessions, or a newly processed persisted event for
+Copilot SDK. Metadata updates, UI refreshes and SDK polls without new events
+do not restore it. Suppression is per Shell instance and lasts only for the
+current run; normal session ending and app restart retain existing discovery.
+
 ## Identity
 
 - Own `workspace.yaml` with `client_name: github/autopilot` identifies an

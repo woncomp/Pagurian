@@ -47,6 +47,7 @@ sealed class CopilotSession
     public string Name { get; set; } = "";
     public bool NameResolved { get; set; }
     public CopilotSessionStatus Status { get; set; }
+    public long EventRevision { get; set; }
     public CopilotSessionStatus? PendingStatus { get; set; }
     public DateTimeOffset PendingStatusSince { get; set; }
     public string LastEventName { get; set; } = "";
@@ -145,6 +146,7 @@ sealed class CopilotSessionState
         public DateTimeOffset Epoch = DateTimeOffset.MinValue;
         public CopilotHookEvent? Latest;
         public long LatestSequence;
+        public long LastAcceptedEventSequence;
         public (CopilotHookEvent Event, long Sequence)? Lifecycle;
         public (CopilotHookEvent Event, long Sequence)? LifecycleStart;
         public long AppliedLifecycle;
@@ -238,6 +240,7 @@ sealed class CopilotSessionState
             Trace(source, hook, source.Status, "ended-generation");
             return;
         }
+        source.LastAcceptedEventSequence = sequence;
         source.HasOwnHook = true;
         source.DirectoryRevision = directoryOwner.DirectoryRevision = ++_directoryRevision;
         if (source == directoryOwner && source.DirectoryDeleted)
@@ -613,6 +616,7 @@ sealed class CopilotSessionState
                 _sessions[ownerId] = session = new() { SessionId = ownerId, Name = ownerId };
             }
             session!.Name = owner.Identity.Name ?? ownerId;
+            session.EventRevision = members.Max(s => s.LastAcceptedEventSequence);
             session.NameResolved = !string.IsNullOrWhiteSpace(owner.Identity.Name);
             session.Client = owner.Identity.Client;
             session.ClientMarker = owner.Identity.ClientMarker;
