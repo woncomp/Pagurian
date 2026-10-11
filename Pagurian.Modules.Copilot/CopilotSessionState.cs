@@ -15,7 +15,8 @@ sealed record CopilotTransition(
 
 sealed record CopilotSessionNode(
     string SessionId, string? ParentId, string Name, CopilotSessionStatus? Status,
-    string Lifecycle, CopilotBlocker? Blocker, CopilotSessionDetails Details);
+    string Lifecycle, CopilotBlocker? Blocker, CopilotSessionDetails Details,
+    IReadOnlyList<CopilotRecentHook> RecentHooks);
 
 sealed record CopilotRecentHook(DateTimeOffset At, string Name, string ToolName, long Sequence)
 {
@@ -757,7 +758,8 @@ sealed class CopilotSessionState
         return new(source.Identity.SourceId, source.Identity.ParentId,
             source.Identity.Name ?? source.Identity.SourceId,
             hasCurrentState ? source.Status : null,
-            lifecycle, !hasCurrentState || lifecycle is "Completed" or "Ended" ? null : source.Blocker, details);
+            lifecycle, !hasCurrentState || lifecycle is "Completed" or "Ended" ? null : source.Blocker, details,
+            source.Recent.Where(h => h.At >= epoch).Take(5).ToArray());
     }
 
     private void ReconcileOwnerLifecycle(Source source)

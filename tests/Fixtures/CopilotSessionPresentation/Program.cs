@@ -80,7 +80,9 @@ sealed class Harness
     private DispatcherQueueTimer? _timer;
     private object _model = null!;
     private Array _nodes = null!;
-    private string[] _recentLines = [];
+    private string[] _mainHookLines = [];
+    private string[] _childHookLines = [];
+    private string[] _grandchildHookLines = [];
     private CellProbe _switchingLargeCell = null!;
     private double _mediumWidth;
     private int _checks;
@@ -108,10 +110,9 @@ sealed class Harness
     {
         var value = New("CopilotSessionDetails");
         Set(value, "Model", "fixture-model");
+        Set(value, "ReasoningEffort", "high");
         Set(value, "InputTokens", 1234L);
         Set(value, "OutputTokens", 42L);
-        Set(value, "ContextTokens", 512L);
-        Set(value, "ContextLimit", 128000L);
         Set(value, "NanoAiu", 9007199254740993L);
         Set(value, "IsPartial", true);
         return value;
@@ -166,20 +167,53 @@ sealed class Harness
                 Require(_billboard.BoundsPx.Height / window.DipScale <= 642, "billboard exceeds 640 DIP ceiling");
                 Require(Descendants<ScrollViewer>(window.NativeWindow.Content).Any(s => s.ScrollableHeight > 0),
                     "long body has no bounded scroll viewport");
-                Require(Texts().Count(text => text.Text == "fixture-grandchild") == 1,
-                    "grandchild breakdown absent");
+                Require(!Texts().Any(text => text.Text is "Context tier" or "Prompt token limit" or "Context tokens / limit"),
+                    "permanently-unavailable context rows must not render");
+                // The session tree is a single-line list: each node name
+                // appears once in its row plus once more only when that node
+                // is selected in the details card (initially the root).
+                Require(Texts().Count(text => text.Text == "Fixture grandchild") == 1,
+                    "tree row is not single-line");
+                Require(Texts().Count(text => text.Text == "Fixture main") == 3,
+                    "header and selected root missing from the details card");
                 Require(Texts().Any(text => text.Text == "Active · Idle"), "root local Idle was replaced by aggregate Blocked");
-                Require(_recentLines.Take(5).All(line => Texts().Any(text => text.Text == line)),
-                    "recent hooks do not show their exact three-field lines");
-                Require(!Texts().Any(text => text.Text == _recentLines[5]), "more than five recent hooks rendered");
+                // Status words sit between the status icon and the name on every
+                // row. The header's aggregate StatusBadge duplicates the
+                // session-level word ("Blocked" here), so count row words by
+                // their distinct per-node lifecycle label instead.
+                // Status words sit between the status icon and the name on every
+                // row. Idle appears twice because the main node is both a tree
+                // row and the initially-selected details card.
+                if (!(Texts().Count(text => text.Text == "Idle") == 2 &&
+                        Texts().Count(text => text.Text == "Blocked") == 1 &&
+                        Texts().Count(text => text.Text == "Completed") == 1))
+                    Console.WriteLine("DIAG status words: Idle=" +
+                        Texts().Count(t => t.Text == "Idle") + " Blocked=" +
+                        Texts().Count(t => t.Text == "Blocked") + " Completed=" +
+                        Texts().Count(t => t.Text == "Completed"));
+                Require(Texts().Count(text => text.Text == "Idle") == 2 &&
+                        Texts().Count(text => text.Text == "Blocked") == 1 &&
+                        Texts().Count(text => text.Text == "Completed") == 1,
+                    "single-line tree rows are missing per-row status words");
+                // Per-node hooks: the details card shows the main node's five
+                // lines, never another node's, and nothing for a node with none.
+                Require(_mainHookLines.All(line => Texts().Any(text => text.Text == line)),
+                    "main-node recent hooks missing from the details card");
+                Require(_childHookLines.Concat(_grandchildHookLines).All(line =>
+                        !Texts().Any(text => text.Text == line)),
+                    "details card leaked another node's recent hooks");
                 Require(Texts().Any(text => text.Text.Contains("9,007,199,254,740,993") ||
                     text.Text.Contains(9007199254740993L.ToString("N0"))), "nano-AIU lost integer precision");
                 Invoke("Collapse Fixture main");
             });
             _steps.Enqueue(() =>
             {
-                Require(Texts().Count(text => text.Text == "fixture-grandchild") == 1,
-                    "collapse hid all-node breakdown");
+                // Collapsing the root hides its descendants; the main node
+                // itself remains in its row and in the details card.
+                Require(Texts().Count(text => text.Text == "Fixture grandchild") <= 1,
+                    "collapse changed the tree row");
+                Require(Texts().Count(text => text.Text == "Fixture main") == 3,
+                    "collapse changed the details card");
                 // Publish a different immutable node list and refresh the
                 // production subscriptions; expansion must survive re-render.
                 Set(_model, "Nodes", _nodes.Clone());
@@ -189,21 +223,45 @@ sealed class Harness
             {
                 Require(Buttons().Any(button => AutomationProperties.GetName(button) == "Expand Fixture main"),
                     "live update reset expansion");
+                // Selection survives a re-render: the main node is still
+                // selected after the immutable node list and theme changed.
+                Require(Texts().Any(text => text.Text == "Active · Idle"),
+                    "main-node selection did not survive re-render");
+                Require(_mainHookLines.All(line => Texts().Any(text => text.Text == line)),
+                    "main-node details did not survive re-render");
                 Invoke("Expand Fixture main");
                 CheckCells();
             });
             _steps.Enqueue(() =>
             {
-                Require(Texts().Any(text => text.Text == "Completed · Idle"), "completed lifecycle missing");
+                Require(Texts().Count(text => text.Text == "Fixture grandchild") <= 1,
+                    "expand changed the tree row");
+                Require(Texts().Any(text => text.Text == "Active · Idle"),
+                    "main-node selection did not survive expand");
+                // The details card follows the tree selection to the child.
+                TapRow("Fixture child");
+            });
+            _steps.Enqueue(() =>
+            {
+                Require(Texts().Any(text => text.Text == "Active · Blocked"),
+                    "details card did not follow the tree selection to the child");
+                Require(Texts().Count(text => text.Text == "Fixture child") == 2 &&
+                        Texts().Count(text => text.Text == "Fixture main") == 2,
+                    "details card did not switch to the selected child node");
+                Require(_childHookLines.All(line => Texts().Any(text => text.Text == line)),
+                    "child-node recent hooks missing after selection");
+                Require(_mainHookLines.Concat(_grandchildHookLines).All(line =>
+                        !Texts().Any(text => text.Text == line)),
+                    "details card leaked non-selected node hooks after selection");
                 _foreground = GetForegroundWindow();
                 if (Environment.GetCommandLineArgs().Contains("--clipboard"))
-                    Invoke("Copy full Main session ID");
+                    Invoke("Copy full Session ID for Fixture child");
             });
             _steps.Enqueue(() =>
             {
                 if (Environment.GetCommandLineArgs().Contains("--clipboard"))
                 {
-                    Require(ReadClipboard() == "fixture-main-full-session-id", "copy button did not copy complete ID");
+                    Require(ReadClipboard() == "fixture-child", "copy button did not copy the selected node's ID");
                     Require(Texts().Any(text => text.Text == "Copied full session ID."), "copy success feedback missing");
                     Require(GetForegroundWindow() == _foreground, "copy activated the billboard");
                     using var ready = new ManualResetEventSlim(false);
@@ -219,7 +277,7 @@ sealed class Harness
                         }
                     });
                     Require(ready.Wait(TimeSpan.FromSeconds(2)) && opened, "could not stage clipboard contention");
-                    Invoke("Copy full Main session ID");
+                    Invoke("Copy full Session ID for Fixture child");
                 }
             });
             _steps.Enqueue(() =>
@@ -301,6 +359,31 @@ sealed class Harness
             "icon-size write did not preserve client selections");
     }
 
+    private static object[] BuildHooks(string tag, int count)
+    {
+        var constructor = Type("CopilotRecentHook").GetConstructors()
+            .Single(candidate => candidate.GetParameters().Length == 4);
+        var hooks = new object[count];
+        for (int index = 0; index < count; index++)
+        {
+            int current = index;
+            hooks[index] = constructor.Invoke(constructor.GetParameters().Select(parameter =>
+                parameter.Name!.ToLowerInvariant() switch
+                {
+                    "at" => (object)DateTimeOffset.Now.AddSeconds(-current),
+                    "name" => $"fixture{tag}Hook{current}",
+                    "toolname" => current == 0 ? "-" : "fixtureTool",
+                    "sequence" => (object)(100L - current),
+                    _ => throw new InvalidOperationException("Unexpected recent-hook constructor contract"),
+                }).ToArray());
+        }
+        return hooks;
+    }
+
+    private static string[] Lines(object[] hooks) => hooks
+        .Select(hook => (string)hook.GetType().GetProperty("Line")!.GetValue(hook)!)
+        .ToArray();
+
     private void OpenBillboard()
     {
         _model = New("CopilotSession");
@@ -309,37 +392,34 @@ sealed class Harness
         Set(_model, "Cwd", @"D:\fixture\very-long-project");
         Set(_model, "ProjectName", "very-long-project");
         Set(_model, "Client", EnumValue("CopilotClientKind", "App"));
-        Set(_model, "Status", EnumValue("CopilotSessionStatus", "Blocked"));
+        Set(_model, "Status", EnumValue("CopilotSessionStatus", "Idle"));
         Set(_model, "Details", Details());
         Set(_model, "GroupDetails", Details());
         _nodes = Array.CreateInstance(Type("CopilotSessionNode"), 3);
-        object Node(string id, string? parent, string name, string status, string lifecycle) =>
-            Activator.CreateInstance(Type("CopilotSessionNode"),
-                id, parent, name, EnumValue("CopilotSessionStatus", status), lifecycle, null, Details())!;
-        _nodes.SetValue(Node("fixture-main-full-session-id", null, "Fixture main", "Idle", "Active"), 0);
-        _nodes.SetValue(Node("fixture-child", "fixture-main-full-session-id", "Fixture child", "Blocked", "Active"), 1);
-        _nodes.SetValue(Node("fixture-grandchild", "fixture-child", "Fixture grandchild", "Idle", "Completed"), 2);
-        Set(_model, "Nodes", _nodes);
-        var hooks = Array.CreateInstance(Type("CopilotRecentHook"), 6);
-        _recentLines = new string[6];
-        var constructor = Type("CopilotRecentHook").GetConstructors()
-            .Single(candidate => candidate.GetParameters().Length == 4);
-        for (int index = 0; index < hooks.Length; index++)
+        object Node(string id, string? parent, string name, string status, string lifecycle, object[] hooks)
         {
-            int current = index;
-            var hook = constructor.Invoke(constructor.GetParameters().Select(parameter =>
-                parameter.Name!.ToLowerInvariant() switch
-                {
-                    "at" => (object)DateTimeOffset.Now.AddSeconds(-current),
-                    "name" => $"fixtureHook{current}",
-                    "toolname" => current == 0 ? "-" : "fixtureTool",
-                    "sequence" => (object)(100L - current),
-                    _ => throw new InvalidOperationException("Unexpected recent-hook constructor contract"),
-                }).ToArray());
-            hooks.SetValue(hook, index);
-            _recentLines[index] = (string)hook.GetType().GetProperty("Line")!.GetValue(hook)!;
+            var nodeType = Type("CopilotSessionNode");
+            var constructor = nodeType.GetConstructors()
+                .Single(candidate => candidate.GetParameters().Length == 8);
+            // The record's last parameter is IReadOnlyList<CopilotRecentHook>;
+            // a plain object[] binds ambiguously through parameter reflection,
+            // so copy into a typed List before invoking.
+            var hookList = (System.Collections.IList)System.Activator.CreateInstance(
+                typeof(List<>).MakeGenericType(Type("CopilotRecentHook")))!;
+            foreach (var hook in hooks) hookList.Add(hook);
+            return constructor.Invoke(
+                [id, parent, name, EnumValue("CopilotSessionStatus", status), lifecycle, null, Details(), hookList]);
         }
-        Set(_model, "RecentHooks", hooks);
+        var hooksForMain = BuildHooks("main", 3);
+        var hooksForChild = BuildHooks("child", 1);
+        var hooksForGrandchild = BuildHooks("grandchild", 1);
+        _mainHookLines = Lines(hooksForMain);
+        _childHookLines = Lines(hooksForChild);
+        _grandchildHookLines = Lines(hooksForGrandchild);
+        _nodes.SetValue(Node("fixture-main-full-session-id", null, "Fixture main", "Idle", "Active", hooksForMain), 0);
+        _nodes.SetValue(Node("fixture-child", "fixture-main-full-session-id", "Fixture child", "Blocked", "Active", hooksForChild), 1);
+        _nodes.SetValue(Node("fixture-grandchild", "fixture-child", "Fixture grandchild", "Idle", "Completed", hooksForGrandchild), 2);
+        Set(_model, "Nodes", _nodes);
         var view = (Billboard)Activator.CreateInstance(Type("SessionBillboard"), _model)!;
         var props = new ShellCellProps(_shell, _model, null, null, null);
         typeof(Billboard).GetProperty("OwnerCell", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -459,6 +539,25 @@ sealed class Harness
     {
         var button = Buttons().Single(button => AutomationProperties.GetName(button) == name);
         ((IInvokeProvider)new ButtonAutomationPeer(button).GetPattern(PatternInterface.Invoke)).Invoke();
+    }
+    private void TapRow(string rowName)
+    {
+        var automationId = rowName switch
+        {
+            "Fixture main" => "Active · Idle",
+            "Fixture child" => "Active · Blocked",
+            _ => "Completed · Idle",
+        };
+        var buttons = Descendants<XamlButton>(_billboard!.Window!.NativeWindow.Content)
+            .Where(button => AutomationProperties.GetName(button) == automationId)
+            .ToArray();
+        if (buttons.Length != 1)
+            throw new InvalidOperationException(
+                $"expected one tree row named '{automationId}', found {buttons.Length}");
+        // The row is a Button, so the UIAutomation Invoke pattern drives the
+        // same click path a real pointer tap reaches.
+        ((IInvokeProvider)new ButtonAutomationPeer(buttons[0])
+            .GetPattern(PatternInterface.Invoke)).Invoke();
     }
     private static IEnumerable<T> Descendants<T>(DependencyObject root) where T : DependencyObject
     {

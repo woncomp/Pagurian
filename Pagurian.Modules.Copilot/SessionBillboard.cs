@@ -37,6 +37,7 @@ class SessionBillboard : Billboard
         // Expansion belongs to this opening, not to the changing node snapshot.
         // Even collapsing an ancestor leaves descendants' choices intact.
         var (collapsed, updateCollapsed) = UseReducer(new HashSet<string>(StringComparer.Ordinal));
+        var (selected, setSelected) = UseState<string?>(null);
         UseEffect(() =>
         {
             void OnChanged() => setVersion(++tick.Current);
@@ -57,6 +58,12 @@ class SessionBillboard : Billboard
 
         bool hc = colorScheme == ColorScheme.HighContrast;
         var nodes = PresentationNodes(_session);
+        // The details card tracks the tapped row, surviving re-renders;
+        // nodes that leave the snapshot fall back to the owner root.
+        var effectiveSelected = nodes.Any(n => n.SessionId == selected)
+            ? selected
+            : nodes.FirstOrDefault(n => n.SessionId == _session.SessionId)?.SessionId
+                ?? nodes.First().SessionId;
         void Toggle(string id) => updateCollapsed(previous =>
         {
             var next = new HashSet<string>(previous, StringComparer.Ordinal);
@@ -107,38 +114,37 @@ class SessionBillboard : Billboard
 
         var tree = MaterialCard(VStack(8,
             Section("Session tree"),
-            RenderTree(nodes, collapsed, Toggle, hc)), hc);
+            RenderTree(nodes, collapsed, Toggle, effectiveSelected, setSelected, hc, Theme.IsDark)), hc);
 
-        // One card, all nodes, irrespective of tree expansion or selection.
-        var breakdown = MaterialCard(VStack(12,
-            Section("Per-session breakdown"),
-            VStack(12, nodes.Select(node =>
-                VStack(4,
-                    BodyStrong(node.Name).MaxLines(1)
-                        .TextTrimming(TextTrimming.CharacterEllipsis).ToolTip(node.Name),
-                    Caption(NodeLabel(node)).Foreground(ReactorTheme.SecondaryText),
-                    CopyId(node.SessionId, $"Session ID for {node.Name}"),
-                    DetailFields(node.Details),
-                    Caption("Own usage" + Partial(node.Details)).SemiBold(),
-                    UsageFields(node.Details))
-                .WithKey(node.SessionId)).ToArray())), hc);
+        var selectedNode = nodes.SingleOrDefault(n => n.SessionId == effectiveSelected)
+            ?? nodes.First();
+        var details = MaterialCard(VStack(8,
+            BodyStrong(selectedNode.Name).MaxLines(1)
+                .TextTrimming(TextTrimming.CharacterEllipsis).ToolTip(selectedNode.Name),
+            Caption(NodeLabel(selectedNode)).Foreground(ReactorTheme.SecondaryText),
+            selectedNode.Blocker is { } b
+                ? Caption($"Blocked since {b.BlockedSince.ToLocalTime():HH:mm:ss} · {b.EventName} · Source {b.SourceId}")
+                    .TextWrapping(TextWrapping.Wrap).Foreground(hc
+                        ? ReactorTheme.Ref("SystemColorWindowTextColorBrush") : ReactorTheme.SecondaryText)
+                : null,
+            CopyId(selectedNode.SessionId, $"Session ID for {selectedNode.Name}"),
+            DetailFields(selectedNode.Details),
+            Caption("Own usage" + Partial(selectedNode.Details)).SemiBold(),
+            UsageFields(selectedNode.Details),
+            _session.IsSdk ? null : Section("Recent hooks"),
+            _session.IsSdk
+                ? null
+                : selectedNode.RecentHooks.Count == 0
+                    ? Caption("No hooks received.").Foreground(ReactorTheme.SecondaryText)
+                    : VStack(4, selectedNode.RecentHooks.Take(5).Select(hook =>
+                        Grid([GridSize.Star()], [GridSize.Auto],
+                            Caption(hook.Line).MaxLines(1)
+                                .TextTrimming(TextTrimming.CharacterEllipsis)
+                                .AutomationName(hook.Line))
+                            .WithKey(hook.Sequence.ToString(CultureInfo.InvariantCulture))).ToArray()),
+            _session.IsSdk ? PersistedEvents(_session) : null), hc);
 
-        var recent = _session.IsSdk
-            ? PersistedEvents(_session)
-            : VStack(4,
-            Section("Recent hooks"),
-            _session.RecentHooks.Count == 0
-                ? Caption("No hooks received.").Foreground(ReactorTheme.SecondaryText)
-                : VStack(4, _session.RecentHooks.Take(5).Select(hook =>
-                    // Line is the state contract's sanitized local HH:mm:ss Name ToolName.
-                    // A star column keeps every event to exactly one bounded line.
-                    Grid([GridSize.Star()], [GridSize.Auto],
-                        Caption(hook.Line).MaxLines(1)
-                            .TextTrimming(TextTrimming.CharacterEllipsis)
-                            .AutomationName(hook.Line))
-                        .WithKey(hook.Sequence.ToString(CultureInfo.InvariantCulture))).ToArray()));
-
-        var scroll = (ScrollViewer(VStack(12, overview, tree, breakdown, recent)) with
+        var scroll = (ScrollViewer(VStack(12, overview, tree, details)) with
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
@@ -167,12 +173,13 @@ class SessionBillboard : Billboard
             .Select(node => string.IsNullOrWhiteSpace(node.Name) ? node with { Name = node.SessionId } : node)
             .ToList();
         if (nodes.All(node => node.SessionId != session.SessionId))
-            nodes.Insert(0, new(session.SessionId, null, session.Name, null, "Unknown", null, session.Details));
+            nodes.Insert(0, new(session.SessionId, null, session.Name, null, "Unknown", null, session.Details, []));
         return nodes.OrderBy(node => node.SessionId == session.SessionId ? 0 : 1).ToArray();
     }
 
     private static Element RenderTree(IReadOnlyList<CopilotSessionNode> nodes,
-        HashSet<string> collapsed, Action<string> toggle, bool hc)
+        HashSet<string> collapsed, Action<string> toggle, string? selected, Action<string> select,
+        bool hc, bool isDark)
     {
         var ids = nodes.Select(node => node.SessionId).ToHashSet(StringComparer.Ordinal);
         var children = nodes.Where(node => node.ParentId is not null && node.ParentId != node.SessionId)
@@ -184,27 +191,40 @@ class SessionBillboard : Billboard
             var descendants = children[node.SessionId].Where(child => !visited.Contains(child.SessionId))
                 .Select(child => Branch(child, depth + 1)).ToArray();
             bool expanded = !collapsed.Contains(node.SessionId);
-            var row = Grid([GridSize.Px(32), GridSize.Px(24), GridSize.Star()],
-                [GridSize.Auto, GridSize.Auto],
+            bool isSelected = node.SessionId == selected;
+            var row = Grid([GridSize.Px(32), GridSize.Px(24), GridSize.Auto, GridSize.Star()],
+                [GridSize.Auto],
                 (descendants.Length == 0 ? (Element)Caption("")
                     : Button(expanded ? "−" : "+", () => toggle(node.SessionId))
                         .Padding(4)
                         .AutomationName($"{(expanded ? "Collapse" : "Expand")} {node.Name}"))
-                    .Grid(column: 0, rowSpan: 2),
-                Caption(NodeGlyph(node)).VAlign(VerticalAlignment.Center)
-                    .AutomationName(NodeLabel(node)).Grid(column: 1, rowSpan: 2),
+                    .Grid(column: 0),
+                SessionStatusIcon.ForNode(node, StatusBrush(node, hc, isDark), InactiveBrush(hc, isDark))
+                    .Grid(column: 1),
+                StatusWord(node, hc, isDark)
+                    .VAlign(VerticalAlignment.Center).Margin(4, 0, 0, 0).Grid(column: 2),
                 BodyStrong(node.Name).MaxLines(1).TextTrimming(TextTrimming.CharacterEllipsis)
-                    .ToolTip(node.Name).Grid(column: 2),
-                Caption(NodeLabel(node)).MaxLines(1).TextTrimming(TextTrimming.CharacterEllipsis)
-                    .Foreground(ReactorTheme.SecondaryText).Grid(row: 1, column: 2));
-            Element? blocker = node.Blocker is { } b
-                ? Caption($"Blocked since {b.BlockedSince.ToLocalTime():HH:mm:ss} · {b.EventName} · Source {b.SourceId}")
-                    .TextWrapping(TextWrapping.Wrap).Foreground(hc
-                        ? ReactorTheme.Ref("SystemColorWindowTextColorBrush") : ReactorTheme.SecondaryText)
-                : null;
-            return VStack(4, row, blocker,
-                    expanded && descendants.Length > 0
-                        ? VStack(4, descendants).Margin(depth < 12 ? 16 : 0, 0, 0, 0) : null)
+                    .ToolTip(node.Name).VAlign(VerticalAlignment.Center).Margin(8, 0, 0, 0).Grid(column: 3));
+            // A Button (not a Border) hosts each row: it keeps the visual
+            // chrome via a transparent template while exposing the
+            // UIAutomation Invoke pattern, so the row is keyboard- and
+            // test-reachable like the +/- expanders.
+            var rowButton = Button(row, () => select(node.SessionId))
+                .Padding(6)
+                .CornerRadius(4)
+                .WithKey((isSelected ? "selected-" : "clear-") + node.SessionId)
+                .AutomationName(NodeLabel(node));
+            rowButton = isSelected
+                ? rowButton
+                    .Background(hc ? ReactorTheme.Ref("SystemColorHighlightColorBrush") : ReactorTheme.SubtleFill)
+                    .WithBorder(hc ? ReactorTheme.Ref("SystemColorWindowTextColorBrush") : ReactorTheme.Accent,
+                        hc ? 2 : 1)
+                : rowButton
+                    .WithBorder(hc ? ReactorTheme.Ref("SystemColorWindowTextColorBrush") : ReactorTheme.Accent,
+                        2);
+            return VStack(4, rowButton,
+                expanded && descendants.Length > 0
+                    ? VStack(4, descendants).Margin(depth < 12 ? 16 : 0, 0, 0, 0) : null)
                 .WithKey(node.SessionId);
         }
         var forest = new List<Element>();
@@ -217,32 +237,40 @@ class SessionBillboard : Billboard
         return VStack(8, forest.ToArray());
     }
 
+    private static Brush StatusBrush(CopilotSessionNode node, bool hc, bool isDark)
+    {
+        if (hc) return (Brush)Application.Current.Resources["SystemColorWindowTextColorBrush"];
+        return new SolidColorBrush(
+            CopilotStatusColors.StatusColorFor(node.Status ?? CopilotSessionStatus.Unknown, isDark));
+    }
+
+    private static Brush InactiveBrush(bool hc, bool isDark)
+    {
+        if (hc) return (Brush)Application.Current.Resources["SystemColorWindowTextColorBrush"];
+        return new SolidColorBrush(
+            CopilotStatusColors.StatusColorFor(CopilotSessionStatus.Unknown, isDark));
+    }
+
+    private static Element StatusWord(CopilotSessionNode node, bool hc, bool isDark)
+    {
+        string word = node.Lifecycle == "Active"
+            ? node.Status?.ToString() ?? "Unknown"
+            : node.Lifecycle;
+        Brush brush = node.Lifecycle == "Active"
+            ? StatusBrush(node, hc, isDark)
+            : InactiveBrush(hc, isDark);
+        return Caption(word).Foreground(brush);
+    }
+
     internal static string NodeLabel(CopilotSessionNode node) =>
         $"{node.Lifecycle} · {node.Status?.ToString() ?? "Status unknown"}";
-
-    private static string NodeGlyph(CopilotSessionNode node) => node.Lifecycle switch
-    {
-        "Completed" => "✓",
-        "Ended" => "■",
-        "Unknown" => "?",
-        _ => node.Status switch
-        {
-            CopilotSessionStatus.Blocked => "!",
-            CopilotSessionStatus.Working => "▶",
-            CopilotSessionStatus.Idle => "○",
-            _ => "?",
-        },
-    };
 
     private static Element CopyId(string id, string label) =>
         Component<SessionIdCopy, SessionIdCopyProps>(new(id, label)).WithKey(label + ":" + id);
 
     private static Element DetailFields(CopilotSessionDetails details) => VStack(4,
         Field("Model", details.Model),
-        Field("Reasoning", details.ReasoningEffort),
-        Field("Context tier", details.ContextTier),
-        Field("Context tokens / limit", $"{Number(details.ContextTokens)} / {Number(details.ContextLimit)}"),
-        Field("Prompt token limit", Number(details.PromptLimit)));
+        Field("Reasoning", details.ReasoningEffort));
 
     private static Element UsageFields(CopilotSessionDetails details) => VStack(4,
         Field("Input / output tokens", $"{Number(details.InputTokens)} / {Number(details.OutputTokens)}"),

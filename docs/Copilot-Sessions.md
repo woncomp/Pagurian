@@ -357,24 +357,33 @@ name/cwd. The three client icons deploy with the module and resolve with
 `ModuleAssets`, never from developer installation/download paths.
 
 The billboard has a 600-DIP width and 640-DIP content ceiling with a bounded
-scroll viewport below the header. Its overview/header uses aggregate status;
-its keyed expandable tree shows **local** node status and lifecycle. Expansion
-survives snapshot updates. One breakdown Card below the tree shows **all**
-nodes regardless of expansion. Blocker provenance includes blocked-since and
-source. Copy ID buttons copy the complete ID through the clicked window's
-HWND-owned native clipboard and show checked success/failure feedback,
-including contention. The billboard activates at reveal (25H2 renders
-SystemBackdrop only for focused windows) and returns focus on close.
+scroll viewport below the header. Its overview/header uses aggregate status.
+Its session tree is a selectable single-line list: each row reuses the tray
+cell's 16-DIP status-icon vocabulary (Idle = hollow circle, Working = active
+progress ring, Blocked = circle containing `!`, Unknown = circle containing
+`?`) followed by the status word and the node name. Any non-Active lifecycle
+(Completed/Ended/Unknown) collapses to one uniform inactive mark: a grey
+circle containing `✕`. Expansion survives snapshot updates, and the selected
+row survives re-renders (falling back to the root when its node disappears).
+A details Card below the tree shows the selected node's copyable ID, blocker
+provenance (blocked-since and source), model/reasoning and usage rows, and
+that node's recent hooks. Copy ID buttons copy the complete ID through the
+clicked window's HWND-owned native clipboard and show checked
+success/failure feedback, including contention. The billboard activates at
+reveal (25H2 renders SystemBackdrop only for focused windows) and returns
+focus on close.
 
-At the very bottom, at most five received-hook rows show exactly
+In the details card, at most five received-hook rows show exactly
 `HH:mm:ss eventType toolName`, local time, newest first, with `-` for missing
-tool names. Each is a bounded single line; no JSON, prompts, arguments, dates
+tool names; SDK sessions instead list their recent persisted events. Each row
+is a bounded single line; no JSON, prompts, arguments, dates
 or source IDs appear in these rows. Whitespace/control characters in labels
 are normalized to keep the three fields on one line. Each unresolved source
-retains five summaries; attachment merges member buffers by parsed timestamp,
-then arrival sequence for ties. App completion and process changes preserve
-conversation summaries without replaying work; CLI generation reset and
-tracker teardown fence their histories. These are hooks, not transcript replay.
+retains five summaries; the per-node list reuses the same bounded buffer,
+filtered by the owner's restart epoch. App completion and process changes
+preserve conversation summaries without replaying work; CLI generation reset
+and tracker teardown fence their histories. These are hooks, not transcript
+replay.
 
 Raw latest-hook compatibility fields remain internal, and hook-file logging
 is unchanged; the billboard no longer renders raw payloads.
@@ -449,7 +458,9 @@ Copilot tracker, loading user configuration or installing hooks. It checks
 icon-size parsing/preservation, Medium compatibility, live Large-to-Medium
 updates, exact 1.6x Large width, two-row bounds, finite-column ellipsis,
 the four Large status icons, accessibility names, equal variant widths,
-bounded scrolling, local-vs-group state, all-node breakdown, expansion
+bounded scrolling, local-vs-group state, absence of the permanently-unavailable
+context rows, single-line tree rows with per-row status words, selection
+following the tree, per-node recent-hook scoping, expansion/selection
 preservation, exact recent rows, integer display and (when opted in) clipboard
 readback/contention without activation. `-BuildOnly` skips UI. The recorded
 interactive run used 100% display scale and exercised sampled Light/Dark

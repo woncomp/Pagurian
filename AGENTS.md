@@ -487,15 +487,19 @@ public sealed class MyShell : Shell
   aggregate status, then cwd basename) share a WinUI-measured status-based width;
   finite Grid columns ellipsize project names, and the host tooltip exposes cwd.
   Icons deploy under module `Assets` and use `ModuleAssets`. The billboard
-  header aggregates, its tree shows local status, and its breakdown includes
-  all retained nodes. Completed/ended nodes count toward disjoint known usage
+  header aggregates, its session tree is a selectable single-line list (the
+  shared tray-cell status-icon vocabulary — spinning ring for Working, ring +
+  glyph otherwise — plus a per-row status word, and any non-Active lifecycle
+  collapses to a uniform grey ring + ✕), and a details card below the tree shows
+  the selected node's copyable ID, blocker, usage and that node's recent hooks.
+  Completed/ended nodes count toward disjoint known usage
   but not active status. The shared bounded background transcript reader allows
   2 MiB lines and retains whitelisted telemetry scalars, not prompts. Deduplicate
   call aliases; cumulative session checkpoints are separately labelled and
   never added as own/group usage. Missing is unavailable; incomplete is Partial.
-  Context occupancy requires explicit evidence, not last-request input tokens.
-  The bottom five hook rows contain only local HH:mm:ss, eventType and toolName
-  (`-` when absent). Generation fences cover rows/nodes/details. Clipboard copy
+  The five recent-hook rows contain only local HH:mm:ss, eventType and toolName
+  (`-` when absent) and follow the selected node. Generation fences cover
+  rows/nodes/details. Clipboard copy
   uses the clicked HWND with checked feedback. Billboards activate at reveal
   (25H2 renders SystemBackdrop only for focused windows) and return focus on
   close; Esc closes a focused billboard.

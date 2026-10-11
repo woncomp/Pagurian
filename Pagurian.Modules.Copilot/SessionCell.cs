@@ -111,7 +111,7 @@ class SessionCell : ShellCell
                 .Grid(row: 0),
             LargeProjectName(session.ProjectName)
                 .Grid(row: 0),
-            StatusIcon(session.Status, statusBrush)
+            SessionStatusIcon.For(session.Status, statusBrush)
                 .Margin(left: SessionCellLayout.GapDip, top: 0,
                     right: SessionCellLayout.PaddingDip, bottom: 0)
                 .HAlign(HorizontalAlignment.Right)
@@ -166,42 +166,4 @@ class SessionCell : ShellCell
             .HAlign(HorizontalAlignment.Center)
             .VAlign(VerticalAlignment.Center);
 
-    private static Element StatusIcon(CopilotSessionStatus status, Brush brush) =>
-        status == CopilotSessionStatus.Working
-            ? ProgressRing()
-                .IsActive()
-                .Width(SessionCellLayout.IconDip)
-                .Height(SessionCellLayout.IconDip)
-                .Foreground(brush)
-                .AccessibilityHidden()
-            : Grid(
-                [GridSize.Star()],
-                [GridSize.Star()],
-                Ellipse()
-                    .Set(ellipse =>
-                    {
-                        ellipse.Stroke = brush;
-                        ellipse.StrokeThickness = 1.5;
-                    })
-                    .Width(SessionCellLayout.IconDip)
-                    .Height(SessionCellLayout.IconDip),
-                status switch
-                {
-                    CopilotSessionStatus.Blocked => Caption("!")
-                        .Foreground(brush)
-                        .HAlign(HorizontalAlignment.Center)
-                        .VAlign(VerticalAlignment.Center),
-                    CopilotSessionStatus.Done => Caption("✓")
-                        .Foreground(brush)
-                        .HAlign(HorizontalAlignment.Center)
-                        .VAlign(VerticalAlignment.Center),
-                    CopilotSessionStatus.Unknown => Caption("?")
-                        .Foreground(brush)
-                        .HAlign(HorizontalAlignment.Center)
-                        .VAlign(VerticalAlignment.Center),
-                    _ => null,
-                })
-                .Width(SessionCellLayout.IconDip)
-                .Height(SessionCellLayout.IconDip)
-                .AccessibilityHidden();
 }
