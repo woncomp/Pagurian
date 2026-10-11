@@ -4,10 +4,12 @@ namespace Pagurian.Sdk;
 
 // A details panel popped up by clicking a shell cell. The module defines the
 // content, the design size, and the open/close behavior; the host owns the
-// window chrome (borderless, rounded, acrylic, NoActivate, always-on-top),
-// the placement (above the owner cell, below when the taskbar is at the top
-// edge), outside-click dismissal, one-at-a-time mutual exclusion, and closing
-// the billboard when its owner cell is removed.
+// window chrome (borderless, rounded, acrylic, always-on-top; activated at
+// reveal because SystemBackdrop renders only for focused windows on 25H2,
+// with focus returned to the previous window on close), the placement (above
+// the owner cell, below when the taskbar is at the top edge), Esc and
+// outside-click dismissal, one-at-a-time mutual exclusion, and closing the
+// billboard when its owner cell is removed.
 //
 // A fresh billboard instance is created on every show via the cell's
 // CreateBillboard delegate, so per-open subscriptions can simply follow the

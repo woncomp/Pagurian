@@ -298,9 +298,20 @@ static class TaskbarInterop
     private static extern short GetAsyncKeyState(int vKey);
 
     private const int VK_LBUTTON = 0x01;
+    private const int VK_ESCAPE = 0x1B;
 
     // Physical left-button state, for the native clock's pressed feedback.
     public static bool IsLeftButtonDown() => (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+
+    // Physical Escape state, for billboard dismissal while it holds focus.
+    public static bool IsEscapeDown() => (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    // Foreground check for the controller's Esc-dismissal gate (billboards
+    // activate at reveal so their SystemBackdrop renders on 25H2).
+    public static IntPtr GetForegroundWindowHandle() => GetForegroundWindow();
 
     [DllImport("user32.dll")]
     private static extern int MessageBoxW(IntPtr hWnd, string lpText, string lpCaption, uint uType);

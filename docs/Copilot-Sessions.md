@@ -363,7 +363,8 @@ survives snapshot updates. One breakdown Card below the tree shows **all**
 nodes regardless of expansion. Blocker provenance includes blocked-since and
 source. Copy ID buttons copy the complete ID through the clicked window's
 HWND-owned native clipboard and show checked success/failure feedback,
-including contention. The host remains `NoActivate=true`.
+including contention. The billboard activates at reveal (25H2 renders
+SystemBackdrop only for focused windows) and returns focus on close.
 
 At the very bottom, at most five received-hook rows show exactly
 `HH:mm:ss eventType toolName`, local time, newest first, with `-` for missing

@@ -31,11 +31,15 @@ internal sealed class BillboardSession(
     private bool _waitingForFrame;
     private bool _prepared;
     private nint _hwnd;
+    private nint _foregroundBeforeOpen;
     private RectInt32? _monitorWorkArea;
     private double _monitorScale;
 
     internal BillboardSessionState State { get; private set; } = BillboardSessionState.Preparing;
     internal ReactorWindow? Window => _window;
+    // The native handle, for the controller's foreground checks (Esc dismissal
+    // is gated on the billboard actually holding focus).
+    internal nint Hwnd => _hwnd;
     internal static WindowSpec CreateSpec(string title, double width, double height) => new()
     {
         Title = title,
@@ -48,6 +52,9 @@ internal sealed class BillboardSession(
         Backdrop = BackdropChoice.Of(BackdropKind.AcrylicThin),
         ShowInTaskbar = false,
         ShowInSwitcher = false,
+        // NoActivate at creation: the cloaked preparation Show() must not take
+        // focus. Reveal() drops the flag and activates, because SystemBackdrop
+        // renders only while the window holds focus on Windows 11 25H2.
         NoActivate = true,
         IsMinimizable = false,
         IsMaximizable = false,
@@ -68,6 +75,10 @@ internal sealed class BillboardSession(
         try
         {
             if (getAnchor() is not { } anchor) { Close(); return; }
+            // Capture focus before the window exists: after Show() the window
+            // itself may hold foreground, which would make the close-time
+            // restore target meaningless.
+            _foregroundBeforeOpen = GetForegroundWindow();
             ApplyTheme();
             theme.Changed += OnThemeChanged;
             _subscribed = true;
@@ -267,6 +278,13 @@ internal sealed class BillboardSession(
             var bounds = Place(anchor, window.AppWindow.Size.Width, window.AppWindow.Size.Height, Scale);
             window.AppWindow.Move(new PointInt32(bounds.X, bounds.Y));
             SetDwmAttribute(Cloak, false);
+            // Take focus only once content is visible — the window was created
+            // NoActivate so the cloaked preparation Show() could not steal it.
+            // Acrylic needs focus to render on 25H2; the reveal click already
+            // grants foreground rights. Uncloaking and activation land in the
+            // same UI turn, so the first presented frame has the material.
+            window.SetNoActivate(false);
+            window.Activate();
             State = BillboardSessionState.Visible;
             StopWatchdog();
             _opened = true;
@@ -300,6 +318,14 @@ internal sealed class BillboardSession(
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(nint hwnd, int attribute, ref int value, int size);
+
+    // Local P/Invokes instead of TaskbarInterop: the lifecycle fixtures link
+    // this file standalone, without the host's interop layer.
+    [DllImport("user32.dll")]
+    private static extern nint GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(nint hwnd);
 
     internal static RectInt32 Place(BillboardAnchor anchor, int width, int height, double scale)
     {
@@ -348,6 +374,11 @@ internal sealed class BillboardSession(
         var window = _window;
         try
         {
+            // Return focus to the window that held it before reveal, but only
+            // when the billboard still owns it — after an outside click the
+            // click's target already claimed focus and must not be disturbed.
+            if (_foregroundBeforeOpen != 0 && GetForegroundWindow() == _hwnd)
+                SetForegroundWindow(_foregroundBeforeOpen);
             // Keep content and acrylic intact until the HWND is hidden.
             // Visible WinUI teardown can otherwise expose a white frame.
             window?.Hide();

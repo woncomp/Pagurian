@@ -25,7 +25,7 @@ static class TraySurfaceController
     private static TraySurface? _hoverSurface;
     private static string? _tooltipHoverKey;
     private static TraySurface? _tooltipSurface;
-    private static bool _pressed, _wasLeftButtonDown, _reconcileQueued;
+    private static bool _pressed, _wasLeftButtonDown, _wasEscapeDown, _reconcileQueued;
     private static int _tooltipHoverTicks;
     private static DateTime _nextTopologyCheck;
     private const int TooltipDwellTicks = 8;
@@ -189,6 +189,19 @@ static class TraySurfaceController
         var leftDown = TaskbarInterop.IsLeftButtonDown();
         var clickEdge = leftDown && !_wasLeftButtonDown;
         _wasLeftButtonDown = leftDown;
+
+        // Esc closes a visible billboard, but only while it actually holds
+        // focus — otherwise the keypress belongs to some other app and must
+        // not be stolen. (Billboards activate at reveal for acrylic; this is
+        // their only keyboard interaction.)
+        var escDown = TaskbarInterop.IsEscapeDown();
+        var escEdge = escDown && !_wasEscapeDown;
+        _wasEscapeDown = escDown;
+        if (escEdge && _billboardSession is { State: BillboardSessionState.Visible } focused &&
+            TaskbarInterop.GetForegroundWindowHandle() == focused.Hwnd)
+        {
+            CloseBillboard();
+        }
 
         // Which cell is under the cursor, if any? Cell rects are disjoint
         // across displays, so the first hit wins.
@@ -396,7 +409,8 @@ static class TraySurfaceController
     }
 
     // Host-standard billboard chrome: borderless, rounded, acrylic,
-    // NoActivate, always-on-top. Modules supply only content and size.
+    // always-on-top, activated at reveal (25H2 renders SystemBackdrop only
+    // for focused windows). Modules supply only content and size.
     private static WindowSpec BillboardSpec(Billboard billboard) =>
         BillboardSession.CreateSpec(billboard.Title, billboard.WidthDip, billboard.HeightDip) with
     {

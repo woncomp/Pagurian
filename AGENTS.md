@@ -496,7 +496,9 @@ public sealed class MyShell : Shell
   Context occupancy requires explicit evidence, not last-request input tokens.
   The bottom five hook rows contain only local HH:mm:ss, eventType and toolName
   (`-` when absent). Generation fences cover rows/nodes/details. Clipboard copy
-  uses the clicked HWND with checked feedback; never globally activate billboards.
+  uses the clicked HWND with checked feedback. Billboards activate at reveal
+  (25H2 renders SystemBackdrop only for focused windows) and return focus on
+  close; Esc closes a focused billboard.
   `tests\Verify-CopilotSessionPresentation.ps1 -Platform x64` uses isolated UI;
   `-Clipboard` additionally replaces clipboard text for roundtrip/contention tests.
 - The codebase mirrors `D:\Workspace\gitea_backup\Tea` (`Tea.Gui` project):

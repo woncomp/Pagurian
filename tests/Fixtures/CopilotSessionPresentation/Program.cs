@@ -162,7 +162,7 @@ sealed class Harness
             {
                 Require(_billboard!.State == BillboardSessionState.Visible, "billboard not visible");
                 var window = _billboard.Window!;
-                Require(window.Spec.NoActivate, "NoActivate policy changed");
+                Require(!window.Spec.NoActivate, "revealed billboards must be activated (25H2 focus-gated acrylic)");
                 Require(_billboard.BoundsPx.Height / window.DipScale <= 642, "billboard exceeds 640 DIP ceiling");
                 Require(Descendants<ScrollViewer>(window.NativeWindow.Content).Any(s => s.ScrollableHeight > 0),
                     "long body has no bounded scroll viewport");

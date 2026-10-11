@@ -167,7 +167,10 @@ sealed class Harness
             });
             for (int i = 0; i < 12; i++)
             {
-                Step(80, () => { CheckVisible(_current!, 196); Dismiss(_current!); _current = Open(180); });
+                // Billboards activate at reveal (25H2 focus-gated acrylic), so
+                // each cycle now includes real foreground transitions; 80 ms
+                // steps starved the low-priority reveal callback.
+                Step(160, () => { CheckVisible(_current!, 196); Dismiss(_current!); _current = Open(180); });
             }
             Step(150, () =>
             {

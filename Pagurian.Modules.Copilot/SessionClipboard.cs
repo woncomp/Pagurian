@@ -3,8 +3,10 @@ using Microsoft.UI.Xaml;
 
 namespace Pagurian.Modules.Copilot;
 
-// WinRT Clipboard requires a foreground window in some desktop hosts. Use the
-// clicked element's own HWND instead, without activating this or any other window.
+// Clipboard writes are done through the clicked element's own HWND (plain
+// Win32 OpenClipboard), which works regardless of the window's foreground
+// state. The billboard activates at reveal nowadays, but this path stays
+// activation-agnostic by design.
 internal static class SessionClipboard
 {
     internal static bool TryCopy(FrameworkElement? owner, string text, out string feedback)

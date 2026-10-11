@@ -40,6 +40,9 @@ class TooltipWindow : Component
         Backdrop = BackdropChoice.Of(BackdropKind.AcrylicThin),
         ShowInTaskbar = false,
         ShowInSwitcher = false,
+        // Never activate: ActivateOnOpen defaults to true, which would let the
+        // tooltip steal foreground (observed: GetForegroundWindow landing on it).
+        ActivateOnOpen = false,
         NoActivate = true,
         IsMinimizable = false,
         IsMaximizable = false,

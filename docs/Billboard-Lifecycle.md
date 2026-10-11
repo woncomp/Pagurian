@@ -32,6 +32,15 @@ owns only the current session, owner lookup, and click dispatch.
    updates and navigation use the module's scrolling content. Keep theme
    propagation active.
 
+At reveal the window also takes keyboard focus, immediately after uncloaking
+and in the same UI turn, so the first presented frame already has the acrylic
+material: Windows 11 25H2 renders SystemBackdrop only while the window holds
+focus (upstream: microsoft-ui-xaml#10570). Billboards therefore start
+`NoActivate` (so the cloaked preparation `Show()` cannot steal focus) and drop
+the flag at reveal; the reveal click on our own tray supplies the foreground
+rights. See `docs/roadmap/Billboard-Activation-Design.md` for the full
+rationale.
+
 DWM's [cloak and transition attributes](https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute)
 allow the window to be composed without being displayed and suppress native
 show/hide transition snapshots. [Rendered](https://learn.microsoft.com/en-us/windows/windows-app-sdk/api/winrt/microsoft.ui.xaml.media.compositiontarget.rendered)
@@ -51,7 +60,13 @@ Content, acrylic, colors, and dimensions are not reset before hiding. DWM
 transitions are disabled for the popup so a teardown snapshot cannot linger as
 an empty or white frame. `OnClosed` is delivered once for an opened session;
 pre-reveal cancellation delivers neither module lifecycle hook, but mounted
-Reactor effects are still disposed.
+Reactor effects are still disposed. Dismissal itself is unchanged: the
+controller's cursor polling closes the billboard on outside click (clicks
+inside its bounds never dismiss), on owner-cell removal, on toggle, and —
+newly — on Esc while the billboard holds focus. When the billboard still owns
+the foreground at close (Esc, toggle-off), focus returns to the window that
+held it before reveal; after an outside click the click's target already owns
+focus and is left alone.
 
 No SDK signatures or dependency versions change. Compass now derives its
 520-DIP page height directly from the host's monitor limit, without writing

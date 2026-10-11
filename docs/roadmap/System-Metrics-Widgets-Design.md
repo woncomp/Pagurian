@@ -11,7 +11,7 @@ Pagurian will add two fixed taskbar widget cells alongside the existing clock/He
 
 The CPU and memory cells show an integer percentage above a thin horizontal gauge. Clicking either cell opens a Fluent-style details popup. The popups retain the application's existing non-activating, always-on-top behavior and participate in the existing one-popup-at-a-time interaction model.
 
-Metrics refresh every 10 seconds while their popup is closed and every second while their popup is visible. In this design, a popup being visible is the definition of it being “active”; Windows focus is not used because Pagurian popups use `NoActivate`.
+Metrics refresh every 10 seconds while their popup is closed and every second while their popup is visible. In this design, a popup being visible is the definition of it being “active”; Windows focus is not used for cadence. (This document's `NoActivate` popup statements predate `Billboard-Activation-Design.md`: billboards now activate at reveal so their acrylic renders on Windows 11 25H2; cadence tracking still keys off visibility, not focus.)
 
 ## User Experience
 
@@ -69,7 +69,7 @@ The ranking uses `Process.WorkingSet64`. It intentionally does not use private c
 
 ### Popup behavior
 
-- CPU and memory popups use `WindowStyle.None`, rounded corners, thin acrylic, `NoActivate`, no taskbar/switcher entry, and always-on-top positioning, consistent with the existing popups.
+- CPU and memory popups use `WindowStyle.None`, rounded corners, thin acrylic, no taskbar/switcher entry, and always-on-top positioning, consistent with the existing popups. (Superseded by `Billboard-Activation-Design.md`: popups activate at reveal for 25H2 acrylic; `NoActivate` no longer applies to billboards.)
 - Clicking a closed CPU or memory cell closes any Hello World or Copilot popup and opens the selected metrics popup.
 - Clicking the same cell again closes its popup.
 - Clicking the other metrics cell replaces the currently open popup.
