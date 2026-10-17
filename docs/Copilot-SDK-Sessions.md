@@ -45,8 +45,17 @@ use the same three icons as the hook shell. Unknown or other markers remain
 visible with a neutral icon and an explicit source label.
 
 The SDK monitor owns a separate runtime shared by all Copilot SDK shell
-instances. The existing usage/login runtime and the hook-based Copilot
-Sessions shell are not changed or used as fallbacks.
+instances. The separate usage/login runtime and the hook-based Copilot
+Sessions shell are not used as fallbacks.
+
+The usage service still polls quota every five minutes, but recycles only its
+own runtime on the first refresh at or after one hour of successful runtime
+uptime. Manual refresh within that window reuses the runtime; login recreates
+it immediately. A quota read spanning a monthly reset also gets one fresh-runtime
+retry. Recycling never stops the SDK session monitor or the sessions it observes.
+The runtime may return retained quota within an hour: polling is not a guarantee
+of a fresh upstream sample. Invalid reset timestamps and legitimate zero usage
+do not independently trigger recycling.
 
 Removing the final Copilot SDK shell detaches its cells and cancels polling
 immediately. Its private runtime then drains and stops on a background thread,

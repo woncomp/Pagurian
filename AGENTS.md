@@ -505,6 +505,20 @@ public sealed class MyShell : Shell
   close; Esc closes a focused billboard.
   `tests\Verify-CopilotSessionPresentation.ps1 -Platform x64` uses isolated UI;
   `-Clipboard` additionally replaces clipboard text for roundtrip/contention tests.
+- **Copilot usage freshness**: the usage service polls every five minutes and
+  recycles only its dedicated SDK runtime on the first refresh at or after one
+  hour of successfully started uptime, measured with a monotonic clock.
+  Manual refresh does not force an early recycle; login still recreates the
+  runtime immediately. Refresh/login/replacement share the existing operation
+  gate. A quota request spanning a cycle boundary gets one fresh-runtime retry.
+  Invalid raw reset timestamps and genuine zero usage do not prove a stale
+  snapshot. Hourly recycling prevents indefinite runtime retention, not stale
+  upstream data within that hour. Failed cleanup blocks replacement until
+  cleanup succeeds; errors retain the last snapshot without marking it fresh.
+  No user sessions, monitor runtime, credentials or prior history are rewritten.
+  `tests\Verify-CopilotUsagePresentation.ps1 -Platform x64` includes fake-clock,
+  frozen-quota and lifecycle/failure tests with isolated temporary history and
+  no actual SDK runtime/authentication calls.
 - The codebase mirrors `D:\Workspace\gitea_backup\Tea` (`Tea.Gui` project):
   same csproj settings and Reactor version.
 

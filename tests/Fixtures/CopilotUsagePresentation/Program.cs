@@ -226,6 +226,7 @@ sealed class Harness
             _billboard = new(BillboardSession.CreateSpec(billboard.Title, billboard.WidthDip, billboard.HeightDip),
                 billboard, Theme, () => anchor, billboard.OnOpened, billboard.OnClosed, Console.WriteLine);
             _billboard.Start(); // Production host preparation; fake source Refresh only.
+            _steps.Enqueue(() => Task.Run(() => UsageServiceFixture.RunAsync(Log)));
             Step(CheckInitial);
             Step(CheckCalendar);
             Step(CheckStableDateMeasurement);

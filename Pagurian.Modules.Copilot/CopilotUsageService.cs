@@ -3,21 +3,20 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
-using GitHub.Copilot;
 using GitHub.Copilot.Rpc;
-using Microsoft.UI.Dispatching;
 using Microsoft.UI.Reactor;
 using Pagurian.Sdk;
 
 namespace Pagurian.Modules.Copilot;
 
-// Owns the module's single SDK runtime. All SDK and CLI work runs on pool
+// Owns the module's dedicated usage SDK runtime. All SDK and CLI work runs on pool
 // threads; immutable snapshots are published through Reactor's UI dispatcher.
 // Refreshes and logins are each coalesced, and a shared gate serializes the two
 // operations so account changes cannot race a quota read.
 internal sealed class CopilotUsageService : ICopilotUsageSource
 {
     private static readonly TimeSpan RefreshInterval = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan RuntimeLifetime = TimeSpan.FromHours(1);
     private static readonly TimeSpan OperationShutdownTimeout =
         TimeSpan.FromSeconds(5);
     private static readonly TimeSpan ClientShutdownTimeout =
@@ -25,12 +24,17 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
 
     private readonly object _sync = new();
     private readonly SemaphoreSlim _operationGate = new(1, 1);
-    private readonly CopilotUsageHistoryStore _history = new();
+    private readonly CopilotUsageHistoryStore _history;
+    private readonly Func<ICopilotUsageRuntime> _createClient;
+    private readonly TimeProvider _clock;
+    private readonly Action<Action>? _dispatchOverride;
+    private readonly Func<CancellationToken, Task>? _loginOverride;
 
     private CancellationTokenSource? _lifetime;
-    private DispatcherQueue? _dispatcher;
+    private Action<Action>? _dispatch;
     private Logger? _log;
-    private CopilotClient? _client;
+    private ICopilotUsageRuntime? _client;
+    private long? _clientStartedAt;
     private Process? _loginProcess;
     private Task? _periodicTask;
     private Task? _refreshTask;
@@ -42,25 +46,53 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
 
     public event Action? Changed;
 
-    public void Start(Logger log)
+    public CopilotUsageService()
+    {
+        _createClient = () => new CopilotUsageRuntime(CopilotModule.CopilotRuntimePath);
+        _clock = TimeProvider.System;
+        _history = new();
+    }
+
+    internal CopilotUsageService(
+        Func<ICopilotUsageRuntime> createClient, TimeProvider clock,
+        CopilotUsageHistoryStore history, Action<Action> dispatch,
+        Func<CancellationToken, Task> login)
+    {
+        _createClient = createClient;
+        _clock = clock;
+        _history = history;
+        _dispatchOverride = dispatch;
+        _loginOverride = login;
+    }
+
+    public void Start(Logger log) => Start(log, poll: true);
+
+    internal void Start(Logger log, bool poll)
     {
         lock (_sync)
         {
             if (_lifetime is not null)
                 return;
 
-            _dispatcher = ReactorApp.UIDispatcher
-                ?? throw new InvalidOperationException(
-                    "The Reactor UI dispatcher is unavailable.");
+            if (_dispatchOverride is not null)
+                _dispatch = _dispatchOverride;
+            else
+            {
+                var dispatcher = ReactorApp.UIDispatcher
+                    ?? throw new InvalidOperationException(
+                        "The Reactor UI dispatcher is unavailable.");
+                _dispatch = action => dispatcher.TryEnqueue(() => action());
+            }
             _log = log;
             _lifetime = new CancellationTokenSource();
             Volatile.Write(ref _state, CopilotUsageState.Initial);
 
             var generation = ++_generation;
             var token = _lifetime.Token;
-            _periodicTask = Task.Run(
-                () => RunPeriodicAsync(generation, token),
-                CancellationToken.None);
+            if (poll)
+                _periodicTask = Task.Run(
+                    () => RunPeriodicAsync(generation, token),
+                    CancellationToken.None);
         }
     }
 
@@ -118,7 +150,7 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
             _refreshTask = null;
             _loginTask = null;
             _loginProcess = null;
-            _dispatcher = null;
+            _dispatch = null;
             _log = null;
         }
     }
@@ -146,7 +178,7 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
         }
     }
 
-    private Task RequestRefreshAsync()
+    internal Task RequestRefreshAsync()
     {
         lock (_sync)
         {
@@ -179,7 +211,7 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
         }
     }
 
-    private Task RequestLoginAsync()
+    internal Task RequestLoginAsync()
     {
         lock (_sync)
         {
@@ -254,7 +286,9 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
             // Recreate the SDK runtime after the official CLI writes the shared
             // credential store so the next status read observes the new account.
             await StopClientAsync(token).ConfigureAwait(false);
-            await RunOfficialLoginAsync(token).ConfigureAwait(false);
+            await (_loginOverride is null
+                ? RunOfficialLoginAsync(token)
+                : _loginOverride(token)).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             await RefreshClientStateAsync(
                     generation,
@@ -283,11 +317,9 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
     {
         var client = await EnsureClientAsync(token).ConfigureAwait(false);
         var auth = await client.GetAuthStatusAsync(token).ConfigureAwait(false);
-        var account = new CopilotUsageAccount(
-            Clean(auth.Login),
-            Clean(auth.Host),
-            Clean(auth.AuthType));
-        var refreshedAt = DateTimeOffset.UtcNow;
+        token.ThrowIfCancellationRequested();
+        var account = auth.Account;
+        var refreshedAt = _clock.GetUtcNow();
 
         if (!auth.IsAuthenticated)
         {
@@ -295,26 +327,39 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
                 generation,
                 state => state.CompleteUnauthenticated(
                     account,
-                    Clean(auth.StatusMessage),
+                    auth.StatusMessage,
                     refreshedAt,
                     finishLogin));
             return;
         }
 
         Publish(generation, state => state.WithAccount(account));
-        var readStartedAt = DateTimeOffset.UtcNow;
-        var quota = await client.Rpc.Account.GetQuotaAsync(null, null, token).ConfigureAwait(false);
-        var premium = NormalizePremiumInteractions(quota.QuotaSnapshots);
+        var readStartedAt = _clock.GetUtcNow();
+        var quota = await client.GetQuotaAsync(token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        var premium = NormalizePremiumInteractions(quota);
         if (premium?.ResetDate is { } reset && readStartedAt < reset.AddMonths(-1))
         {
             // A request spanning reset can normalize into the next fallback
             // cycle. Read once more *after* the boundary, within the existing
             // serialized operation; do not rely on a coalesced Refresh request
             // to start another read while this task is still completing.
-            readStartedAt = DateTimeOffset.UtcNow;
-            quota = await client.Rpc.Account.GetQuotaAsync(null, null, token).ConfigureAwait(false);
-            premium = NormalizePremiumInteractions(quota.QuotaSnapshots);
+            _log?.Info("Copilot usage runtime recycle reason=cycle-boundary.");
+            await StopClientAsync(token).ConfigureAwait(false);
+            client = await EnsureClientAsync(token).ConfigureAwait(false);
+            auth = await client.GetAuthStatusAsync(token).ConfigureAwait(false);
+            if (!auth.IsAuthenticated || auth.Account.Login != account.Login ||
+                auth.Account.Host != account.Host)
+                throw new InvalidOperationException(
+                    "The Copilot account changed while refreshing the usage cycle. Retry.");
+            readStartedAt = _clock.GetUtcNow();
+            quota = await client.GetQuotaAsync(token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            premium = NormalizePremiumInteractions(quota);
+            if (premium?.ResetDate is { } nextReset && readStartedAt < nextReset.AddMonths(-1))
+                throw new InvalidDataException("Copilot quota still predates its usage cycle after retry.");
         }
+        token.ThrowIfCancellationRequested();
         var usage = new CopilotUsageSnapshot(
             premium is null ? null : premium with { ReadStartedAt = readStartedAt });
         CopilotUsageHistoryState history;
@@ -322,7 +367,7 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
         {
             history = premium is null
                 ? _history.Read(account)
-                : _history.Record(account, premium, DateTimeOffset.UtcNow, TimeZoneInfo.Local);
+                : _history.Record(account, premium, _clock.GetUtcNow(), TimeZoneInfo.Local);
         }
         catch (Exception error) when (
             error is IOException or UnauthorizedAccessException or JsonException)
@@ -339,50 +384,52 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
             state => state.Complete(
                 account,
                 usage,
-                DateTimeOffset.UtcNow,
+                _clock.GetUtcNow(),
                 finishLogin,
                 history));
     }
 
-    private async Task<CopilotClient> EnsureClientAsync(
+    private async Task<ICopilotUsageRuntime> EnsureClientAsync(
         CancellationToken token)
     {
+        token.ThrowIfCancellationRequested();
+        ICopilotUsageRuntime? existing;
+        long? startedAt;
         lock (_sync)
         {
-            if (_client is not null)
-                return _client;
+            existing = _client;
+            startedAt = _clientStartedAt;
+        }
+        if (existing is not null)
+        {
+            var age = startedAt is { } started
+                ? _clock.GetElapsedTime(started) : (TimeSpan?)null;
+            if (age is { } elapsed && elapsed < RuntimeLifetime)
+                return existing;
+            _log?.Info("Copilot usage runtime recycle reason=" +
+                (age is null ? "incomplete-start" : "hourly") +
+                " ageSeconds=" + (age?.TotalSeconds.ToString("0", CultureInfo.InvariantCulture) ?? "<null>"));
+            await StopClientAsync(token).ConfigureAwait(false);
         }
 
-        var runtimePath = CopilotModule.CopilotRuntimePath;
-        if (!File.Exists(runtimePath))
-        {
-            throw new FileNotFoundException(
-                "The bundled GitHub Copilot runtime is unavailable.",
-                runtimePath);
-        }
-
-        var client = new CopilotClient(new CopilotClientOptions
-        {
-            Mode = CopilotClientMode.CopilotCli,
-            UseLoggedInUser = true,
-            Connection = RuntimeConnection.ForStdio(runtimePath),
-        });
+        token.ThrowIfCancellationRequested();
+        var client = _createClient();
         lock (_sync)
             _client = client;
 
         try
         {
             await client.StartAsync(token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            lock (_sync)
+                if (ReferenceEquals(_client, client))
+                    _clientStartedAt = _clock.GetTimestamp();
+            _log?.Info("Copilot usage runtime started; hourly age window reset.");
             return client;
         }
         catch
         {
-            lock (_sync)
-            {
-                if (ReferenceEquals(_client, client))
-                    _client = null;
-            }
-            await DisposeClientAsync(client, token).ConfigureAwait(false);
+            await StopClientAsync(CancellationToken.None).ConfigureAwait(false);
             throw;
         }
     }
@@ -504,11 +551,25 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
 
     private async Task StopClientAsync(CancellationToken token)
     {
-        var client = DetachClient();
+        ICopilotUsageRuntime? client;
+        lock (_sync)
+        {
+            client = _client;
+            _clientStartedAt = null;
+        }
         if (client is null)
             return;
 
         await DisposeClientAsync(client, token).ConfigureAwait(false);
+        lock (_sync)
+        {
+            if (ReferenceEquals(_client, client))
+            {
+                _client = null;
+                _clientStartedAt = null;
+            }
+        }
+        token.ThrowIfCancellationRequested();
     }
 
     private void StopClientForShutdown()
@@ -536,7 +597,7 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
     private void ForceStopClientForShutdown() =>
         ForceStopClientForShutdown(DetachClient());
 
-    private void ForceStopClientForShutdown(CopilotClient? client)
+    private void ForceStopClientForShutdown(ICopilotUsageRuntime? client)
     {
         if (client is null)
             return;
@@ -562,12 +623,13 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
         }
     }
 
-    private CopilotClient? DetachClient()
+    private ICopilotUsageRuntime? DetachClient()
     {
         lock (_sync)
         {
             var client = _client;
             _client = null;
+            _clientStartedAt = null;
             return client;
         }
     }
@@ -587,7 +649,7 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
     }
 
     private async Task DisposeClientAsync(
-        CopilotClient client,
+        ICopilotUsageRuntime client,
         CancellationToken token = default)
     {
         try
@@ -612,12 +674,10 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
                 _log?.Warn(
                     "Copilot SDK forced shutdown failed " +
                     $"({Describe(forceError)}).");
+                throw;
             }
         }
-        finally
-        {
-            client.Dispose();
-        }
+        client.Dispose();
     }
 
     private CopilotUsageQuota? NormalizePremiumInteractions(
@@ -627,23 +687,26 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
             !snapshots.TryGetValue("premium_interactions", out var snapshot) ||
             snapshot is null)
         {
+            _log?.Info("Copilot premium_interactions quota unavailable.");
             return null;
         }
 
-        // Keep the server-provided reset timestamp observable; it must not be
-        // inferred from the refresh time or the entitlement state.
-        _log?.Info(
-            "Copilot premium_interactions resetDate=" +
-            (snapshot.ResetDate?.ToString("O", CultureInfo.InvariantCulture) ??
-                "<null>"));
-
-        return CopilotUsageNormalizer.Normalize(
+        var normalized = CopilotUsageNormalizer.Normalize(
             snapshot.EntitlementRequests,
             snapshot.IsUnlimitedEntitlement,
             snapshot.UsedRequests,
             snapshot.RemainingPercentage,
             snapshot.ResetDate,
-            DateTimeOffset.UtcNow);
+            _clock.GetUtcNow());
+        _log?.Info(
+            "Copilot premium_interactions resetDate=" +
+            (snapshot.ResetDate?.ToString("O", CultureInfo.InvariantCulture) ?? "<null>") +
+            " used=" + snapshot.UsedRequests.ToString(CultureInfo.InvariantCulture) +
+            " entitlement=" + snapshot.EntitlementRequests.ToString(CultureInfo.InvariantCulture) +
+            " remainingPercentage=" + snapshot.RemainingPercentage.ToString("G", CultureInfo.InvariantCulture) +
+            " normalizedUsedPercentage=" + (normalized.UsedPercentage?.ToString("G", CultureInfo.InvariantCulture) ?? "<null>") +
+            " resetEstimated=" + normalized.ResetIsEstimated);
+        return normalized;
     }
 
     private void ReportFailure(
@@ -664,11 +727,11 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
         long generation,
         Func<CopilotUsageState, CopilotUsageState> update)
     {
-        DispatcherQueue? dispatcher;
+        Action<Action>? dispatch;
         lock (_sync)
-            dispatcher = _dispatcher;
+            dispatch = _dispatch;
 
-        dispatcher?.TryEnqueue(() =>
+        dispatch?.Invoke(() =>
         {
             if (!IsCurrent(generation))
                 return;
@@ -698,9 +761,6 @@ internal sealed class CopilotUsageService : ICopilotUsageSource
         {
         }
     }
-
-    private static string? Clean(string? value) =>
-        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
     private static string Describe(Exception error)
     {
