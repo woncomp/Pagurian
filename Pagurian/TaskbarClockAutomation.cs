@@ -8,10 +8,14 @@ namespace Pagurian;
 
 internal static class TaskbarClockAutomation
 {
-    internal readonly record struct Result(int? LeftPx, string Reason);
+    // One bounded UIA pass returns both pieces of taskbar geometry: the
+    // system-area left edge (native evidence is preferred when available) and
+    // the visible taskbar content island used as the other capacity boundary.
+    internal readonly record struct Result(int? SystemAreaLeftPx,
+        TaskbarInterop.RECT? ContentBounds, string Reason);
 
     private const int MaximumDepth = 8;
-    private const int MaximumNodes = 128;
+    private const int MaximumNodes = 512;
     private const uint ProviderTimeoutMs = 250;
     private const int QueryBudgetMs = 1000;
     private const int BoundingRectangleProperty = 30001;
@@ -21,6 +25,8 @@ internal static class TaskbarClockAutomation
     private const int ClassNameProperty = 30012;
     private const int IsOffscreenProperty = 30022;
     private const int ButtonControlType = 50000;
+    private const int PaneControlType = 50033;
+    private const int GroupControlType = 50026;
     private const int TextControlType = 50020;
     private static readonly Guid AutomationClass = new("e22ad333-b25f-460c-83d0-0581107395c9");
 
@@ -29,25 +35,29 @@ internal static class TaskbarClockAutomation
         if (taskbar == 0 || taskbarProcessId == 0 || taskbarProcessId == (uint)Environment.ProcessId ||
             contentRect.Right <= contentRect.Left || contentRect.Bottom <= contentRect.Top ||
             !IsTaskbar(taskbar, taskbarProcessId))
-            return new(null, "uia-invalid-taskbar");
+            return new(null, null, "uia-invalid-taskbar");
 
         // S_FALSE also acquires an apartment initialization reference. An existing STA must
         // not be used or uninitialized by this reader.
         int initialized = CoInitializeEx(0, 0);
         if (initialized < 0)
-            return new(null, initialized == unchecked((int)0x80010106)
+            return new(null, null, initialized == unchecked((int)0x80010106)
                 ? "uia-apartment-mismatch" : "uia-com-initialize");
 
         try
         {
             using var query = new Query(taskbarProcessId, contentRect);
+            // Native system-area evidence is cheaper and stricter than UIA; the
+            // same pass still has to find the content island.
+            if (TaskbarInterop.TryGetTaskbarSystemAreaLeft(taskbar, contentRect, out var nativeLeft))
+                query.SetNativeSystemArea(nativeLeft);
             Guid clsid = AutomationClass;
             Guid iid = typeof(IUIAutomation2).GUID;
             int hr = CoCreateInstance(in clsid, 0, 1, in iid, out IUIAutomation2? automation);
             query.Own(automation);
             query.Check(hr);
             if (automation is null)
-                return new(null, "uia-unavailable");
+                return new(null, null, "uia-unavailable");
 
             query.Check(automation.put_ConnectionTimeout(ProviderTimeoutMs));
             query.Check(automation.put_TransactionTimeout(ProviderTimeoutMs));
@@ -55,37 +65,38 @@ internal static class TaskbarClockAutomation
             query.Check(automation.get_ConnectionTimeout(out uint connectionTimeout));
             query.Check(automation.get_TransactionTimeout(out uint transactionTimeout));
             if (connectionTimeout != ProviderTimeoutMs || transactionTimeout != ProviderTimeoutMs)
-                return new(null, "uia-timeout-configuration");
+                return new(null, null, "uia-timeout-configuration");
 
             query.BeforeCall();
             hr = automation.ElementFromHandle(taskbar, out IUIAutomationElement? root);
             query.Own(root);
             query.Check(hr);
             if (root is null || !query.IsOwner(root))
-                return new(null, "uia-owner-mismatch");
+                return new(null, null, "uia-owner-mismatch");
 
             query.BeforeCall();
             hr = automation.get_RawViewWalker(out IUIAutomationTreeWalker? walker);
             query.Own(walker);
             query.Check(hr);
             if (walker is null)
-                return new(null, "uia-unavailable");
+                return new(null, null, "uia-unavailable");
 
             Result result = query.Search(root, walker, 0);
             query.BeforeCall();
-            return IsTaskbar(taskbar, taskbarProcessId) ? result : new(null, "uia-invalid-taskbar");
+            return IsTaskbar(taskbar, taskbarProcessId)
+                ? result : new(null, null, "uia-invalid-taskbar");
         }
         catch (QueryFailure error)
         {
-            return new(null, error.Reason);
+            return new(null, null, error.Reason);
         }
         catch (COMException error)
         {
-            return new(null, FailureReason(error.HResult));
+            return new(null, null, FailureReason(error.HResult));
         }
         catch (InvalidComObjectException)
         {
-            return new(null, "uia-unavailable");
+            return new(null, null, "uia-unavailable");
         }
         finally
         {
@@ -122,7 +133,21 @@ internal static class TaskbarClockAutomation
         private readonly long _started = Stopwatch.GetTimestamp();
         private readonly List<object> _owned = [];
         private int _nodes;
-        private string _missingReason = "uia-clock-missing";
+        private string _missingReason = "uia-geometry-missing";
+        private int? _nativeSystemArea;
+        private int? _clockLeft;
+        private TaskbarInterop.RECT? _content;
+
+        internal void SetNativeSystemArea(int left) => _nativeSystemArea = left;
+
+        private Result Current()
+        {
+            var systemArea = _nativeSystemArea ?? _clockLeft;
+            var reason = _content.HasValue && systemArea.HasValue ? "uia-geometry"
+                : _content.HasValue ? "uia-content"
+                : systemArea.HasValue ? $"uia-clock+{_missingReason}" : _missingReason;
+            return new(systemArea, _content, reason);
+        }
 
         internal void Own(object? value)
         {
@@ -286,8 +311,9 @@ internal static class TaskbarClockAutomation
             // Do not descend into Pagurian (or any other process), even if its geometry
             // and structural IDs happen to resemble the Explorer clock.
             if (!IsOwner(element))
-                return new(null, _missingReason);
+                return Current();
 
+            bool skipChildren = false;
             if (HasId(element, "SystemTrayIcon") &&
                 HasClockButtonClass(element) && HasType(element, ButtonControlType))
             {
@@ -301,24 +327,52 @@ internal static class TaskbarClockAutomation
                 else
                 {
                     BeforeCall();
-                    return new(bounds.Left, "uia-clock");
+                    _clockLeft = bounds.Left;
                 }
-                return new(null, _missingReason);
+                skipChildren = true;
             }
 
-            var child = LastChild(walker, element);
+            // The content island is the observed XAML taskbar frame; native ReBar
+            // rectangles do not track it and full-width bridges are never evidence.
+            if (HasId(element, "TaskbarFrameRepeater") && HasType(element, GroupControlType))
+            {
+                if (!Visible(element))
+                    _missingReason = "uia-content-offscreen";
+                else if (!TryBounds(element, out var bounds) ||
+                    !TaskbarContent.IsValidBounds(bounds, content))
+                    _missingReason = "uia-content-invalid-bounds";
+                else if (!HasTaskbarFrameParent(walker, element))
+                    _missingReason = "uia-content-structure";
+                else
+                    _content = bounds;
+                skipChildren = true;
+            }
+
+            // A matched clock/content node is not descended into, but its earlier
+            // siblings still have to be searched for the other geometry piece.
+            var child = skipChildren
+                ? PreviousSibling(walker, element)
+                : LastChild(walker, element);
             if (child is not null && depth >= MaximumDepth)
                 throw new QueryFailure("uia-query-limit");
 
-            // The clock is normally at the end of the taskbar tree. Walking backwards
-            // avoids enumerating every task button before reaching the right cluster.
+            // The clock/content island are normally near the end of the taskbar
+            // tree. Walking backwards avoids enumerating every task button.
             for (; child is not null; child = PreviousSibling(walker, child))
-            {
-                Result result = Search(child, walker, depth + 1);
-                if (result.LeftPx.HasValue)
-                    return result;
-            }
-            return new(null, _missingReason);
+                Search(child, walker, depth + 1);
+            return Current();
+        }
+
+        private bool HasTaskbarFrameParent(IUIAutomationTreeWalker walker, IUIAutomationElement element)
+        {
+            BeforeCall();
+            int hr = walker.GetParentElement(element, out IUIAutomationElement? parent);
+            Own(parent);
+            Check(hr);
+            return parent is not null && IsOwner(parent) &&
+                HasId(parent, "TaskbarFrame") &&
+                HasClass(parent, "Taskbar.TaskbarFrameAutomationPeer") &&
+                HasType(parent, PaneControlType);
         }
     }
 

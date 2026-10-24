@@ -17,6 +17,16 @@ ReactorApp.Run(_ =>
         new RightTrayHarness().Run();
         return;
     }
+    if (Environment.GetCommandLineArgs().Contains("--overflow"))
+    {
+        new OverflowHarness().Run();
+        return;
+    }
+    if (Environment.GetCommandLineArgs().Contains("--geometry"))
+    {
+        GeometryProbe.Run();
+        return;
+    }
     var harness = new Harness();
     Application.Current.UnhandledException += (_, e) => harness.Fail(e.Exception.ToString());
     harness.Run();
@@ -55,6 +65,129 @@ sealed class Background : Component
     private static readonly SolidColorBrush Fill = new(Microsoft.UI.Colors.Black);
     public override Element Render() => Border(null).Background(Fill);
 }
+
+public sealed class SizedProbeShell : Shell
+{
+    public override void Startup()
+    {
+        var width = InstanceId switch { "2001" => 50d, "2002" => 60d, "2003" => 70d, _ => 80d };
+        AddCell<ProbeCell>(new ProbeModel { Width = width });
+    }
+}
+
+sealed class OverflowHarness
+{
+    private DispatcherQueueTimer _timer = null!;
+    private ReactorWindow _parent = null!;
+    private TrayWindowSession _session = null!;
+    private OverflowTraySession? _overflow;
+    private TaskbarTrayPlacement.Surface _surface;
+    private nint _parentHwnd;
+    private int _phase, _ticks;
+    private DateTime _deadline;
+    private ThemeService _theme = new();
+    private static TrayConfig.Entry Entry(string id) => new(typeof(SizedProbeShell).FullName!, id, null);
+
+    internal void Run()
+    {
+        try
+        {
+            TrayPresentationTests.Run();
+            _parent = ReactorApp.OpenWindow(new WindowSpec
+            {
+                Title = "Overflow isolated parent", Width = 800, Height = 48,
+                ActivateOnOpen = false, Style = WindowStyle.None, NoActivate = true,
+                ShowInTaskbar = false, ShowInSwitcher = false,
+                StartPosition = WindowStartPosition.Manual, ManualPosition = (180, 180),
+            }, () => new Background());
+            _parent.Show();
+            _parentHwnd = WinRT.Interop.WindowNative.GetWindowHandle(_parent.NativeWindow);
+            TaskbarInterop.TryGetWindowRect(_parentHwnd, out var r);
+            var scale = r.Height / 48.0;
+            var island = r with { Left = r.Left + (int)(220 * scale) };
+            _surface = new(r, r, true, scale, TaskContentRect: island);
+            Console.WriteLine($"Overflow region: {r.Left},{r.Top},{r.Width},{r.Height}");
+            ModuleLoader.Catalog[typeof(SizedProbeShell).FullName!] = new ShellAttribute { ShellType = typeof(SizedProbeShell) };
+            TrayManager.ApplyConfig([new(TrayId.PrimaryLeft,
+                [Entry("2001"), Entry("2002"), Entry("2003"), Entry("2004")])]);
+            _session = new(() => _surface, () => _parentHwnd,
+                capture: _ => Task.FromResult<byte[]?>(Enumerable.Repeat((byte)24, r.Width * r.Height * 4).ToArray()),
+                log: Console.WriteLine, themeSink: _theme.Apply);
+            _session.Start();
+            _timer = ReactorApp.UIDispatcher!.CreateTimer();
+            _timer.Interval = TimeSpan.FromMilliseconds(50);
+            _timer.Tick += (_, _) => Tick();
+            _deadline = DateTime.UtcNow.AddSeconds(8);
+            _timer.Start();
+        }
+        catch (Exception ex) { Finish(ex); }
+    }
+
+    private void Tick()
+    {
+        try
+        {
+            Require(_session.CheckEnvironment(), "overflow session lost parent");
+            _ticks++;
+            Require(DateTime.UtcNow < _deadline, $"overflow phase {_phase} timed out");
+            switch (_phase)
+            {
+                case 0:
+                    if (_session.State != TrayWindowSessionState.Visible) break;
+                    var snapshot = _session.Snapshot!;
+                    Require(snapshot.Plan.Overflow && snapshot.OverflowArrowBoundsPx != null,
+                        "narrow capacity did not enter overflow");
+                    Require(snapshot.Cells.Select(cell => cell.Key).Count() == 2,
+                        "overflow main cells did not stop at the first non-fit");
+                    Require(snapshot.Plan.OverflowCells.Select(cell => cell.Key).Count() == 2,
+                        "overflow set changed");
+                    var arrow = snapshot.OverflowArrowBoundsPx!.Value;
+                    Require(TaskbarInterop.TryGetMonitorWorkArea(arrow, out var workArea), "overflow work area unavailable");
+                    Require(arrow.Right <= workArea.Right && arrow.Left >= workArea.Left, "arrow left system area");
+                    _overflow = new OverflowTraySession(
+                        () => _session.Snapshot?.OverflowArrowBoundsPx is { } current
+                            ? new OverflowAnchor(current, workArea, _surface.Scale, TrayEdge.Left)
+                            : null,
+                        () => _session.Snapshot?.Plan.OverflowCells ?? [],
+                        _theme, new SurfaceKey("overflow-fixture", TrayEdge.Left), Console.WriteLine);
+                    _overflow.Start();
+                    _phase = 1;
+                    break;
+                case 1:
+                    if (_overflow is not { State: OverflowTrayState.Visible } overflow) break;
+                    var bounds = overflow.BoundsPx;
+                    var expectedHeight = (int)Math.Round(TaskbarTrayWindow.WindowHeightDip * _surface.Scale);
+                    Require(Math.Abs(bounds.Height - expectedHeight) <= 1, "overflow height left taskbar thickness");
+                    Require(bounds.Y < _surface.ContentRect.Top, "overflow did not open above the taskbar");
+                    Require(overflow.Snapshot!.Cells.Length == 2, "overflow cell count changed");
+                    Require(overflow.Snapshot.Cells[0].Key != overflow.Snapshot.Cells[1].Key,
+                        "overflow duplicated a cell key");
+                    Require(overflow.Snapshot.Cells.All(cell =>
+                        cell.BoundsPx.Left >= bounds.X && cell.BoundsPx.Right <= bounds.X + bounds.Width),
+                        "overflow cell rect escaped the window");
+                    Finish();
+                    return;
+            }
+        }
+        catch (Exception ex) { Finish(ex); }
+    }
+
+    private void Finish(Exception? error = null)
+    {
+        _timer?.Stop();
+        _overflow?.Close();
+        _session?.Close();
+        _parent?.Close();
+        TrayManager.ShutdownAll();
+        if (error != null) Console.Error.WriteLine(error);
+        else Console.WriteLine("Tray lifecycle passed: overflow presentation geometry and session.");
+        Environment.Exit(error == null ? 0 : 1);
+    }
+    private static void Require(bool condition, string message)
+    {
+        if (!condition) throw new InvalidOperationException(message);
+    }
+}
 sealed class Harness
 {
     private readonly Queue<(int Delay, Action Action)> _steps = new();
@@ -78,6 +211,7 @@ sealed class Harness
         {
             _realTaskbar = Environment.GetCommandLineArgs().Contains("--taskbar");
             SystemAreaTests.Run();
+            TrayPresentationTests.Run();
             _parent = ReactorApp.OpenWindow(new WindowSpec
             {
                 Title = "Tray lifecycle isolated parent", Width = 800, Height = 48,
@@ -88,13 +222,15 @@ sealed class Harness
             _parent.Show();
             _parentHwnd = WinRT.Interop.WindowNative.GetWindowHandle(_parent.NativeWindow);
             TaskbarInterop.TryGetWindowRect(_parentHwnd, out var r);
-            _surface = new(r, r, true, r.Height / 48.0);
+            _surface = new(r, r, true, r.Height / 48.0, TaskContentRect: RightIsland(r, 400));
             if (_realTaskbar && TaskbarTrayPlacement.TryGetSurface(out var real))
             {
                 var region = real.ContentRect;
                 region.Left += (int)(300 * real.Scale);
                 region.Right = Math.Min(region.Right, region.Left + (int)(800 * real.Scale));
-                _surface = real with { ContentRect = region };
+                // This fixture locks widths/click geometry, not live taskbar
+                // occupancy; give the shifted strip an isolated content island.
+                _surface = real with { ContentRect = region, TaskContentRect = RightIsland(region, 1) };
                 _parentHwnd = TaskbarInterop.FindTaskbar();
                 _parent.Hide();
             }
@@ -269,11 +405,16 @@ sealed class Harness
     }
     private static byte[] Pixels(TaskbarInterop.RECT r, byte value) => Enumerable.Repeat(value, r.Width * r.Height * 4).ToArray();
     private static TaskbarInterop.RECT Shift(TaskbarInterop.RECT r, int x) => new() { Left = r.Left + x, Right = r.Right + x, Top = r.Top, Bottom = r.Bottom };
+    private static TaskbarInterop.RECT RightIsland(TaskbarInterop.RECT r, int width) => new()
+    { Left = r.Right - width, Right = r.Right, Top = r.Top, Bottom = r.Bottom };
     private void Visible(double width)
     {
         Require(_session.State == TrayWindowSessionState.Visible, $"expected Visible, got {_session.State}");
         var s = _session.Snapshot!;
-        Require(Math.Abs(s.WidthDip - width) < .1, $"natural width {s.WidthDip}, expected {width}");
+        // Desired-size rounding can differ by one physical pixel on scaled
+        // displays; compare in surface DIPs with that same tolerance.
+        Require(Math.Abs(s.WidthDip - width) < 1 / s.Scale + .01,
+            $"natural width {s.WidthDip}, expected {width}, cells=[{string.Join(",", s.Cells.Select(c => $"{c.WidthDip:F3}"))}]");
         TaskbarInterop.TryGetWindowRect(_session.Hwnd, out var actual);
         Require(actual.Equals(s.BoundsPx), $"native bounds disagree with snapshot: {actual.Left},{actual.Top},{actual.Width},{actual.Height}");
         Require(s.Cells[0].BoundsPx.Left == actual.Left && s.Cells[^1].BoundsPx.Right == actual.Right, "hit-test cells do not fill native width");
@@ -305,4 +446,37 @@ sealed class Harness
     private static bool IsCloaked(nint hwnd) { DwmGetWindowAttribute(hwnd, 14, out int value, 4); return value != 0; }
     [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(nint hwnd, int attr, out int value, int size);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(nint hwnd);
+}
+
+static class GeometryProbe
+{
+    internal static void Run()
+    {
+        if (!TaskbarTrayPlacement.TryGetSurface(out var raw))
+        {
+            Console.Error.WriteLine("geometry probe: taskbar unavailable");
+            Environment.Exit(1);
+        }
+        using var observer = new TaskbarSystemAreaObserver(log: Console.WriteLine);
+        var observed = observer.Observe(TaskbarInterop.FindTaskbar(),
+            TaskbarInterop.WindowProcessId(TaskbarInterop.FindTaskbar()), raw);
+        if (!SpinWait.SpinUntil(() => observer.Observe(TaskbarInterop.FindTaskbar(),
+            TaskbarInterop.WindowProcessId(TaskbarInterop.FindTaskbar()), raw).TaskContentRect != null, 5000))
+        {
+            var failed = TaskbarClockAutomation.Read(TaskbarInterop.FindTaskbar(),
+                TaskbarInterop.WindowProcessId(TaskbarInterop.FindTaskbar()), raw.ContentRect);
+            Console.Error.WriteLine(
+                $"geometry probe: content island unavailable reason={failed.Reason} " +
+                $"bounds={(failed.ContentBounds is { } bounds ? $"{bounds.Left}-{bounds.Right}" : "none")}");
+            Environment.Exit(1);
+        }
+        observed = observer.Observe(TaskbarInterop.FindTaskbar(),
+            TaskbarInterop.WindowProcessId(TaskbarInterop.FindTaskbar()), raw);
+        Console.WriteLine(
+            $"geometry probe: content={observed.TaskContentRect!.Value.Left}-{observed.TaskContentRect.Value.Right} " +
+            $"systemArea={observed.SystemAreaLeftPx?.ToString() ?? "unknown"} " +
+            $"leftCapacity={new TaskbarTrayPlacement.Surface(observed.ContentRect, observed.ParentRect, true, observed.Scale, TrayEdge.Left, TaskContentRect: observed.TaskContentRect).AvailableWidthDip:F2}DIP");
+        Console.WriteLine("Tray lifecycle passed: live taskbar geometry.");
+        Environment.Exit(0);
+    }
 }

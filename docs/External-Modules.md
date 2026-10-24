@@ -59,6 +59,18 @@ Run `tests\Verify-ModuleIsolation.ps1` to build two fixture modules carrying
 different versions of the same private assembly and verify that both versions
 operate in one Pagurian process.
 
+## Optional cell simple mode
+
+To support Pagurian's capacity-aware tray, implement
+`Pagurian.Sdk.IShellCellSimpleMode` on the model object passed to `AddCell`.
+Simple mode is a module-owned, narrower presentation of the same cell. Keep
+the mode in model state, make `SetSimpleMode(bool)` idempotent, and raise the
+model's existing change notification when it changes. Do not implement it on
+the `ShellCell` component: Reactor creates and pools component instances, and
+the host must be able to query and request the mode without owning them.
+Cells whose model does not implement the interface remain Normal and can still
+participate in the host's overflow tray.
+
 ## Local SDK package
 
 A standalone repository can pin Pagurian as a Git submodule and generate a

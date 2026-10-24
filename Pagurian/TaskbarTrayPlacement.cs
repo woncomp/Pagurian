@@ -11,17 +11,52 @@ static class TaskbarTrayPlacement
         bool IsHorizontal,
         double Scale,
         TrayEdge Edge = TrayEdge.Left,
-        int? SystemAreaLeftPx = null)
+        int? SystemAreaLeftPx = null,
+        TaskbarInterop.RECT? TaskContentRect = null)
     {
-        internal bool CanPlace => !IsHorizontal || Edge != TrayEdge.Right ||
-            SystemAreaLeftPx is { } left && left > ContentRect.Left && left <= ContentRect.Right;
+        internal bool CanPlace => !IsHorizontal ||
+            TaskContentRect is { } content && TaskbarContent.IsValidBounds(content, ContentRect) &&
+            (Edge != TrayEdge.Right ||
+                SystemAreaLeftPx is { } left && left > ContentRect.Left && left <= ContentRect.Right);
+
+        // Physical-pixel interval available to the injected tray. Both sides
+        // keep the taskbar's 8-DIP anchor gap from system content.
+        internal double AvailableWidthDip
+        {
+            get
+            {
+                if (!IsHorizontal || TaskContentRect is not { } content) return double.PositiveInfinity;
+                double start, end;
+                if (Edge == TrayEdge.Right)
+                {
+                    start = content.Right + 8 * Scale;
+                    end = (SystemAreaLeftPx ?? ContentRect.Right) - 8 * Scale;
+                }
+                else
+                {
+                    start = ContentRect.Left + 8 * Scale;
+                    end = content.Left - 8 * Scale;
+                }
+                return Math.Max(0, (end - start) / Scale);
+            }
+        }
 
         public TaskbarInterop.RECT Place(double widthDip)
         {
-            if (!CanPlace)
-                throw new InvalidOperationException("Right tray placement requires a reliable system-area boundary.");
+            // A left surface without content evidence can still supply its
+            // cross-axis strip for background sampling; presentation callers
+            // check CanPlace first. Right placement always needs the system
+            // area, and content-bearing placement needs valid evidence.
+            var sampleOnly = IsHorizontal && Edge == TrayEdge.Left && TaskContentRect == null;
+            if (!CanPlace && !sampleOnly)
+                throw new InvalidOperationException("Tray placement requires reliable taskbar-boundary evidence.");
             var right = IsHorizontal && Edge == TrayEdge.Right ? SystemAreaLeftPx!.Value : ContentRect.Right;
             var winW = Math.Max(widthDip * Scale, 1);
+            if (IsHorizontal && TaskContentRect != null)
+            {
+                var availablePx = AvailableWidthDip * Scale;
+                winW = Math.Min(winW, Math.Max(availablePx, 1));
+            }
             var winH = (TaskbarTrayWindow.WindowHeightDip -
                         2 * TaskbarTrayWindow.WindowInsetYDip) * Scale;
 

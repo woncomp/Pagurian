@@ -15,3 +15,14 @@ Reference the package without deploying its runtime assembly:
 
 See the Pagurian repository's external-module documentation for the complete
 project and bundle contract.
+
+## Cell simple mode
+
+A cell model may implement `IShellCellSimpleMode` to offer a narrower
+presentation when taskbar capacity is scarce. Implement it on the model passed
+to `AddCell` (not on the `ShellCell` component): keep the boolean in model
+state, make `SetSimpleMode` idempotent, and raise the model's existing
+`Changed` event when the presentation actually changes so Reactor re-renders
+and the host can re-measure. Models that do not implement the interface are
+always Normal. The host owns when the mode is requested; the model owns what
+Simple mode looks like.

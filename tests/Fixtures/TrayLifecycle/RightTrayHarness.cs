@@ -22,6 +22,7 @@ sealed class RightTrayHarness
         try
         {
             SystemAreaTests.Run();
+        TrayPresentationTests.Run();
             var args = Environment.GetCommandLineArgs();
             int secondary = Array.IndexOf(args, "--secondary-taskbar");
             _real = secondary >= 0;
@@ -45,17 +46,28 @@ sealed class RightTrayHarness
                 _parent.Show();
                 _parentHwnd = WinRT.Interop.WindowNative.GetWindowHandle(_parent.NativeWindow);
                 Require(TaskbarTrayPlacement.TryGetSurface(_parentHwnd, TrayEdge.Right, out _raw), "isolated parent geometry unavailable");
+                var island = _raw.ContentRect;
+                island.Left += 10;
+                island.Right = island.Left + 110;
+                _raw = _raw with { TaskContentRect = island };
             }
             var region = _raw.ContentRect;
             region.Left = Math.Max(region.Left, region.Right - 360);
             Console.WriteLine($"Capture region: {region.Left},{region.Top},{region.Width},{region.Height} hwnd={_parentHwnd}");
             ModuleLoader.Catalog[typeof(ProbeShell).FullName!] = new ShellAttribute { ShellType = typeof(ProbeShell) };
-            TrayManager.ApplyConfig([new(TrayId.PrimaryLeft, [new(typeof(ProbeShell).FullName!, "1001", null)])]);
+            var surfaceKey = new SurfaceKey("fixture-right", TrayEdge.Right);
+            TrayManager.SetTopology([
+                new Pagurian.DisplayInfo(surfaceKey.DisplayKey, "Fixture display", "\\\\.\\DISPLAY999",
+                    0, _raw.ParentRect, _raw.ParentRect, false, _parentHwnd),
+            ]);
+            TrayManager.ApplyConfig([new(new TrayId(surfaceKey.DisplayKey, TrayEdge.Right),
+                [new(typeof(ProbeShell).FullName!, "1001", null)])]);
             _model = ((ProbeShell)TrayManager.Shells[0]).Model;
             _observer = _real ? new(log: Console.WriteLine) : new(Probe, Console.WriteLine);
             _session = new(ReadSurface, () => _parentHwnd,
                 capture: _real ? null : r => Task.FromResult<byte[]?>(Enumerable.Repeat((byte)24, r.Width * r.Height * 4).ToArray()),
-                log: Console.WriteLine);
+                log: Console.WriteLine,
+                content: layout => new TaskbarTrayWindow(layout, surfaceKey));
             _session.Start();
             _original = _session.Hwnd;
             _timer = ReactorApp.UIDispatcher!.CreateTimer();
@@ -73,12 +85,15 @@ sealed class RightTrayHarness
         if (Volatile.Read(ref _mode) != 1)
         {
             Interlocked.Increment(ref _probeFailures);
-            return new(null, "fixture-unavailable");
+            return new(null, null, "fixture-unavailable");
         }
         var content = context.Geometry.ContentRect;
         var clock = content;
         clock.Left = content.Right - 83 - Volatile.Read(ref _clockExtra);
         clock.Right = content.Right - 12;
+        var island = content;
+        island.Left = content.Left + 10;
+        island.Right = content.Left + 110;
         TaskbarInterop.TryGetWindowRect(_original, out var own);
         var left = TaskbarSystemArea.SelectNative(context.ProcessId, content,
         [
@@ -86,7 +101,7 @@ sealed class RightTrayHarness
             new(context.ProcessId, true, "WinUIDesktopWin32WindowClass", own),
             new(context.ProcessId, true, "Windows.UI.Composition.DesktopWindowContentBridge", content),
         ]);
-        return new(left, "fixture-native-selector");
+        return new(left, island, "fixture-native-selector");
     }
 
     private TaskbarTrayPlacement.Surface? ReadSurface()

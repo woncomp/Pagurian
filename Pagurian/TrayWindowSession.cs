@@ -34,6 +34,7 @@ internal sealed class TrayWindowSession
     private readonly NaturalTrayPanel _panel;
     private readonly LinearGradientBrush _brush = new();
     private readonly DispatcherQueueTimer _fallbackTimer;
+    private readonly DispatcherQueueTimer _modeTimer;
     private TaskbarTrayPlacement.Surface? _surface;
     private ReactorWindow? _window;
     private nint _parent;
@@ -75,6 +76,10 @@ internal sealed class TrayWindowSession
         _fallbackTimer.Interval = TimeSpan.FromMilliseconds(500);
         _fallbackTimer.IsRepeating = false;
         _fallbackTimer.Tick += OnFallback;
+        _modeTimer = _dispatcher.CreateTimer();
+        _modeTimer.Interval = TimeSpan.FromMilliseconds(250);
+        _modeTimer.IsRepeating = false;
+        _modeTimer.Tick += (_, _) => QueueCommit();
         Layout.Diagnostic += Log;
     }
     private void Log(string message) => _log($"tray-session={_id} {message}");
@@ -224,11 +229,17 @@ internal sealed class TrayWindowSession
         {
             MeasureCount++;
             _panel.ContentScale = surface.Scale / WindowScale;
+            _panel.ContentAlignment = surface.Edge == TrayEdge.Right
+                ? HorizontalAlignment.Right : HorizontalAlignment.Left;
             if (!insideArrange)
                 _panel.Measure(new Size(double.PositiveInfinity, TaskbarTrayWindow.ContentHeightDip * _panel.ContentScale));
             var next = Layout.Measure(_revision + 1, surface, WindowScale);
-            if (next == null) return;
-            if (next.Cells.IsEmpty)
+            if (next == null)
+            {
+                RequestPendingModes();
+                return;
+            }
+            if (next.Cells.IsEmpty && next.OverflowArrowBoundsPx == null)
             {
                 BeginPreparation();
                 _window.Hide();
@@ -268,6 +279,14 @@ internal sealed class TrayWindowSession
                 QueueCommit();
             }
         }
+    }
+
+    private void RequestPendingModes()
+    {
+        if (Layout.PendingPlan is not { Requests.Length: > 0 } plan) return;
+        _dispatcher.TryEnqueue(DispatcherQueuePriority.Low, () => Layout.ApplyRequests(plan));
+        _modeTimer.Stop();
+        _modeTimer.Start();
     }
 
     private void ApplyBackground()
@@ -312,7 +331,22 @@ internal sealed class TrayWindowSession
     }
     private void PrepareFrame()
     {
-        if (_waitingFrame || _frameInFlight || Snapshot == null) return;
+        if (Snapshot == null) return;
+        // A color-only presentation-version bump can complete between DWM
+        // flushes without producing another Rendered callback. Keep requesting
+        // frames while the gate is armed instead of leaving it stuck.
+        if (_waitingFrame || _frameInFlight)
+        {
+            if (!_frameInFlight)
+            {
+                // InvalidateArrange alone can be coalesced when the new color
+                // does not change geometry; nudge composition so Rendered fires.
+                _root.Opacity = _root.Opacity >= 1 ? 0.999999 : 1;
+                _root.InvalidateMeasure();
+                _root.InvalidateArrange();
+            }
+            return;
+        }
         _waitingFrame = true;
         CompositionTarget.Rendering += OnRendering;
         CompositionTarget.Rendered += OnRendered;
@@ -360,6 +394,7 @@ internal sealed class TrayWindowSession
                 if (paintedVersion != _presentationVersion)
                 {
                     if (_paintedVersion == _presentationVersion) FlushPaintedFrame();
+                    else { StopFrameGate(); PrepareFrame(); }
                     return;
                 }
                 StopFrameGate();
@@ -414,6 +449,7 @@ internal sealed class TrayWindowSession
         _background.Dispose();
         _fallbackTimer.Stop();
         _fallbackTimer.Tick -= OnFallback;
+        _modeTimer.Stop();
         TrayManager.Changed -= OnCellsChanged;
         _uiSettings.ColorValuesChanged -= OnSystemColorsChanged;
         if (_window != null)
@@ -456,6 +492,7 @@ internal sealed class TrayWindowSession
             get => _scale;
             set { if (_scale == value) return; _scale = value; InvalidateMeasure(); }
         }
+        internal HorizontalAlignment ContentAlignment { get; set; } = HorizontalAlignment.Left;
         internal NaturalTrayPanel(Border content, Action changed, Action arranged)
         {
             _content = content;
@@ -474,7 +511,12 @@ internal sealed class TrayWindowSession
         protected override Size ArrangeOverride(Size finalSize)
         {
             _transform.ScaleX = _transform.ScaleY = ContentScale;
-            _content.Arrange(new Rect(0, 0, _content.DesiredSize.Width, TaskbarTrayWindow.ContentHeightDip));
+            // A right surface keeps its anchored cells at the window's right
+            // edge; cells that no longer fit stay mounted only for measurement
+            // and are clipped on the left.
+            var x = ContentAlignment == HorizontalAlignment.Right
+                ? finalSize.Width - _content.DesiredSize.Width * ContentScale : 0;
+            _content.Arrange(new Rect(x, 0, _content.DesiredSize.Width, TaskbarTrayWindow.ContentHeightDip));
             // A child-only render can reach XAML layout before the queued low
             // priority callback. Commit the HWND before this arrange is painted,
             // otherwise the newly wider content is clipped for one frame.

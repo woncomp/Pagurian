@@ -32,6 +32,11 @@ class TaskbarTrayWindow : Component
     public const double HoverMarginYDip = 2;
     public const double HoverCornerRadiusDip = 4;
 
+    // Host-owned overflow affordance. The width includes the same 3-DIP hover
+    // margins as a cell: 26 DIP of chevron + 6 DIP of margins.
+    public const double OverflowArrowWidthDip = 32;
+    public const string OverflowArrowKey = "host:overflow-arrow";
+
     private readonly TaskbarTrayLayout _layout;
     private readonly SurfaceKey _surface;
 
@@ -132,7 +137,12 @@ class TaskbarTrayWindow : Component
         {
             void OnChanged() => setVersion(++tick.Current);
             TrayManager.Changed += OnChanged;
-            return () => TrayManager.Changed -= OnChanged;
+            _layout.PresentationChanged += OnChanged;
+            return () =>
+            {
+                TrayManager.Changed -= OnChanged;
+                _layout.PresentationChanged -= OnChanged;
+            };
         }, Array.Empty<object>());
         var cells = TrayManager.CellsForSurface(_surface).ToArray();
         if (_surface.Edge == TrayEdge.Right)
@@ -145,7 +155,11 @@ class TaskbarTrayWindow : Component
             Array.Reverse(cells);
         }
         _layout.SetCells(cells);
-        return HStack(0, cells.Select(cell =>
+        var overflow = _layout.Overflow;
+        var items = new List<Element>(cells.Length + 1);
+        if (overflow && _surface.Edge == TrayEdge.Left)
+            items.Add(OverflowArrow());
+        items.AddRange(cells.Select(cell =>
             (Element)(Border(new ComponentElement(cell.ViewType, cell.Props))
                 with { CornerRadius = HoverCornerRadiusDip })
                 .Background(HoverBrushFor(cell.Key))
@@ -154,8 +168,29 @@ class TaskbarTrayWindow : Component
                 .Ref(_layout.RefFor(cell.Key))
                 .OnMount(_ => _layout.Mounted(cell.Key))
                 .OnUnmount(_ => _layout.Unmounted(cell.Key))
-                .WithKey(cell.Key)).ToArray())
-            .HorizontalAlignment(Microsoft.UI.Xaml.HorizontalAlignment.Left)
+                .WithKey(cell.Key)));
+        if (overflow && _surface.Edge == TrayEdge.Right)
+            items.Add(OverflowArrow());
+        return HStack(0, items.ToArray())
+            .HorizontalAlignment(_surface.Edge == TrayEdge.Right
+                ? Microsoft.UI.Xaml.HorizontalAlignment.Right
+                : Microsoft.UI.Xaml.HorizontalAlignment.Left)
             .VerticalAlignment(Microsoft.UI.Xaml.VerticalAlignment.Stretch);
     }
+
+    private static Element OverflowArrow() =>
+        (Element)(Border(TextBlock("\uE70E")
+                .FontFamily(new FontFamily("Segoe Fluent Icons"))
+                .FontSize(12)
+                .HAlign(Microsoft.UI.Xaml.HorizontalAlignment.Center)
+                .VAlign(Microsoft.UI.Xaml.VerticalAlignment.Center))
+            with { CornerRadius = HoverCornerRadiusDip })
+            .Width(OverflowArrowWidthDip - 2 * HoverMarginXDip)
+            .Background(HoverBrushFor(OverflowArrowKey))
+            .Margin(HoverMarginXDip, HoverMarginYDip, HoverMarginXDip, HoverMarginYDip)
+            .VerticalAlignment(Microsoft.UI.Xaml.VerticalAlignment.Stretch)
+            .AutomationName("Show overflowed cells")
+            .OnMount(_ => TaskbarTrayWindow.BrushMounted(OverflowArrowKey))
+            .OnUnmount(_ => TaskbarTrayWindow.BrushUnmounted(OverflowArrowKey))
+            .WithKey(OverflowArrowKey);
 }

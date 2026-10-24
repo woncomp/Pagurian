@@ -14,12 +14,13 @@ namespace Pagurian;
 internal sealed class TraySurface
 {
     private readonly TrayWindowSession _session;
-    private readonly TaskbarSystemAreaObserver? _systemArea;
+    private readonly TaskbarSystemAreaObserver? _geometry;
+    private OverflowTraySession? _overflow;
 
     internal TraySurface(SurfaceKey key)
     {
         Key = key;
-        if (key.Edge == TrayEdge.Right) _systemArea = new();
+        _geometry = new();
         _session = new TrayWindowSession(
             getSurface: GetSurface,
             getParent: () => DisplayTopology.TaskbarHwndFor(Key.DisplayKey),
@@ -37,6 +38,41 @@ internal sealed class TraySurface
     internal nint Hwnd => _session.Hwnd;
     internal ReactorWindow? Window => _session.Window;
     internal TrayLayoutSnapshot? Snapshot => _session.Snapshot;
+    internal OverflowTraySession? Overflow => _overflow;
+
+    internal TaskbarInterop.RECT? OverflowArrowRect =>
+        State == TrayWindowSessionState.Visible ? Snapshot?.OverflowArrowBoundsPx : null;
+
+    internal IEnumerable<(string Key, TaskbarInterop.RECT Rect)> OverflowCellRects =>
+        _overflow?.CellRects ?? [];
+
+    internal bool ToggleOverflow(OverflowAnchor anchor)
+    {
+        if (_overflow is { State: not OverflowTrayState.Closed })
+        {
+            _overflow.Close();
+            _overflow = null;
+            return false;
+        }
+        if (OverflowArrowRect is not { } arrow) return false;
+        _overflow = new OverflowTraySession(
+            () => OverflowArrowRect is { } current &&
+                TaskbarInterop.TryGetMonitorWorkArea(current, out var workArea)
+                ? new OverflowAnchor(current, workArea, Snapshot?.Scale ?? 1, Key.Edge)
+                : null,
+            () => Snapshot?.Plan.OverflowCells ?? [],
+            Theme,
+            Key,
+            message => PagurianLog.Tray(Key.ToString(), message));
+        _overflow.Start();
+        return _overflow.State != OverflowTrayState.Closed;
+    }
+
+    internal void CloseOverflow()
+    {
+        _overflow?.Close();
+        _overflow = null;
+    }
 
     internal void Start()
     {
@@ -50,7 +86,8 @@ internal sealed class TraySurface
 
     internal void Close()
     {
-        _systemArea?.Dispose();
+        CloseOverflow();
+        _geometry?.Dispose();
         TrayManager.UnregisterSurfaceTheme(Key);
         _session.Close();
     }
@@ -68,10 +105,10 @@ internal sealed class TraySurface
     {
         var taskbar = DisplayTopology.TaskbarHwndFor(Key.DisplayKey);
         if (taskbar != 0 && TaskbarTrayPlacement.TryGetSurface(taskbar, Key.Edge, out var surface))
-            return _systemArea != null && surface.IsHorizontal
-                ? _systemArea.Observe(taskbar, TaskbarInterop.WindowProcessId(taskbar), surface)
+            return surface.IsHorizontal
+                ? _geometry!.Observe(taskbar, TaskbarInterop.WindowProcessId(taskbar), surface)
                 : surface;
-        _systemArea?.Invalidate();
+        _geometry?.Invalidate();
         return null;
     }
 }

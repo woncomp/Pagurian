@@ -13,6 +13,7 @@ internal sealed class TaskbarSystemAreaObserver : IDisposable
     private readonly Action<string> _log;
     private Context? _context;
     private int? _left;
+    private TaskbarInterop.RECT? _content;
     private long _generation;
     private bool _disposed;
     private string? _diagnostic;
@@ -32,7 +33,8 @@ internal sealed class TaskbarSystemAreaObserver : IDisposable
     internal TaskbarTrayPlacement.Surface Observe(nint taskbar, uint processId,
         TaskbarTrayPlacement.Surface geometry)
     {
-        var context = new Context(taskbar, processId, geometry with { SystemAreaLeftPx = null });
+        var context = new Context(taskbar, processId,
+            geometry with { SystemAreaLeftPx = null, TaskContentRect = null });
         lock (_gate)
         {
             if (_disposed) return context.Geometry;
@@ -41,9 +43,10 @@ internal sealed class TaskbarSystemAreaObserver : IDisposable
                 _context = context;
                 _generation++;
                 _left = null;
+                _content = null;
                 _wake.Set();
             }
-            return context.Geometry with { SystemAreaLeftPx = _left };
+            return context.Geometry with { SystemAreaLeftPx = _left, TaskContentRect = _content };
         }
     }
 
@@ -55,6 +58,7 @@ internal sealed class TaskbarSystemAreaObserver : IDisposable
             _context = null;
             _generation++;
             _left = null;
+            _content = null;
             _wake.Set();
         }
     }
@@ -64,16 +68,12 @@ internal sealed class TaskbarSystemAreaObserver : IDisposable
         // A new worker need not inherit the UI thread's DPI override. Match
         // native GetWindowRect to UIA's always-physical screen coordinates.
         var previousDpi = TaskbarInterop.SetThreadDpiAwarenessContext((nint)(-4));
-        if (previousDpi == 0) return new(null, "physical-coordinates-unavailable");
+        if (previousDpi == 0) return new(null, null, "physical-coordinates-unavailable");
         try
         {
             if (!TaskbarInterop.IsWindow(context.Taskbar) ||
                 TaskbarInterop.WindowProcessId(context.Taskbar) != context.ProcessId || context.ProcessId == 0)
-                return new(null, "taskbar-unavailable");
-            if (TaskbarInterop.TryGetTaskbarSystemAreaLeft(context.Taskbar, context.Geometry.ContentRect, out var left))
-                return new(left, "native");
-            if (!TaskbarInterop.IsSecondaryTaskbar(context.Taskbar))
-                return new(null, "native-system-area-unavailable");
+                return new(null, null, "taskbar-unavailable");
             return TaskbarClockAutomation.Read(context.Taskbar, context.ProcessId, context.Geometry.ContentRect);
         }
         finally
@@ -106,38 +106,50 @@ internal sealed class TaskbarSystemAreaObserver : IDisposable
                 catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or
                     System.ComponentModel.Win32Exception or InvalidOperationException)
                 {
-                    result = new(null, $"probe-error-0x{ex.HResult:X8}");
+                    result = new(null, null, $"probe-error-0x{ex.HResult:X8}");
                 }
-                lock (_gate)
+        lock (_gate)
+        {
+            if (_disposed) return;
+            if (generation != _generation) { delay = 0; failures = 0; continue; }
+            bool observed = false;
+            if (result.ContentBounds is { } bounds &&
+                TaskbarContent.IsValidBounds(bounds, current.Geometry.ContentRect))
+            {
+                _content = bounds;
+                observed = true;
+            }
+            if (result.SystemAreaLeftPx is { } left &&
+                left > current.Geometry.ContentRect.Left && left < current.Geometry.ContentRect.Right)
+            {
+                _left = left;
+                observed = true;
+            }
+            if (!observed)
+            {
+                result = new(null, null,
+                    result.ContentBounds.HasValue || result.SystemAreaLeftPx.HasValue
+                        ? "invalid-boundary" : result.Reason);
+                failures = Math.Min(failures + 1, 4);
+            }
+            else failures = 0;
+            var diagnostic = $"taskbar={current.Taskbar} owner={current.ProcessId} generation={generation} " +
+                $"source={result.Reason} left={_left?.ToString() ?? "unknown"} " +
+                $"content={(_content is { } c ? $"{c.Left}-{c.Right}" : "unknown")} " +
+                $"retained={!observed && (_left.HasValue || _content.HasValue)}";
+            if (diagnostic != _diagnostic)
+            {
+                if (DateTime.UtcNow >= _nextDiagnostic)
                 {
-                    if (_disposed) return;
-                    if (generation != _generation) { delay = 0; failures = 0; continue; }
-                    if (result.LeftPx is { } left &&
-                        left > current.Geometry.ContentRect.Left && left < current.Geometry.ContentRect.Right)
-                    {
-                        _left = left;
-                        failures = 0;
-                    }
-                    else
-                    {
-                        result = new(null, result.LeftPx.HasValue ? "invalid-boundary" : result.Reason);
-                        failures = Math.Min(failures + 1, 4);
-                    }
-                    var diagnostic = $"taskbar={current.Taskbar} owner={current.ProcessId} generation={generation} " +
-                        $"source={result.Reason} left={_left?.ToString() ?? "unknown"} retained={!result.LeftPx.HasValue && _left.HasValue}";
-                    if (diagnostic != _diagnostic)
-                    {
-                        if (DateTime.UtcNow >= _nextDiagnostic)
-                        {
-                            _log($"{diagnostic} suppressed={_suppressed}");
-                            _suppressed = 0;
-                            _diagnostic = diagnostic;
-                            _nextDiagnostic = DateTime.UtcNow.AddSeconds(1);
-                        }
-                        else _suppressed++;
-                    }
-                    delay = result.LeftPx.HasValue ? 500 : Math.Min(500 * (1 << failures), 4000);
+                    _log($"{diagnostic} suppressed={_suppressed}");
+                    _suppressed = 0;
+                    _diagnostic = diagnostic;
+                    _nextDiagnostic = DateTime.UtcNow.AddSeconds(1);
                 }
+                else _suppressed++;
+            }
+            delay = observed ? 500 : Math.Min(500 * (1 << failures), 4000);
+        }
             }
         }
         finally
@@ -155,6 +167,7 @@ internal sealed class TaskbarSystemAreaObserver : IDisposable
             _generation++;
             _context = null;
             _left = null;
+            _content = null;
             _wake.Set();
         }
     }

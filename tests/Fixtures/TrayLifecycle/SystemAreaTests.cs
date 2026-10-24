@@ -11,6 +11,7 @@ static class SystemAreaTests
         static TaskbarInterop.RECT Rect(int left, int top, int width, int height) =>
             new() { Left = left, Top = top, Right = left + width, Bottom = top + height };
         var bar = Rect(3440, 1945, 1440, 48);
+        var content = Rect(3440, 1945, 300, 48);
         var clock = new TaskbarSystemArea.Candidate(19048, true, "TrayClockWClass", Rect(4797, 1945, 71, 48));
         foreach (int x in new[] { 4826, 4772 })
         {
@@ -24,7 +25,7 @@ static class SystemAreaTests
             Require(TaskbarSystemArea.SelectNative(19048, bar, candidates) == null, "self/foreign windows became an anchor");
             var left = TaskbarSystemArea.SelectNative(19048, bar, [.. candidates, clock]);
             Require(left == 4797, "clock boundary changed with own tray position");
-            var surface = new TaskbarTrayPlacement.Surface(bar, bar, true, 1, TrayEdge.Right, left);
+            var surface = new TaskbarTrayPlacement.Surface(bar, bar, true, 1, TrayEdge.Right, left, content);
             Require(surface.Place(46).Left == 4743 && surface.Place(46).Right == 4789, "54px oscillation regression");
         }
         foreach (var invalid in new[]
@@ -41,12 +42,25 @@ static class SystemAreaTests
         foreach (var scale in new[] { 1, 1.25, 1.5 })
         {
             var negative = Rect(-2560, 1410, 2560, (int)(48 * scale));
-            var surface = new TaskbarTrayPlacement.Surface(negative, negative, true, scale, TrayEdge.Right, -83);
+            var negativeContent = Rect(-2560, 1410, 1, (int)(48 * scale));
+            var surface = new TaskbarTrayPlacement.Surface(negative, negative, true, scale,
+                TrayEdge.Right, -83, negativeContent);
             Require(surface.Place(46).Right == (int)(-83 - 8 * scale), "DPI/negative-coordinate gap incorrect");
             Require(!(surface with { SystemAreaLeftPx = null }).CanPlace, "unknown boundary allowed right placement");
             Require((surface with { Edge = TrayEdge.Left, SystemAreaLeftPx = null }).CanPlace, "left placement requires clock");
             Require((surface with { IsHorizontal = false, SystemAreaLeftPx = null }).CanPlace, "vertical fold requires clock");
         }
+
+        var leftBar = Rect(0, 100, 1440, 48);
+        var leftContent = Rect(500, 100, 600, 48);
+        var leftSurface = new TaskbarTrayPlacement.Surface(leftBar, leftBar, true, 1, TrayEdge.Left,
+            TaskContentRect: leftContent);
+        Require(Math.Abs(leftSurface.AvailableWidthDip - 484) < .001, "left content capacity changed");
+        Require(leftSurface.Place(484).Left == 8 && leftSurface.Place(484).Right == 492, "left capacity placement changed");
+        Require(!(leftSurface with { TaskContentRect = null }).CanPlace, "unknown content allowed left placement");
+        Require(!TaskbarContent.IsValidBounds(Rect(0, 100, 1440, 48), leftBar), "full-width bridge became content");
+        Require(!TaskbarContent.IsValidBounds(Rect(1500, 100, 100, 48), leftBar), "outside content accepted");
+        Require(!TaskbarContent.IsValidBounds(Rect(600, 200, 100, 48), leftBar), "cross-axis outlier accepted");
 
         var raw = new TaskbarTrayPlacement.Surface(bar, bar, true, 1, TrayEdge.Right);
         using var entered = new ManualResetEventSlim();
@@ -64,7 +78,8 @@ static class SystemAreaTests
                     entered.Set();
                     if (!release.Wait(3000)) throw new InvalidOperationException("probe fixture gate timeout");
                 }
-                return new(context.Geometry.ContentRect.Right - 83, "fixture");
+                var bar = context.Geometry.ContentRect;
+                return new(bar.Right - 83, Rect(bar.Left, bar.Top, 300, bar.Height), "fixture");
             }
             finally { Interlocked.Decrement(ref active); }
         }, _ => { });
@@ -76,7 +91,8 @@ static class SystemAreaTests
         Require(SpinWait.SpinUntil(() => observer.Observe(1, 19048, changed).CanPlace, 3000), "new generation did not resolve");
         Require(observer.Observe(1, 19048, changed).SystemAreaLeftPx == 4757, "late result crossed generation");
         Require(maximum == 1, "observer overlapped probes");
-        using var other = new TaskbarSystemAreaObserver(_ => new(4797, "fixture-other"), _ => { });
+        using var other = new TaskbarSystemAreaObserver(
+            _ => new(4797, Rect(3440, 1945, 300, 48), "fixture-other"), _ => { });
         other.Observe(2, 19048, raw);
         Require(SpinWait.SpinUntil(() => other.Observe(2, 19048, raw).CanPlace, 3000), "other taskbar did not resolve");
         for (int i = 0; i < 200; i++)
@@ -95,7 +111,7 @@ static class SystemAreaTests
             closingEntered.Set();
             if (!closingRelease.Wait(3000)) throw new InvalidOperationException("closing probe gate timeout");
             closingCompleted.Set();
-            return new(4797, "fixture-late");
+            return new(4797, Rect(3440, 1945, 300, 48), "fixture-late");
         }, _ => { });
         closing.Observe(3, 19048, raw);
         Require(closingEntered.Wait(3000), "closing probe did not start");

@@ -25,6 +25,9 @@ static class TraySurfaceController
     private static TraySurface? _hoverSurface;
     private static string? _tooltipHoverKey;
     private static TraySurface? _tooltipSurface;
+    private static TraySurface? _overflowSurface;
+    private static TaskbarInterop.RECT? _overflowArrowRect;
+    private static BillboardAnchor? _billboardCachedAnchor;
     private static bool _pressed, _wasLeftButtonDown, _wasEscapeDown, _reconcileQueued;
     private static int _tooltipHoverTicks;
     private static DateTime _nextTopologyCheck;
@@ -172,16 +175,70 @@ static class TraySurfaceController
         foreach (var (key, rect) in surface.CellRects)
             if (key == cellKey)
                 return rect;
+        foreach (var surface in _surfaces.Values)
+        foreach (var (key, rect) in surface.OverflowCellRects)
+            if (key == cellKey)
+                return rect;
         return null;
     }
+
+    private static void CloseOverflow()
+    {
+        _overflowSurface?.CloseOverflow();
+        _overflowSurface = null;
+        _overflowArrowRect = null;
+    }
+
+    private static void ToggleOverflow(TraySurface surface)
+    {
+        if (_overflowSurface != null && _overflowSurface != surface)
+            CloseOverflow();
+        if (surface.OverflowArrowRect is not { } arrow ||
+            !TryGetBillboardWorkArea(arrow, out var workArea))
+        {
+            CloseOverflow();
+            return;
+        }
+        var anchor = new OverflowAnchor(arrow, workArea, surface.Snapshot?.Scale ?? 1, surface.Key.Edge);
+        if (surface.ToggleOverflow(anchor))
+        {
+            _overflowSurface = surface;
+            _overflowArrowRect = arrow;
+        }
+        else if (_overflowSurface == surface)
+        {
+            _overflowSurface = null;
+            _overflowArrowRect = null;
+        }
+    }
+
+    private static bool OverflowContains(TaskbarInterop.POINT cursor) =>
+        _overflowSurface?.Overflow?.BoundsPx is { } bounds && ToNativeRect(bounds).Contains(cursor);
 
     private static void UpdateInteractions()
     {
         var cursor = TaskbarInterop.GetCursorPosition();
 
+        // The overflow affordance is host-owned: it disappears as soon as its
+        // snapshot no longer contains an arrow, and with its owning surface.
+        if (_overflowSurface is { } overflow &&
+            (!_surfaces.ContainsValue(overflow) || overflow.OverflowArrowRect == null))
+            CloseOverflow();
+        if (_overflowSurface?.Overflow is { State: OverflowTrayState.Visible } open &&
+            _overflowSurface.OverflowArrowRect is { } currentArrow &&
+            (_overflowArrowRect is not { } knownArrow || !currentArrow.Equals(knownArrow)))
+        {
+            _overflowArrowRect = currentArrow;
+            open.Refresh();
+        }
+
         // When a shell removes a cell (e.g. a Copilot session ends), an open
-        // billboard owned by that cell goes with it.
+        // billboard owned by that cell goes with it. A billboard anchored from
+        // a closed overflow window keeps its cached anchor until dismissal.
         if (_billboardOwnerKey != null && TrayManager.FindCell(_billboardOwnerKey) == null)
+            CloseBillboard();
+        else if (_billboardOwnerKey != null && _billboardCachedAnchor == null &&
+                 CellRectPx(_billboardOwnerKey) == null)
             CloseBillboard();
 
         // A click is an up→down transition of the left button. Physical
@@ -190,23 +247,28 @@ static class TraySurfaceController
         var clickEdge = leftDown && !_wasLeftButtonDown;
         _wasLeftButtonDown = leftDown;
 
-        // Esc closes a visible billboard, but only while it actually holds
-        // focus — otherwise the keypress belongs to some other app and must
-        // not be stolen. (Billboards activate at reveal for acrylic; this is
-        // their only keyboard interaction.)
+        // Esc closes whichever focused flyout holds the keyboard. The overflow
+        // window activates at reveal, so it is foreground while open.
         var escDown = TaskbarInterop.IsEscapeDown();
         var escEdge = escDown && !_wasEscapeDown;
         _wasEscapeDown = escDown;
-        if (escEdge && _billboardSession is { State: BillboardSessionState.Visible } focused &&
-            TaskbarInterop.GetForegroundWindowHandle() == focused.Hwnd)
+        if (escEdge)
         {
-            CloseBillboard();
+            var overflowHwnd = _overflowSurface?.Overflow?.Hwnd ?? 0;
+            if (overflowHwnd != 0 && TaskbarInterop.GetForegroundWindowHandle() == overflowHwnd)
+                CloseOverflow();
+            else if (_billboardSession is { State: BillboardSessionState.Visible } focused &&
+                TaskbarInterop.GetForegroundWindowHandle() == focused.Hwnd)
+            {
+                CloseBillboard();
+            }
         }
 
-        // Which cell is under the cursor, if any? Cell rects are disjoint
-        // across displays, so the first hit wins.
+        // Which cell or host affordance is under the cursor? Cell rects are
+        // disjoint across displays and only one overflow window is open.
         string? hoverKey = null;
         TraySurface? hoverSurface = null;
+        bool hoverInOverflow = false;
         foreach (var surface in _surfaces.Values)
         {
             foreach (var (key, rect) in surface.CellRects)
@@ -218,8 +280,26 @@ static class TraySurfaceController
                     break;
                 }
             }
+            if (hoverKey == null && surface.OverflowArrowRect is { } arrow && arrow.Contains(cursor))
+            {
+                hoverKey = TaskbarTrayWindow.OverflowArrowKey;
+                hoverSurface = surface;
+            }
             if (hoverKey != null)
                 break;
+        }
+        if (hoverKey == null && _overflowSurface is { } openOverflow)
+        {
+            foreach (var (key, rect) in openOverflow.OverflowCellRects)
+            {
+                if (TrayManager.FindCell(key) != null && rect.Contains(cursor))
+                {
+                    hoverKey = key;
+                    hoverSurface = openOverflow;
+                    hoverInOverflow = true;
+                    break;
+                }
+            }
         }
 
         // Hover/pressed feedback like the native clock: SubtleFillColorSecondary
@@ -263,14 +343,33 @@ static class TraySurfaceController
         // Click dispatch: a cell with a custom OnClicked gets it invoked
         // verbatim; otherwise the cell's billboard (if any) toggles — the
         // default OnClicked behavior. A click outside all cells dismisses
-        // the open billboard (native flyout style; clicks inside the
-        // billboard itself don't dismiss).
+        // the open flyouts (native flyout style; clicks inside them don't).
         if (!clickEdge)
             return;
+
+        if (hoverKey == TaskbarTrayWindow.OverflowArrowKey && hoverSurface != null)
+        {
+            CloseBillboard();
+            HideTooltip();
+            ToggleOverflow(hoverSurface);
+            return;
+        }
 
         var cell = hoverKey != null ? TrayManager.FindCell(hoverKey) : null;
         if (cell != null && hoverSurface != null)
         {
+            BillboardAnchor? cachedAnchor = null;
+            if (hoverInOverflow)
+            {
+                if (CellRectPx(cell.Key) is { } owner &&
+                    TryGetBillboardWorkArea(owner, out var workArea))
+                    cachedAnchor = new(ToPixelRect(owner), ToPixelRect(workArea));
+                CloseOverflow();
+            }
+            else if (_overflowSurface != null)
+            {
+                CloseOverflow();
+            }
             if (cell.Props.OnClicked is { } onClicked)
             {
                 CloseBillboard();
@@ -278,13 +377,19 @@ static class TraySurfaceController
             }
             else if (cell.Props.CreateBillboard != null)
             {
-                ToggleBillboard(cell, hoverSurface);
+                ToggleBillboard(cell, hoverSurface, cachedAnchor);
             }
         }
-        else if (_billboardSession is { State: not BillboardSessionState.Closed } session &&
-                 !ToNativeRect(session.BoundsPx).Contains(cursor))
+        else
         {
-            CloseBillboard();
+            if (_overflowSurface != null && !OverflowContains(cursor) &&
+                hoverKey != TaskbarTrayWindow.OverflowArrowKey)
+                CloseOverflow();
+            if (_billboardSession is { State: not BillboardSessionState.Closed } session &&
+                !ToNativeRect(session.BoundsPx).Contains(cursor))
+            {
+                CloseBillboard();
+            }
         }
     }
 
@@ -327,7 +432,8 @@ static class TraySurfaceController
         _tooltipWindow = null;
     }
 
-    private static void ToggleBillboard(ShellCellHandle cell, TraySurface surface)
+    private static void ToggleBillboard(ShellCellHandle cell, TraySurface surface,
+        BillboardAnchor? cachedAnchor = null)
     {
         if (_billboardSession is { State: not BillboardSessionState.Closed } &&
             _billboardOwnerKey == cell.Key)
@@ -341,13 +447,17 @@ static class TraySurfaceController
         try
         {
             var billboard = cell.Props.CreateBillboard!();
-            if (billboard == null || CellRectPx(cell.Key) == null)
+            if (billboard == null || (cachedAnchor == null && CellRectPx(cell.Key) == null))
                 return;
             billboard.OwnerCell = cell;
             _billboardOwnerKey = cell.Key;
+            _billboardCachedAnchor = cachedAnchor;
+            Func<BillboardAnchor?> getAnchor = cachedAnchor is { } anchor
+                ? () => TrayManager.FindCell(cell.Key) == null ? null : anchor
+                : () => GetBillboardAnchor(cell.Key);
             var session = new BillboardSession(
                 BillboardSpec(billboard), billboard, surface.Theme,
-                () => GetBillboardAnchor(cell.Key), billboard.OnOpened, billboard.OnClosed,
+                getAnchor, billboard.OnOpened, billboard.OnClosed,
                 message => PagurianLog.Host($"{message} owner={cell.Key}"));
             _billboardSession = session;
             session.Start();
@@ -405,6 +515,7 @@ static class TraySurfaceController
         // Clear controller ownership before module callbacks can reenter it.
         _billboardSession = null;
         _billboardOwnerKey = null;
+        _billboardCachedAnchor = null;
         session?.Close();
     }
 

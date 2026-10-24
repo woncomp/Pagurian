@@ -257,10 +257,15 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   commands are dropped with a log line.
 - `TaskbarTrayWindow.cs`: keyed cell Borders and stable hover brushes
   (reference-counted per cell key; a rebinding cell briefly lives on two
-  surfaces). Cells measure naturally inside the session's left-aligned host
-  panel; each window renders only its surface's cells.
+  surfaces). Cells measure naturally inside the session's host panel; each
+  window renders only its surface's cells, with a host-owned overflow arrow at
+  the anchor end when capacity requires it.
 - `TaskbarTrayLayout.cs`: per-window cell refs and immutable measured
   snapshots shared by native positioning, hit-testing and billboard anchors.
+  `TrayPresentationPlanner` uses observed taskbar content/system-area bounds,
+  optional `IShellCellSimpleMode` models and per-surface anchor order to choose
+  Normal/Simple/main/overflow sets; `OverflowTrayWindow`/`OverflowTraySession`
+  present overflow cells in a Billboard-style top-level strip.
 - `TrayWindowSession.cs`: persistent HWND, hidden preparation, injection,
   coalesced layout commits and a rendered/DwmFlush presentation gate. One
   session per surface; sampled luminance feeds the owning surface's theme
@@ -271,7 +276,9 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
   System-area boundaries constrain placement separately from the full taskbar
   sampling rectangle, so clock-anchor and cell-width changes reuse the spatial
   background cache. `tests\Verify-TrayLifecycle.ps1 -Right` exercises the
-  production boundary/observer/environment loop; `-SecondaryTaskbar <HWND>`
+  production boundary/observer/environment loop; `-Overflow` covers capacity
+  split, arrow geometry and the open overflow strip; `-Geometry` probes the
+  live primary content/system-area islands; `-SecondaryTaskbar <HWND>`
   explicitly verifies a live secondary clock without loading user settings.
 - `ThemeService.cs` — host `IThemeService`, one instance per tray surface:
   `IsDark` from sampled luminance (Rec.601, threshold 140 — always matches

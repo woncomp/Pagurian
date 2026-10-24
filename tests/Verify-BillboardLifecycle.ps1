@@ -25,12 +25,23 @@ if ($CompassAssembly) {
     $fixtureArguments += '--compass', ('"' + $resolvedCompass + '"')
 }
 if ($fixtureArguments.Count) { $runOptions.ArgumentList = $fixtureArguments }
-$process = Start-Process @runOptions -FilePath (Join-Path $output "BillboardLifecycle.exe") -WorkingDirectory $output `
-    -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = Join-Path $output "BillboardLifecycle.exe"
+if ($runOptions.ArgumentList) { $psi.Arguments = ($runOptions.ArgumentList -join ' ') }
+$psi.WorkingDirectory = $output
+$psi.UseShellExecute = $false
+$psi.RedirectStandardOutput = $true
+$psi.RedirectStandardError = $true
+$process = [System.Diagnostics.Process]::Start($psi)
+$outTask = $process.StandardOutput.ReadToEndAsync()
+$errTask = $process.StandardError.ReadToEndAsync()
 if (-not $process.WaitForExit(45000)) {
     $process.Kill()
     throw "Billboard lifecycle fixture timed out."
 }
+$process.WaitForExit()
+$outTask.Result | Set-Content -LiteralPath $stdout
+$errTask.Result | Set-Content -LiteralPath $stderr
 Get-Content -LiteralPath $stdout
 Get-Content -LiteralPath $stderr
 if ($process.ExitCode -ne 0) { throw "Billboard lifecycle fixture failed: $($process.ExitCode)." }

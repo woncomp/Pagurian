@@ -79,6 +79,53 @@ area, and the layout snapshot — which hit-testing, hover and billboard anchors
 read — follows render order, so everything stays keyed consistently. The
 logical order in `TrayManager.CellsForSurface` remains pure config order.
 
+## Taskbar capacity, Simple mode and overflow
+
+Available width is measured from two positively identified Explorer islands:
+the notification/clock system area (existing native/UIA evidence) and the
+XAML taskbar content island (`Taskbar.TaskbarFrameAutomationPeer` →
+`TaskbarFrameRepeater`). One bounded background UIA pass returns both. The
+observed AutomationIds are Windows internals, never treated as a permanent OS
+contract. Full-width bridges and `ReBarWindow32` are never content evidence;
+the latter does not track the visible XAML task buttons. Without valid content
+evidence a horizontal surface stays hidden, retaining cells and message
+routing. A left tray fits in the gap before the content island; a right tray
+fits between the island and the system area, keeping the existing 8-DIP gap on
+both anchor sides.
+
+Each surface owns a `TrayPresentationPlanner`. Cell models may opt into a
+narrower presentation by implementing `Pagurian.Sdk.IShellCellSimpleMode`; the
+host calls its idempotent setter on the UI thread and waits for the Reactor
+render/re-measure before deciding the next step. When Normal content fits,
+nothing is simplified. Otherwise cells are simplified one at a time in anchor
+order until the row fits. If every supported cell is Simple and the row still
+does not fit, the surface enters overflow: the host-owned 32-DIP arrow occupies
+the anchor-end slot, complete cells fill the remaining space from the anchor,
+and the first non-fitting cell plus everything after it move to overflow. A
+later narrower cell never jumps ahead. Overflow cells return to Normal mode;
+only cells retained in the main row may stay Simple. If the arrow itself cannot
+fit, the surface hides but Shells and `post` keep running.
+
+Clicking the arrow opens one top-level overflow tray per surface. Its height
+matches the owning taskbar thickness and its width is the Normal-mode natural
+width of the overflow cells, clamped to the owning monitor (horizontal scroll
+when needed). The strip preserves that surface's order and direction; right
+surfaces therefore read right-to-left from the system-area anchor. The window
+reuses BillboardSession's cloaked preparation/DwmFlush/focus-close lifecycle.
+It re-measures as cells change, refreshes when the arrow or DPI context moves,
+and closes when the arrow/surface disappears. Overflow cells keep their normal
+tooltip, custom click and billboard behavior; a billboard opened from overflow
+caches its last valid anchor before the overflow window closes. Hit rects come
+only from the committed main or overflow snapshot, so clipped measurement-only
+content never responds to input.
+
+`tests/Verify-TrayLifecycle.ps1 -Overflow` covers the presentation split,
+arrow geometry and open overflow window. `-Geometry` probes the live primary
+taskbar through the production observer and fails unless both islands resolve.
+Pure planner cases cover Normal fit, unknown Simple widths, sequential
+simplification, all-Simple overflow, the first-non-fit rule and the
+unaffordable-arrow fallback.
+
 DPI falls out of the existing math (surface scale is the measured taskbar
 thickness ÷ 48 DIP). Tooltips flip against the owning display's monitor rect —
 never the primary origin, which is wrong for negative-coordinate displays.

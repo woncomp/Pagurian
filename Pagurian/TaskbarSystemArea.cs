@@ -1,5 +1,22 @@
 namespace Pagurian;
 
+// Positive evidence for the visible taskbar content island (Start/search/task
+// buttons) is separate from the system-area evidence: its full-width native
+// containers do not track the centered XAML island.
+internal static class TaskbarContent
+{
+    internal static bool IsValidBounds(TaskbarInterop.RECT bounds, TaskbarInterop.RECT content)
+    {
+        int overlap = Math.Min(bounds.Bottom, content.Bottom) - Math.Max(bounds.Top, content.Top);
+        return content.Width > 0 && content.Height > 0 &&
+            bounds.Width > 0 && bounds.Width < content.Width &&
+            bounds.Height > 0 && bounds.Height <= 2 * content.Height &&
+            bounds.Left >= content.Left && bounds.Right <= content.Right &&
+            bounds.Top >= content.Top && bounds.Bottom <= content.Bottom &&
+            overlap >= Math.Min(bounds.Height, content.Height) / 2.0;
+    }
+}
+
 internal static class TaskbarSystemArea
 {
     internal readonly record struct Candidate(uint ProcessId, bool Visible,

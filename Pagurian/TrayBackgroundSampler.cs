@@ -33,7 +33,13 @@ internal sealed class TrayBackgroundSampler : IDisposable
     {
         // The horizontal capture strip spans the original taskbar, not the
         // available space left of the clock. Anchor-only changes reuse it.
-        surface = surface with { Edge = TrayEdge.Left, SystemAreaLeftPx = null, ParentRect = default };
+        surface = surface with
+        {
+            Edge = TrayEdge.Left,
+            SystemAreaLeftPx = null,
+            TaskContentRect = null,
+            ParentRect = default,
+        };
         if (_surface == surface) return;
         _surface = surface;
         _sample = null;
