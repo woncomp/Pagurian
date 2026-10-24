@@ -34,6 +34,7 @@ internal sealed class TrayPresentationPlanner
 
     private sealed class CellState(ShellCellHandle Cell, double ActualWidth,
         bool SimpleSupported, bool Simple, bool SimpleKnown,
+        bool SimpleAllowed, bool SimplePrioritized, long SimplePriority,
         double NormalWidth, double SimpleWidth)
     {
         internal ShellCellHandle Cell { get; } = Cell;
@@ -42,6 +43,9 @@ internal sealed class TrayPresentationPlanner
         internal bool SimpleSupported { get; } = SimpleSupported;
         internal bool Simple { get; } = Simple;
         internal bool SimpleKnown { get; } = SimpleKnown;
+        internal bool SimpleAllowed { get; } = SimpleAllowed;
+        internal bool SimplePrioritized { get; } = SimplePrioritized;
+        internal long SimplePriority { get; } = SimplePriority;
         internal double NormalWidth { get; } = NormalWidth;
         internal double SimpleWidth { get; } = SimpleWidth;
     }
@@ -71,15 +75,17 @@ internal sealed class TrayPresentationPlanner
         if (normalTotal <= capacityDip + 0.001)
             return Plan(false, states, [], capacityDip);
 
-        // Simplify one anchored cell at a time. An unknown Simple width yields a
-        // request and the next render/measurement; nothing is published until
-        // the mode sequence settles.
+        // Simplify one cell at a time. A model policy may reorder the candidates
+        // inside their owning Shell (oldest inactive Copilot session first);
+        // Shell order and the anchored cell order otherwise stay untouched. An
+        // unknown Simple width yields a request and the next render/measurement;
+        // nothing is published until the mode sequence settles.
         var chosen = new HashSet<string>();
         double total = normalTotal;
-        foreach (var state in states)
+        foreach (var state in SimplifyOrder(states))
         {
             if (total <= capacityDip + 0.001) break;
-            if (!state.SimpleSupported) continue;
+            if (!state.SimpleSupported || !state.SimpleAllowed) continue;
             if (!state.Simple && !state.SimpleKnown)
             {
                 chosen.Add(state.Key);
@@ -135,6 +141,36 @@ internal sealed class TrayPresentationPlanner
         if (widths.Normal == null && widths.Simple is { } simple) widths.Normal = simple;
     }
 
+    private static IEnumerable<CellState> SimplifyOrder(IReadOnlyList<CellState> states)
+    {
+        // Cells of one Shell are contiguous in tray order. Keep Shell groups in
+        // their anchored order; only inside a group may a model policy promote
+        // eligible cells ahead of unprioritized siblings.
+        int start = 0;
+        while (start < states.Count)
+        {
+            var owner = states[start].Cell.Props.Owner;
+            int end = start + 1;
+            while (end < states.Count && ReferenceEquals(states[end].Cell.Props.Owner, owner))
+                end++;
+            var candidates = new List<(CellState State, int Index)>();
+            for (int index = start; index < end; index++)
+                if (states[index].SimpleSupported && states[index].SimpleAllowed)
+                    candidates.Add((states[index], index));
+            bool prioritized = candidates.Any(candidate => candidate.State.SimplePrioritized);
+            IEnumerable<(CellState State, int Index)> ordered = prioritized
+                ? candidates
+                    .OrderByDescending(candidate => candidate.State.SimplePrioritized)
+                    .ThenBy(candidate => candidate.State.SimplePrioritized
+                        ? candidate.State.SimplePriority : 0)
+                    .ThenBy(candidate => candidate.Index)
+                : candidates;
+            foreach (var candidate in ordered)
+                yield return candidate.State;
+            start = end;
+        }
+    }
+
     private CellState State(ShellCellHandle cell, double width)
     {
         if (!_widths.TryGetValue(cell.Key, out var widths))
@@ -142,12 +178,21 @@ internal sealed class TrayPresentationPlanner
 
         bool simple = false;
         bool supported = false;
+        bool allowed = true;
+        bool prioritized = false;
+        long priority = 0;
         if (cell.Props.Model is IShellCellSimpleMode mode && !widths.ModeStuck)
         {
             try
             {
                 simple = mode.IsSimpleMode;
                 supported = true;
+                if (cell.Props.Model is IShellCellSimpleModePolicy policy)
+                {
+                    allowed = policy.CanUseSimpleMode;
+                    priority = policy.SimpleModePriority;
+                    prioritized = true;
+                }
             }
             catch
             {
@@ -162,11 +207,11 @@ internal sealed class TrayPresentationPlanner
         else widths.Normal = width;
 
         return new(cell, width, supported, simple, widths.Simple.HasValue,
-            widths.Normal ?? width, widths.Simple ?? width);
+            allowed, prioritized, priority, widths.Normal ?? width, widths.Simple ?? width);
     }
 
     private static double Width(CellState state, bool simple) =>
-        simple && state.SimpleSupported ? state.SimpleWidth : state.NormalWidth;
+        simple && state.SimpleSupported && state.SimpleAllowed ? state.SimpleWidth : state.NormalWidth;
 
     private TrayPresentationPlan Plan(bool overflow, IReadOnlyList<CellState> main,
         IReadOnlyList<CellState> overflowCells, double capacityDip, IReadOnlyCollection<string>? simpleKeys = null)
@@ -177,7 +222,7 @@ internal sealed class TrayPresentationPlanner
         var requests = new List<TrayModeRequest>();
         foreach (var state in main.Concat(overflowCells))
         {
-            bool simple = state.SimpleSupported && simpleKeys.Contains(state.Key);
+            bool simple = state.SimpleSupported && state.SimpleAllowed && simpleKeys.Contains(state.Key);
             if (state.Simple != simple)
                 requests.Add(new(state.Key, simple));
         }

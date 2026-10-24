@@ -1,5 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Pagurian.Sdk;
 using Windows.Foundation;
 
 namespace Pagurian.Modules.Copilot;
@@ -12,7 +13,15 @@ internal static class SessionCellLayout
     internal const double IconDip = 16;
     internal const double GapDip = 4;
     internal const double PaddingDip = 8;
+    internal const double SimpleFontSizeDip = 12;
+    internal const double SimplePaddingDip = 6;
     internal const string CaptionStyle = "CaptionTextBlockStyle";
+
+    // Matches MetricsCell's content width: the worst-case percent caption plus
+    // its horizontal padding. Measured rather than hardcoded so font/text-scale
+    // changes move both cells together.
+    internal static double SimpleWidth =>
+        TextMeasurement.MeasureWidth("100%", SimpleFontSizeDip) + 2 * SimplePaddingDip;
 
     internal static double LargeWidth => MeasureWidth(CopilotSessionIconSize.Large);
 

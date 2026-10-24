@@ -366,6 +366,21 @@ the system window-text brush. The host's tooltip callback exposes full
 name/cwd. The three client icons deploy with the module and resolve with
 `ModuleAssets`, never from developer installation/download paths.
 
+When its surface lacks taskbar width, `Copilot Sessions` is the first shell
+using host Simple mode. Only aggregate **Done or Idle** cells may compact;
+Working, Blocked and Unknown always render their configured Medium/Large cell.
+The reducer records when each aggregate entered Done/Idle (`InactiveSince`);
+Done and Idle are both inactive, so acknowledging Done does not reset the time,
+while resumed Work or a committed Block clears it until the next inactive
+transition. Each Shell instance keeps its own Simple flag on
+`CopilotSessionCellModel`, and the host planner compacts the oldest inactive
+cells first within that Shell. A compact cell is fixed to the same measured
+content width as the Metrics CPU/MEM cells (the `100%` caption width plus 12
+DIP horizontal padding), renders only the 16-DIP client icon above the cwd
+basename, and tail-ellipsizes that basename. Restoring Normal mode returns to
+the configured Medium or Large presentation; the separate Copilot SDK shell
+does not compact.
+
 The billboard has a 600-DIP width and 640-DIP content ceiling with a bounded
 scroll viewport below the header. Its overview/header uses aggregate status.
 Its session tree is a selectable single-line list: each row reuses the tray
@@ -467,7 +482,9 @@ BillboardSession in isolated nonactivating windows, without starting the
 Copilot tracker, loading user configuration or installing hooks. It checks
 icon-size parsing/preservation, Medium compatibility, live Large-to-Medium
 updates, exact 1.6x Large width, two-row bounds, finite-column ellipsis,
-the four Large status icons, accessibility names, equal variant widths,
+the four Large status icons, compact Done/Idle presentation with the Metrics
+cell width, Working's immediate Normal restoration, accessibility names,
+equal variant widths,
 bounded scrolling, local-vs-group state, absence of the permanently-unavailable
 context rows, single-line tree rows with per-row status words, selection
 following the tree, per-node recent-hook scoping, expansion/selection

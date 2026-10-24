@@ -26,3 +26,10 @@ state, make `SetSimpleMode` idempotent, and raise the model's existing
 and the host can re-measure. Models that do not implement the interface are
 always Normal. The host owns when the mode is requested; the model owns what
 Simple mode looks like.
+
+A model that can be Simple only in some states, or that wants the host to
+prefer certain cells first, may also implement `IShellCellSimpleModePolicy`:
+`CanUseSimpleMode = false` keeps that cell in Normal mode, while
+`SimpleModePriority` orders eligible cells within their owning Shell (smaller
+values first; ties keep tray order). The policy never changes Shell order,
+visual cell order or overflow order.

@@ -18,6 +18,7 @@ using Windows.Foundation;
 using Windows.Graphics;
 using static Microsoft.UI.Reactor.Factories;
 using XamlButton = Microsoft.UI.Xaml.Controls.Button;
+using XamlImage = Microsoft.UI.Xaml.Controls.Image;
 using XamlText = Microsoft.UI.Xaml.Controls.TextBlock;
 
 // Production components + host preparation, but no CopilotShell.Startup, tracker,
@@ -45,7 +46,8 @@ sealed class CellProbe(
     string project,
     string name,
     bool isLarge,
-    bool hasProjectBoundaries)
+    bool hasProjectBoundaries,
+    bool isSimple = false)
 {
     public ShellCellProps Props { get; } = props;
     public string Status { get; } = status;
@@ -53,19 +55,24 @@ sealed class CellProbe(
     public string Name { get; } = name;
     public bool IsLarge { get; set; } = isLarge;
     public bool HasProjectBoundaries { get; } = hasProjectBoundaries;
+    public bool IsSimple { get; } = isSimple;
     public FrameworkElement? Root;
 }
 
-sealed class CellsView(IReadOnlyList<CellProbe> cells) : Component
+sealed class CellsView(IReadOnlyList<CellProbe> cells, Element? trailing) : Component
 {
-    public override Element Render() => VStack(0,
-        Enumerable.Range(0, (int)Math.Ceiling(cells.Count / 5.0)).Select(row =>
-            HStack(0, cells.Skip(row * 5).Take(5).Select(cell =>
+    public override Element Render()
+    {
+        Element[] rows = Enumerable.Range(0, (int)Math.Ceiling(cells.Count / 5.0))
+            .Select(row => (Element)HStack(0, cells.Skip(row * 5).Take(5).Select(cell =>
                 Border(new ComponentElement(Harness.Type("SessionCell"), cell.Props))
                     .Height(48)
                     .OnMount(root => cell.Root = root)
                     .WithKey(cell.Props.Model!.GetHashCode().ToString())).ToArray())
-                .WithKey(row.ToString())).ToArray());
+                .WithKey(row.ToString()))
+            .ToArray();
+        return VStack(0, trailing is null ? rows : rows.Append(trailing).ToArray());
+    }
 }
 
 sealed class Harness
@@ -88,7 +95,11 @@ sealed class Harness
     private string[] _childHookLines = [];
     private string[] _grandchildHookLines = [];
     private CellProbe _switchingLargeCell = null!;
+    private CellProbe _simpleMediumCell = null!;
+    private CellProbe _simpleLargeCell = null!;
+    private FrameworkElement? _metricRoot;
     private double _mediumWidth;
+    private double _simpleWidth;
     private int _checks;
     private bool _finished;
     private nint _foreground;
@@ -135,6 +146,7 @@ sealed class Harness
                 .SetValue(_sdkShell, _sdkService);
             VerifyIconSizeSettings();
             VerifySdkEventRevisions();
+            VerifySimpleModeModel();
             foreach (string status in new[] { "Idle", "Working", "Blocked", "Unknown" })
             foreach (string client in new[] { "App", "Cli", "VSCode", "Other", "Unknown" })
                 _cells.Add(CreateCell(status, client, false,
@@ -149,18 +161,46 @@ sealed class Harness
                 if (status == "Working")
                     _switchingLargeCell = cell;
             }
+            _simpleMediumCell = CreateSimpleCell("Idle", "App", false,
+                "A very long project name that must be ellipsized", "Simple medium fixture");
+            _simpleLargeCell = CreateSimpleCell("Done", "Cli", true,
+                "A very long project name that must be ellipsized", "Simple large fixture");
+            _cells.Add(_simpleMediumCell);
+            _cells.Add(_simpleLargeCell);
             _cellWindow = ReactorApp.OpenWindow(new WindowSpec
             {
-                Title = "Isolated Copilot presentation fixture", Width = 720, Height = 240,
+                Title = "Isolated Copilot presentation fixture", Width = 720, Height = 280,
                 NoActivate = true, ActivateOnOpen = false, ShowInTaskbar = false,
                 ShowInSwitcher = false, Style = WindowStyle.None,
-            }, () => new CellsView(_cells));
+            }, () => new CellsView(_cells, MetricsProbe()));
             _cellWindow.Show();
             OpenBillboard();
             _steps.Enqueue(CheckCells);
+            _steps.Enqueue(CheckSimpleCells);
+            _steps.Enqueue(() => SetSimpleStatus(_simpleMediumCell, "Working"));
             _steps.Enqueue(() =>
             {
-                _mediumWidth = _cells.First(cell => !cell.IsLarge).Root!.ActualWidth;
+                Require(Math.Abs(_simpleMediumCell.Root!.ActualWidth - _mediumWidth) < .5,
+                    "A compact session that resumed Work stayed compact");
+                SetSimpleStatus(_simpleMediumCell, "Idle");
+                ((IShellCellSimpleMode)_simpleMediumCell.Props.Model!).SetSimpleMode(true);
+            });
+            _steps.Enqueue(() =>
+            {
+                Require(Math.Abs(_simpleMediumCell.Root!.ActualWidth - _simpleWidth) < .5,
+                    "An idle session did not return to compact width");
+                ((IShellCellSimpleMode)_simpleLargeCell.Props.Model!).SetSimpleMode(false);
+            });
+            _steps.Enqueue(() =>
+            {
+                Require(Math.Abs(_simpleLargeCell.Root!.ActualWidth / _mediumWidth - 1.6) < .01,
+                    "Leaving compact mode did not restore the configured Large width");
+                ((IShellCellSimpleMode)_simpleLargeCell.Props.Model!).SetSimpleMode(true);
+            });
+            _steps.Enqueue(CheckSimpleCells);
+            _steps.Enqueue(() =>
+            {
+                _mediumWidth = _cells.First(cell => !cell.IsLarge && !cell.IsSimple).Root!.ActualWidth;
                 SetIconSize(_switchingLargeCell, "Medium");
                 _switchingLargeCell.IsLarge = false;
             });
@@ -399,6 +439,39 @@ sealed class Harness
             isLarge);
     }
 
+    private CellProbe CreateSimpleCell(
+        string status,
+        string client,
+        bool isLarge,
+        string project,
+        string name)
+    {
+        var session = New("CopilotSession");
+        Set(session, "SessionId", $"fixture-simple-{status}-{client}-{isLarge}");
+        Set(session, "Name", name);
+        Set(session, "Cwd", @"D:\fixture\" + project);
+        Set(session, "ProjectName", project);
+        Set(session, "Client", EnumValue("CopilotClientKind", client));
+        Set(session, "Status", EnumValue("CopilotSessionStatus", status));
+        object model = New("CopilotSessionCellModel", session,
+            EnumValue("CopilotSessionIconSize", isLarge ? "Large" : "Medium"));
+        ((IShellCellSimpleMode)model).SetSimpleMode(true);
+        return new(new(_shell, model, null, null, null), status, project, name, isLarge,
+            false, isSimple: true);
+    }
+
+    private Element MetricsProbe()
+    {
+        var assembly = Assembly.Load("Pagurian.Modules.Metrics");
+        var view = assembly.GetType("Pagurian.Modules.Metrics.MetricsCell", true)!;
+        var kind = assembly.GetType("Pagurian.Modules.Metrics.SystemMetricKind", true)!;
+        var model = Enum.Parse(kind, "Cpu");
+        return HStack(0, new ComponentElement(view, new ShellCellProps(_shell, model, null, null, null))
+                .Height(48)
+                .OnMount(root => _metricRoot = root))
+            .WithKey("metrics-cpu-probe");
+    }
+
     private static void SetIconSize(CellProbe cell, string size) =>
         cell.Props.Model!.GetType().GetMethod("SetIconSize")!.Invoke(
             cell.Props.Model, [EnumValue("CopilotSessionIconSize", size)]);
@@ -446,6 +519,29 @@ sealed class Harness
 
     private static object SdkEvent(string id) => New("CopilotSdkPersistedEvent",
         id, DateTimeOffset.UtcNow, "turn.completed", null, null, null, null, false, "Completed");
+
+    private void VerifySimpleModeModel()
+    {
+        var session = New("CopilotSession");
+        Set(session, "SessionId", "fixture-simple-model");
+        var since = DateTimeOffset.Parse("2026-09-12T04:05:06Z");
+        Set(session, "Status", EnumValue("CopilotSessionStatus", "Idle"));
+        Set(session, "InactiveSince", since);
+        var model = New("CopilotSessionCellModel", session, EnumValue("CopilotSessionIconSize", "Medium"));
+        var mode = (IShellCellSimpleMode)model;
+        var policy = (IShellCellSimpleModePolicy)model;
+        Require(policy.CanUseSimpleMode && policy.SimpleModePriority == since.UtcTicks,
+            "Idle model policy does not expose its inactivity order");
+        mode.SetSimpleMode(true);
+        Require(mode.IsSimpleMode, "Idle model refused compact mode");
+        Set(session, "Status", EnumValue("CopilotSessionStatus", "Working"));
+        model.GetType().GetMethod("EnforceSimpleModeEligibility",
+            BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(model, null);
+        Require(!policy.CanUseSimpleMode && !mode.IsSimpleMode,
+            "Working model retained compact mode");
+        mode.SetSimpleMode(true);
+        Require(!mode.IsSimpleMode, "Working model accepted compact mode");
+    }
 
     private void VerifyIconSizeSettings()
     {
@@ -554,12 +650,55 @@ sealed class Harness
         _billboard.Start();
     }
 
+    private void CheckSimpleCells()
+    {
+        Require(_metricRoot is not null, "Metrics comparison cell did not mount");
+        double metricWidth = _metricRoot!.DesiredSize.Width;
+        _mediumWidth = _cells.First(cell => !cell.IsLarge && !cell.IsSimple).Root!.ActualWidth;
+        foreach (var cell in _cells.Where(cell => cell.IsSimple))
+        {
+            var root = cell.Root!;
+            Require(Math.Abs(root.ActualWidth - metricWidth) < .5,
+                $"compact cell width ({root.ActualWidth}) does not match the Metrics cell ({metricWidth})");
+            var labels = Descendants<XamlText>(root).ToArray();
+            Require(labels.Length == 1 && labels[0].Text == cell.Project,
+                "compact cell renders text other than the project name");
+            var project = labels[0];
+            Require(project.TextWrapping == TextWrapping.NoWrap &&
+                    project.TextTrimming == TextTrimming.CharacterEllipsis &&
+                    project.IsTextTrimmed,
+                "compact project name is not tail-ellipsized");
+            var icon = Descendants<XamlImage>(root).Single();
+            var iconPoint = icon.TransformToVisual(root).TransformPoint(new Point());
+            var projectPoint = project.TransformToVisual(root).TransformPoint(new Point());
+            Require(projectPoint.Y >= iconPoint.Y + icon.ActualHeight - 1,
+                "compact project is not below the client icon");
+            Require(projectPoint.Y + project.ActualHeight <= 49, "compact cell exceeds taskbar slot");
+            Require(Descendants<FrameworkElement>(root).Any(element =>
+                    AutomationProperties.GetName(element) == $"{cell.Name}, {cell.Status}, {cell.Project}"),
+                "compact cell lost its full accessibility name");
+        }
+        _simpleWidth = _simpleMediumCell.Root!.ActualWidth;
+    }
+
+    private static void SetSimpleStatus(CellProbe cell, string status)
+    {
+        var model = cell.Props.Model!;
+        var session = model.GetType().GetProperty("Session")!.GetValue(model)!;
+        Set(session, "Status", EnumValue("CopilotSessionStatus", status));
+        model.GetType().GetMethod("EnforceSimpleModeEligibility",
+            BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(model, null);
+        session.GetType().GetMethod("NotifyChanged", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(session, null);
+    }
+
     private void CheckCells()
     {
         var mediumWidths = new List<double>();
         var largeWidths = new List<double>();
         foreach (var cell in _cells)
         {
+            if (cell.IsSimple) continue;
             var root = cell.Root!;
             var labels = Descendants<XamlText>(root).ToArray();
             var project = labels.Single(text => text.Text == cell.Project);

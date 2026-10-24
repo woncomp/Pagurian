@@ -13,6 +13,7 @@
     <PackageReference Include="Microsoft.UI.Reactor" Version="0.1.0-preview.12" />
     <ProjectReference Include="..\..\..\Pagurian.Sdk\Pagurian.Sdk.csproj" />
     <ProjectReference Include="..\..\..\Pagurian.Modules.Copilot\Pagurian.Modules.Copilot.csproj" />
+    <ProjectReference Include="..\..\..\Pagurian.Modules.Metrics\Pagurian.Modules.Metrics.csproj" />
     <Compile Include="..\..\..\Pagurian\BillboardSession.cs" Link="BillboardSession.cs" />
     <Content Include="..\..\..\Pagurian.Modules.Copilot\Assets\*.png"
              Link="Assets\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />

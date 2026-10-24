@@ -87,6 +87,8 @@ public sealed class CopilotShell : Shell
 
     private void OnTrackerChanged()
     {
+        foreach (var model in _cellModels.Values)
+            model.EnforceSimpleModeEligibility();
         foreach (var dismissed in _visibility.DismissedSessions)
             if (CopilotSessionTracker.Find(dismissed.SessionId) is { } session)
                 OnSessionStarted(session);

@@ -52,17 +52,42 @@ class SessionCell : ShellCell
         Brush statusBrush = highContrast
             ? (Brush)Application.Current.Resources["SystemColorWindowTextColorBrush"]
             : CopilotStatusColors.StatusBrushFor(session, Theme.IsDark);
-        Element content = iconSize == CopilotSessionIconSize.Large
-            ? LargeContent(session, statusBrush)
-            : MediumContent(session, highContrast, statusBrush);
+        bool simple = cellModel?.IsSimpleMode == true;
+        Element content = simple
+            ? SimpleContent(session, highContrast)
+            : iconSize == CopilotSessionIconSize.Large
+                ? LargeContent(session, statusBrush)
+                : MediumContent(session, highContrast, statusBrush);
 
         return Border(content)
-            .Width(SessionCellLayout.MeasureWidth(iconSize))
-            .Padding(iconSize == CopilotSessionIconSize.Large ? 0 : SessionCellLayout.PaddingDip, 0)
+            .Width(simple ? SessionCellLayout.SimpleWidth : SessionCellLayout.MeasureWidth(iconSize))
+            .Padding(simple ? SessionCellLayout.SimplePaddingDip
+                : iconSize == CopilotSessionIconSize.Large ? 0 : SessionCellLayout.PaddingDip, 0)
             .RequestedTheme(highContrast ? ElementTheme.Default
                 : Theme.IsDark ? ElementTheme.Dark : ElementTheme.Light)
             .AutomationName($"{session.Name}, {session.Status}, {session.ProjectName}");
     }
+
+    private static Element SimpleContent(CopilotSession session, bool highContrast) =>
+        Grid([GridSize.Star()], [GridSize.Auto, GridSize.Auto],
+            Image(CopilotModule.ClientIconPath(session.Client))
+                .Width(SessionCellLayout.IconDip)
+                .Height(SessionCellLayout.IconDip)
+                .AccessibilityHidden()
+                .HAlign(HorizontalAlignment.Center)
+                .VAlign(VerticalAlignment.Center)
+                .Grid(row: 0),
+            TextBlock(session.ProjectName)
+                .ApplyStyle(SessionCellLayout.CaptionStyle)
+                .MaxLines(1)
+                .TextWrapping(TextWrapping.NoWrap)
+                .TextTrimming(TextTrimming.CharacterEllipsis)
+                .TextAlignment(TextAlignment.Center)
+                .Foreground(highContrast
+                    ? ReactorTheme.Ref("SystemColorWindowTextColorBrush")
+                    : ReactorTheme.PrimaryText)
+                .Grid(row: 1))
+            .VAlign(VerticalAlignment.Center);
 
     private static Element MediumContent(
         CopilotSession session,

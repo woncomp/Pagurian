@@ -96,15 +96,21 @@ both anchor sides.
 Each surface owns a `TrayPresentationPlanner`. Cell models may opt into a
 narrower presentation by implementing `Pagurian.Sdk.IShellCellSimpleMode`; the
 host calls its idempotent setter on the UI thread and waits for the Reactor
-render/re-measure before deciding the next step. When Normal content fits,
-nothing is simplified. Otherwise cells are simplified one at a time in anchor
-order until the row fits. If every supported cell is Simple and the row still
-does not fit, the surface enters overflow: the host-owned 32-DIP arrow occupies
-the anchor-end slot, complete cells fill the remaining space from the anchor,
-and the first non-fitting cell plus everything after it move to overflow. A
-later narrower cell never jumps ahead. Overflow cells return to Normal mode;
-only cells retained in the main row may stay Simple. If the arrow itself cannot
-fit, the surface hides but Shells and `post` keep running.
+render/re-measure before deciding the next step. A model may also implement
+`IShellCellSimpleModePolicy`: ineligible cells are never simplified (and an
+already-Simple cell that becomes ineligible is restored to Normal), while
+`SimpleModePriority` reorders eligible candidates **within their owning Shell**
+only. Copilot Sessions is the first user: its oldest Done/Idle session cells
+compact first, and Working/Blocked/Unknown cells always stay Normal. When
+Normal content fits, nothing is simplified. Otherwise eligible cells are
+simplified one at a time — policy order inside a Shell, Shell order otherwise —
+until the row fits. If every eligible cell is Simple and the row still does not
+fit, the surface enters overflow: the host-owned 32-DIP arrow occupies the
+anchor-end slot, complete cells fill the remaining space from the anchor, and
+the first non-fitting cell plus everything after it move to overflow. A later
+narrower cell never jumps ahead. Overflow cells return to Normal mode; only
+cells retained in the main row may stay Simple. If the arrow itself cannot fit,
+the surface hides but Shells and `post` keep running.
 
 Clicking the arrow opens one top-level overflow tray per surface. Its height
 matches the owning taskbar thickness and its width is the Normal-mode natural
@@ -123,8 +129,8 @@ content never responds to input.
 arrow geometry and open overflow window. `-Geometry` probes the live primary
 taskbar through the production observer and fails unless both islands resolve.
 Pure planner cases cover Normal fit, unknown Simple widths, sequential
-simplification, all-Simple overflow, the first-non-fit rule and the
-unaffordable-arrow fallback.
+simplification, policy priority and eligibility, all-Simple overflow, the
+first-non-fit rule, stale-request recovery and the unaffordable-arrow fallback.
 
 DPI falls out of the existing math (surface scale is the measured taskbar
 thickness ÷ 48 DIP). Tooltips flip against the owning display's monitor rect —

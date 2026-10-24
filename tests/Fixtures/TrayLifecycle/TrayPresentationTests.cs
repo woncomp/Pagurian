@@ -10,16 +10,30 @@ static class TrayPresentationTests
         public void SetSimpleMode(bool simple) => Simple = simple;
     }
 
+    sealed class PolicyModel : IShellCellSimpleMode, IShellCellSimpleModePolicy
+    {
+        internal bool Simple;
+        internal bool Allowed = true;
+        internal long Priority;
+        public bool IsSimpleMode => Simple;
+        public void SetSimpleMode(bool simple) => Simple = simple;
+        public bool CanUseSimpleMode => Allowed;
+        public long SimpleModePriority => Priority;
+    }
+
     internal static void Run()
     {
         static void Require(bool condition, string message)
         {
             if (!condition) throw new InvalidOperationException(message);
         }
-        static ShellCellHandle Cell(string key, object? model = null) =>
-            new(key, typeof(object), new(new PlannerShell(), model, null, null, null));
+        static ShellCellHandle Cell(string key, object? model = null, Shell? owner = null) =>
+            new(key, typeof(object), new(owner ?? new PlannerShell(), model, null, null, null));
         static (ShellCellHandle Cell, double Width)[] Cells(params (string Key, double Width, object? Model)[] cells) =>
             [.. cells.Select(cell => (Cell(cell.Key, cell.Model), cell.Width))];
+        static (ShellCellHandle Cell, double Width)[] GroupedCells(
+            params (string Key, double Width, object? Model, Shell? Owner)[] cells) =>
+            [.. cells.Select(cell => (Cell(cell.Key, cell.Model, cell.Owner), cell.Width))];
         static bool Supports(TrayModeRequest[] requests, string key, bool simple) =>
             requests.Any(request => request.Key == key && request.Simple == simple);
 
@@ -84,6 +98,86 @@ static class TrayPresentationTests
         onlySecond.Simple = true;
         plan = planner.Measure(Cells(("a", 60, null), ("b", 30, onlySecond)), 100);
         Require(!plan.Pending && !plan.Overflow, "supported simple choice did not fit");
+
+        // Inside one Shell, policy priority beats anchor order: the oldest
+        // eligible cell is simplified first. Equal priorities stay anchored.
+        planner = new(32);
+        var shell = new PlannerShell();
+        var oldest = new PolicyModel { Priority = 10 };
+        var newest = new PolicyModel { Priority = 20 };
+        var tied = new PolicyModel { Priority = 20 };
+        plan = planner.Measure(
+            GroupedCells(("new", 60, newest, shell), ("old", 60, oldest, shell), ("tie", 60, tied, shell)), 160);
+        Require(plan.Pending && Supports([.. plan.Requests], "old", true) &&
+                !Supports([.. plan.Requests], "new", true) && !Supports([.. plan.Requests], "tie", true),
+            "policy priority did not simplify the oldest cell first");
+        oldest.Simple = true;
+        plan = planner.Measure(
+            GroupedCells(("new", 60, newest, shell), ("old", 30, oldest, shell), ("tie", 60, tied, shell)), 160);
+        Require(!plan.Pending && !plan.Overflow, "oldest-first simple choice did not fit");
+
+        // Shell order still wins over another Shell's older cell.
+        planner = new(32);
+        var firstShell = new PlannerShell();
+        var secondShell = new PlannerShell();
+        var firstShellCell = new PolicyModel { Priority = 20 };
+        var secondShellCell = new PolicyModel { Priority = 10 };
+        plan = planner.Measure(GroupedCells(
+            ("first", 60, firstShellCell, firstShell), ("second", 60, secondShellCell, secondShell)), 100);
+        Require(plan.Pending && Supports([.. plan.Requests], "first", true),
+            "priority leaked across Shell boundaries");
+
+        // An ineligible cell is never simplified. If it is still marked Simple
+        // from an earlier epoch, the next plan asks it back to Normal.
+        planner = new(32);
+        var ineligibleShell = new PlannerShell();
+        var ineligible = new PolicyModel { Allowed = false, Simple = true };
+        plan = planner.Measure(GroupedCells(("working", 30, ineligible, ineligibleShell)), 100);
+        Require(plan.Pending && Supports([.. plan.Requests], "working", false),
+            "ineligible Simple cell was not restored to Normal");
+        ineligible.Simple = false;
+        plan = planner.Measure(GroupedCells(("working", 60, ineligible, ineligibleShell)), 30);
+        Require(plan.Overflow && !Supports([.. plan.Requests], "working", true),
+            "ineligible cell was simplified for overflow");
+
+        // Overflow planning keeps an ineligible main-row cell in Normal width;
+        // only the eligible cell may remain Simple beside the arrow.
+        planner = new(32);
+        var overflowShell = new PlannerShell();
+        var eligible = new PolicyModel();
+        var blocked = new PolicyModel { Allowed = false };
+        plan = planner.Measure(GroupedCells(
+            ("idle", 60, eligible, overflowShell), ("blocked", 60, blocked, overflowShell)), 70);
+        Require(plan.Pending && Supports([.. plan.Requests], "idle", true),
+            "overflow planning skipped the eligible Simple width");
+        eligible.Simple = true;
+        plan = planner.Measure(GroupedCells(
+            ("idle", 30, eligible, overflowShell), ("blocked", 60, blocked, overflowShell)), 70);
+        Require(plan.Overflow && plan.MainKeys.SequenceEqual(["idle"]) &&
+                plan.OverflowCells.Select(cell => cell.Key).SequenceEqual(["blocked"]),
+            "ineligible overflow cell did not stay Normal");
+        Require(Math.Abs(plan.MainWidthDip - 62) < .001,
+            "overflow width did not use the ineligible Normal width");
+
+        // A stale Simple request against a cell that became ineligible is
+        // dropped, and repeated drops never mark the mode unsupported.
+        var layout = new TaskbarTrayLayout();
+        var stale = new PolicyModel { Allowed = false };
+        layout.SetCells([Cell("stale", stale)]);
+        var stalePlan = new TrayPresentationPlan(
+            Pending: true, Overflow: false, MainKeys: ["stale"], OverflowCells: [],
+            MainWidthDip: 60, CapacityDip: 60, ArrowWidthDip: 0,
+            Requests: [new("stale", true)]);
+        for (int attempt = 0; attempt < 4; attempt++)
+            layout.ApplyRequests(stalePlan);
+        Require(!stale.Simple, "stale request simplified an ineligible cell");
+        var livePlanner = (TrayPresentationPlanner)typeof(TaskbarTrayLayout)
+            .GetField("_presentation", System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.NonPublic)!.GetValue(layout)!;
+        stale.Allowed = true;
+        var recovered = livePlanner.Measure(Cells(("stale", 60, stale)), 30);
+        Require(recovered.Pending && Supports([.. recovered.Requests], "stale", true),
+            "dropped stale requests marked Simple mode unsupported");
     }
 
     sealed class PlannerShell : Shell { }

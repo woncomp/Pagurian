@@ -47,6 +47,9 @@ sealed class CopilotSession
     public string Name { get; set; } = "";
     public bool NameResolved { get; set; }
     public CopilotSessionStatus Status { get; set; }
+    // Reducer-clock time this aggregate entered Done/Idle. Done and Idle are both
+    // inactive, so acknowledging Done never resets it.
+    public DateTimeOffset? InactiveSince { get; set; }
     public long EventRevision { get; set; }
     public CopilotSessionStatus? PendingStatus { get; set; }
     public DateTimeOffset PendingStatusSince { get; set; }
@@ -424,11 +427,9 @@ sealed class CopilotSessionState
                         var candidate = active.Any(s => s.Blocker is not null) ? CopilotSessionStatus.Blocked
                             : active.Any(s => s.Status == CopilotSessionStatus.Working) ? CopilotSessionStatus.Working
                             : CopilotSessionStatus.Idle;
-                        if (cell.Status != candidate) cell.Status = CopilotSessionStatus.Idle;
+                        SetAggregateStatus(cell, CopilotSessionStatus.Idle, _clock(), restartInactivity: true);
                         if (cell.PendingStatus != candidate || cell.PendingStatusSince < floor)
                             cell.PendingStatus = null;
-                        if (cell.Status != CopilotSessionStatus.Idle)
-                            cell.Status = CopilotSessionStatus.Idle;
                     }
                     Trace(owner, new("appRestore", owner.Identity.SourceId, entry.At, ""),
                         CopilotSessionStatus.Idle, "app-runtime-restored");
@@ -840,15 +841,31 @@ sealed class CopilotSessionState
         if (candidate != CopilotSessionStatus.Blocked)
         {
             session.PendingStatus = null;
-            session.Status = candidate;
+            SetAggregateStatus(session, candidate, now);
         }
         else if (candidate == session.Status)
+        {
             session.PendingStatus = null;
+            SetAggregateStatus(session, candidate, now);
+        }
         else if (session.PendingStatus != candidate)
         {
             session.PendingStatus = candidate;
             session.PendingStatusSince = now;
         }
+    }
+
+    private static void SetAggregateStatus(CopilotSession session, CopilotSessionStatus status,
+        DateTimeOffset now, bool restartInactivity = false)
+    {
+        session.Status = status;
+        if (status is CopilotSessionStatus.Idle or CopilotSessionStatus.Done)
+        {
+            if (restartInactivity || session.InactiveSince is null)
+                session.InactiveSince = now;
+        }
+        else
+            session.InactiveSince = null;
     }
 
     public bool CommitStableStatuses()
@@ -861,7 +878,7 @@ sealed class CopilotSessionState
                 now - session.PendingStatusSince < BlockedDebounce)
                 continue;
             session.PendingStatus = null;
-            session.Status = CopilotSessionStatus.Blocked;
+            SetAggregateStatus(session, CopilotSessionStatus.Blocked, now);
             changed = true;
         }
         return changed;

@@ -80,6 +80,8 @@ internal static class AppLifecycleFixture
         state.Resolve([], Snapshot(2, 11, two, ("other", CopilotArchiveState.Live, 2)));
         Check(state.Sessions.Count == 3 && state.Find("history") is null, "Only loaded roots restored");
         Check(state.Sessions.All(s => s.Status == CopilotSessionStatus.Idle), "Restoration initially Idle");
+        Check(state.Sessions.All(s => s.InactiveSince is not null),
+            "Restoration records a fresh inactive timestamp");
         state.Resolve([], Snapshot(3, 12, null, ("root", CopilotArchiveState.Unknown, null)));
         Check(state.Find("root") is not null, "Unknown DB/process evidence retains visible group");
         state.Resolve([], Snapshot(4, 13, null, ("root", CopilotArchiveState.Live, null)));
@@ -93,7 +95,7 @@ internal static class AppLifecycleFixture
         state.Resolve([], Snapshot(6, 16, one, ("root", CopilotArchiveState.Live, 1)));
         Check(state.Find("root") is null, "Unarchive with old load cannot reopen");
         state.Resolve([], Snapshot(7, 18, one, ("root", CopilotArchiveState.Live, 17)));
-        Check(state.Find("root") is { Status: CopilotSessionStatus.Idle, BlockingSources.Count: 0 },
+        Check(state.Find("root") is { Status: CopilotSessionStatus.Idle, BlockingSources.Count: 0, InactiveSince: not null },
             "Unarchive with new positive load resets stale task work");
         state.Resolve([], new(8, Time.AddSeconds(20), [], [one]));
         Check(state.Find("root") is null && state.Find("shared") is null && state.Find("other") is not null,

@@ -263,9 +263,12 @@ Reactor package versions must match exactly. See `docs/External-Modules.md`.
 - `TaskbarTrayLayout.cs`: per-window cell refs and immutable measured
   snapshots shared by native positioning, hit-testing and billboard anchors.
   `TrayPresentationPlanner` uses observed taskbar content/system-area bounds,
-  optional `IShellCellSimpleMode` models and per-surface anchor order to choose
-  Normal/Simple/main/overflow sets; `OverflowTrayWindow`/`OverflowTraySession`
-  present overflow cells in a Billboard-style top-level strip.
+  optional `IShellCellSimpleMode` models, optional `IShellCellSimpleModePolicy`
+  eligibility/priority (in-Shell only; ineligible cells always stay Normal, and
+  stale Simple requests are dropped rather than marked stuck) and per-surface
+  anchor order to choose Normal/Simple/main/overflow sets;
+  `OverflowTrayWindow`/`OverflowTraySession` present overflow cells in a
+  Billboard-style top-level strip.
 - `TrayWindowSession.cs`: persistent HWND, hidden preparation, injection,
   coalesced layout commits and a rendered/DwmFlush presentation gate. One
   session per surface; sampled luminance feeds the owning surface's theme
@@ -493,7 +496,13 @@ public sealed class MyShell : Shell
 - **Copilot session presentation/details**: two caption rows (client icon +
   aggregate status, then cwd basename) share a WinUI-measured status-based width;
   finite Grid columns ellipsize project names, and the host tooltip exposes cwd.
-  Icons deploy under module `Assets` and use `ModuleAssets`. The billboard
+  Icons deploy under module `Assets` and use `ModuleAssets`. Under taskbar
+  capacity pressure, Copilot Sessions is the first Simple-mode shell: only
+  Done/Idle cells compact (oldest `InactiveSince` first, Done↔Idle does not
+  reset it; Working/Blocked/Unknown never compact), each Shell owns its
+  per-model Simple flag, and compact cells use the Metrics `100%`-caption width
+  with only a client icon over the cwd basename. The separate Copilot SDK shell
+  does not compact. The billboard
   header aggregates, its session tree is a selectable single-line list (the
   shared tray-cell status-icon vocabulary — spinning ring for Working, ring +
   glyph otherwise — plus a per-row status word, and any non-Active lifecycle

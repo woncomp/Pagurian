@@ -16,6 +16,7 @@ var tests = new (string Name, Action Run)[]
     ("ask_user blocks its source until tool completion", AskUserBlocked),
     ("working child overrides idle parent", AggregatePriority),
     ("Done falls back to Idle on acknowledgement", DonePriority),
+    ("inactive timestamps order compact candidates", InactiveSince),
     ("dismissed cells wait for new owner events", DismissedCellEvents),
     ("sessionStart is not a completion", SessionStartIsNotDone),
     ("App turn completion retains Done status", AppTurnCompletionRetainsDone),
@@ -345,6 +346,42 @@ static void DonePriority()
     Check(r.Cell().Status == CopilotSessionStatus.Done, "Another completion re-enters Done");
     r.Event("sessionEnd", "root");
     Check(r.Cell().Status == CopilotSessionStatus.Done, "Session end also completes to Done");
+}
+
+static void InactiveSince()
+{
+    var r = new Rig(); r.Group();
+    r.Event("sessionStart", "root");
+    var initial = r.Cell().InactiveSince;
+    Check(initial is not null, "A newly published Idle aggregate records inactivity");
+    r.Event("preToolUse", "a");
+    Check(r.Cell().InactiveSince is null, "Working clears the inactive timestamp");
+    r.Event("agentStop", "a");
+    var done = r.Cell().InactiveSince;
+    Check(r.Cell().Status == CopilotSessionStatus.Done && done > initial,
+        "Done records a fresh inactivity timestamp");
+    r.Advance(500);
+    Check(r.State.AcknowledgeDone("root") && r.Cell().InactiveSince == done,
+        "Acknowledging Done to Idle keeps the inactivity timestamp");
+    r.Event("permissionRequest", "b");
+    Check(r.Cell().Status == CopilotSessionStatus.Idle && r.Cell().InactiveSince == done,
+        "Pending Blocked keeps the visible inactive aggregate until it commits");
+    r.Advance(1000);
+    Check(r.Cell().Status == CopilotSessionStatus.Blocked && r.Cell().InactiveSince is null,
+        "Committed Blocked clears the inactive timestamp");
+    r.Event("postToolUse", "b");
+    r.Event("agentStop", "b");
+    Check(r.Cell().InactiveSince > done, "A later completion records a later timestamp");
+
+    var ordering = new Rig();
+    ordering.Group();
+    ordering.Resolve("cli", "cli", CopilotIdentityKind.Cli);
+    ordering.Event("sessionStart", "root");
+    var first = ordering.Cell("root").InactiveSince;
+    ordering.Event("sessionStart", "cli");
+    var second = ordering.Cell("cli").InactiveSince;
+    Check(first is not null && second is not null && first < second,
+        "Independently published Idle sessions keep their chronological order");
 }
 
 static void SessionStartIsNotDone()

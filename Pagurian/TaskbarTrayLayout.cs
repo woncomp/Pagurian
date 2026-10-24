@@ -59,6 +59,12 @@ internal sealed class TaskbarTrayLayout
         {
             var cell = _cells.FirstOrDefault(candidate => candidate.Key == request.Key);
             if (cell?.Props.Model is not IShellCellSimpleMode mode) continue;
+            // A stale plan can predate a model status change. Never push Simple
+            // into a cell that has become ineligible; the next measurement asks
+            // it back to Normal instead of marking the mode broken.
+            if (request.Simple && cell.Props.Model is IShellCellSimpleModePolicy policy &&
+                !policy.CanUseSimpleMode)
+                continue;
             var attemptKey = (request.Key, request.Simple);
             try
             {

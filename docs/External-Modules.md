@@ -71,6 +71,15 @@ the host must be able to query and request the mode without owning them.
 Cells whose model does not implement the interface remain Normal and can still
 participate in the host's overflow tray.
 
+Models that can be Simple only in some states, or that want eligible cells
+compacted in a model-defined order, may additionally implement
+`Pagurian.Sdk.IShellCellSimpleModePolicy`. `CanUseSimpleMode = false` keeps a
+cell Normal (including in overflow planning), and `SimpleModePriority` orders
+eligible cells inside their owning Shell — smaller values first, ties keep tray
+order. The host drops a stale Simple request if eligibility changed, then asks
+the cell back to Normal on the next plan. The policy never changes Shell order,
+visual cell order or overflow order.
+
 ## Local SDK package
 
 A standalone repository can pin Pagurian as a Git submodule and generate a
